@@ -164,6 +164,22 @@ pub async fn fetch_device_fp(device_id: &str, seed_id: &str, seed_time: &str) ->
         .ok_or_else(|| "getFp 响应缺少 device_fp".to_string())
 }
 
+/// 从响应头 Set-Cookie 中解析指定 Cookie 字段的值。
+fn cookie_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    for v in headers.get_all("set-cookie").iter() {
+        if let Ok(s) = v.to_str() {
+            if let Some(rest) = s.trim().strip_prefix(&prefix) {
+                let val = rest.split(';').next().unwrap_or("").trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 从响应头解析极验数据（x-rpc-aigis）。
 fn extract_aigis(headers: &reqwest::header::HeaderMap) -> Option<Value> {
     let aigis = headers.get("x-rpc-aigis")?;
@@ -248,9 +264,49 @@ pub async fn mihoyo_login_sms(
         .map_err(|e| format!("请求失败: {e}"))?;
     let resp_headers = resp.headers().clone();
     let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    // web 版登录：凭证在 Set-Cookie 中（非 body）。输出全部 Set-Cookie 供诊断。
+    let all_cookies: Vec<String> = resp_headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+        .collect();
+    log::info!("[短信登录] Set-Cookie: {}", all_cookies.join(" | "));
+    log::info!("[短信登录] body: {}", &text[..text.len().min(300)]);
     let json: Value = serde_json::from_str(&text)
         .map_err(|_| format!("响应非 JSON: {}", &text[..text.len().min(200)]))?;
-    parse_mihoyo_login(&json, &resp_headers)
+    // 极验触发。
+    if let Some(a) = extract_aigis(&resp_headers) {
+        return Ok(CredOutcome::NeedCaptcha(a));
+    }
+    if json.get("retcode").and_then(|v| v.as_i64()) != Some(0) {
+        let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("登录失败");
+        return Err(msg.to_string());
+    }
+    // web 版成功：从 Cookie 提取 stoken/mid/uid。
+    let stoken = cookie_value(&resp_headers, "stoken")
+        .or_else(|| cookie_value(&resp_headers, "stoken_v2"))
+        .unwrap_or_default();
+    let mid = cookie_value(&resp_headers, "ltmid")
+        .or_else(|| cookie_value(&resp_headers, "ltmid_v2"))
+        .or_else(|| cookie_value(&resp_headers, "mid"))
+        .or_else(|| cookie_value(&resp_headers, "ltuid"))
+        .or_else(|| cookie_value(&resp_headers, "account_id"))
+        .unwrap_or_default();
+    let uid = cookie_value(&resp_headers, "ltuid")
+        .or_else(|| cookie_value(&resp_headers, "ltuid_v2"))
+        .or_else(|| cookie_value(&resp_headers, "account_id"))
+        .unwrap_or_default();
+    if stoken.is_empty() {
+        return Err(format!(
+            "短信登录成功但未取得 stoken（Cookie: {}）",
+            all_cookies.join(" | ")
+        ));
+    }
+    Ok(CredOutcome::MiyousheOk {
+        uid: if uid.is_empty() { mid.clone() } else { uid },
+        stoken,
+        mid,
+    })
 }
 
 /// 米哈游：密码登录。
