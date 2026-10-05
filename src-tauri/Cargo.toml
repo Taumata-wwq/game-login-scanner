@@ -50,6 +50,8 @@ md-5 = "0.10"
 hex = "0.4"
 rand = "0.8"
 url = "2"
+# 米哈游/B站 密码登录：RSA 公钥加密账号密码（PKCS1_v1_5）
+rsa = { version = "0.9", features = ["sha2"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

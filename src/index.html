@@ -1152,34 +1152,94 @@
       }, 1000);
     } catch (e) { setCredStatus('发送失败: ' + e); }
   });
+  // 待验证上下文：登录触发极验时保存，验证完成后带 aigis 重试。
+  let credPending = null;
+
+  async function doCredLogin(aigis) {
+    const game = curGameId();
+    if (credMode === 'sms') {
+      const phone = $('credPhone').value.trim();
+      const code = $('credCode').value.trim();
+      return invoke('cred_login_sms', { channel: filter, game, phone, code, aigis: aigis || '' });
+    }
+    const account = $('credAccount').value.trim();
+    const password = $('credPassword').value;
+    return invoke('cred_login_pwd', { channel: filter, game, account, password, aigis: aigis || '' });
+  }
+
   $('btnCredLogin').addEventListener('click', async () => {
     setCredStatus('登录中…');
+    $('credCaptchaWrap').hidden = true;
     try {
-      const game = curGameId();
-      let r;
       if (credMode === 'sms') {
-        const phone = $('credPhone').value.trim();
-        const code = $('credCode').value.trim();
-        if (!phone || !code) { setCredStatus('请填写手机号和验证码'); return; }
-        r = await invoke('cred_login_sms', { channel: filter, game, phone, code });
+        if (!$('credPhone').value.trim() || !$('credCode').value.trim()) { setCredStatus('请填写手机号和验证码'); return; }
       } else {
-        const account = $('credAccount').value.trim();
-        const password = $('credPassword').value;
-        if (!account || !password) { setCredStatus('请填写账号和密码'); return; }
-        r = await invoke('cred_login_pwd', { channel: filter, game, account, password });
+        if (!$('credAccount').value.trim() || !$('credPassword').value) { setCredStatus('请填写账号和密码'); return; }
       }
+      const r = await doCredLogin('');
       if (r && r.status === 'captcha') {
+        credPending = r.aigis;
         $('credCaptchaWrap').hidden = false;
         setCredStatus('请完成下方人机验证');
-        $('credCaptcha').textContent = '（人机验证组件待接入）';
+        renderCaptcha(r.aigis);
         return;
       }
-      config = await invoke('get_config');
-      renderAll();
-      $('credOverlay').hidden = true;
-      log((filter === 'official' ? '官服' : 'B 服') + '账号登录成功', 'success');
+      onCredSuccess();
     } catch (e) { setCredStatus('登录失败: ' + e); }
   });
+
+  function onCredSuccess() {
+    invoke('get_config').then((c) => {
+      config = c;
+      renderAll();
+      $('credOverlay').hidden = true;
+      $('credCaptchaWrap').hidden = true;
+      log((filter === 'official' ? '官服' : 'B 服') + '账号登录成功', 'success');
+    });
+  }
+
+  // 极验渲染：动态加载极验 SDK，完成后回传 aigis 重试登录。
+  function renderCaptcha(aigis) {
+    const box = $('credCaptcha');
+    box.textContent = '';
+    const sid = aigis && aigis.session_id ? aigis.session_id : '';
+    const gt = aigis && aigis.data ? (aigis.data.gt || '') : '';
+    const challenge = aigis && aigis.data ? (aigis.data.challenge || '') : '';
+    const captchaId = aigis && aigis.data ? (aigis.data.captcha_id || gt) : gt;
+    if (!captchaId) { box.textContent = '验证参数缺失，请重试'; return; }
+    // 动态加载极验第四代 SDK（GT4）。加载失败时提示。
+    if (!window.initGeetest4) {
+      const s = document.createElement('script');
+      s.src = 'https://static.geetest.com/v4/gt4.js';
+      s.onerror = () => { box.textContent = '极验 SDK 加载失败（网络或 CSP）'; };
+      s.onload = () => initGt4(box, captchaId, sid);
+      document.head.appendChild(s);
+    } else {
+      initGt4(box, captchaId, sid);
+    }
+  }
+  function initGt4(box, captchaId, sid) {
+    try {
+      window.initGeetest4({ captchaId, product: 'bind' }, (captcha) => {
+        captcha.appendTo(box);
+        captcha.onSuccess(() => {
+          const result = captcha.getValidate();
+          if (!result) { setCredStatus('验证结果缺失，请重试'); return; }
+          // 组装 aigis：session_id;base64(验证结果 JSON)。
+          const payload = btoa(unescape(encodeURIComponent(JSON.stringify(result))));
+          const aigisStr = sid + ';' + payload;
+          setCredStatus('验证通过，正在登录…');
+          doCredLogin(aigisStr).then((r) => {
+            if (r && r.status === 'captcha') { setCredStatus('需再次验证'); return; }
+            onCredSuccess();
+          }).catch((e) => setCredStatus('登录失败: ' + e));
+        });
+        captcha.onError(() => setCredStatus('人机验证出错，请重试'));
+      });
+    } catch (e) {
+      box.textContent = '极验初始化失败: ' + e;
+    }
+  }
 
   // ---------- 鹰角账号登录 ----------
   let hyperCodeTimer = null;

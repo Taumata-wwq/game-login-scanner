@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://*.geetest.com https://*.mihoyo.com https://*.bilibili.com; img-src 'self' data: blob: https://*.geetest.com; script-src 'self' https://*.geetest.com 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data: https://*.geetest.com; frame-src https://*.geetest.com"
     }
   },
   "bundle": {

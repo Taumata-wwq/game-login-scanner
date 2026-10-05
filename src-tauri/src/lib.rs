@@ -424,10 +424,12 @@ async fn cred_login_sms(
     game: String,
     phone: String,
     code: String,
+    aigis: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let aigis = aigis.unwrap_or_default();
     let outcome = match channel.as_str() {
-        "official" => sdk::cred_login::mihoyo_login_sms(&phone, &code, "").await?,
-        "bilibili" => sdk::cred_login::bili_login_sms(&phone, &code, "").await?,
+        "official" => sdk::cred_login::mihoyo_login_sms(&phone, &code, &aigis).await?,
+        "bilibili" => sdk::cred_login::bili_login_sms(&phone, &code, &aigis).await?,
         _ => return Err("未知渠道".to_string()),
     };
     apply_cred_outcome(&state, &game, outcome)
@@ -441,10 +443,12 @@ async fn cred_login_pwd(
     game: String,
     account: String,
     password: String,
+    aigis: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let aigis = aigis.unwrap_or_default();
     let outcome = match channel.as_str() {
-        "official" => sdk::cred_login::mihoyo_login_pwd(&account, &password, "").await?,
-        "bilibili" => sdk::cred_login::bili_login_pwd(&account, &password, "").await?,
+        "official" => sdk::cred_login::mihoyo_login_pwd(&account, &password, &aigis).await?,
+        "bilibili" => sdk::cred_login::bili_login_pwd(&account, &password, &aigis).await?,
         _ => return Err("未知渠道".to_string()),
     };
     apply_cred_outcome(&state, &game, outcome)

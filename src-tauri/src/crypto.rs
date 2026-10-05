@@ -130,6 +130,24 @@ pub fn dpapi_unprotect(_cipher_b64: &str) -> Option<Vec<u8>> {
     None
 }
 
+// ---------- RSA 公钥加密（米哈游/B站 账密登录） ----------
+
+/// 用 PEM 格式 RSA 公钥（PKCS1_v1_5 填充）加密明文，返回 base64 密文。
+/// 用于米哈游/B站账密登录：加密手机号 / 账号 / 密码后提交。
+pub fn rsa_encrypt_b64(pem: &str, plain: &str) -> Result<String, String> {
+    use base64::Engine as _;
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::Pkcs1v15Encrypt;
+
+    let key = rsa::RsaPublicKey::from_public_key_pem(pem)
+        .map_err(|e| format!("RSA 公钥解析失败: {e}"))?;
+    let mut rng = rand::thread_rng();
+    let cipher = key
+        .encrypt(&mut rng, Pkcs1v15Encrypt, plain.as_bytes())
+        .map_err(|e| format!("RSA 加密失败: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(cipher))
+}
+
 /// 加密一个字符串字段（DPAPI），返回带前缀的密文。失败回退明文原样返回。
 pub fn protect_secret(plain: &str) -> String {
     if plain.is_empty() {

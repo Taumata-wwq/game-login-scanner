@@ -89,6 +89,30 @@ pub const DSPROD_DEVICE_FP_DEFAULT: &str = "1145141919810";
 /// 值为空表示「暂不携带 DS 签名」（降级路径），待实测补充崩坏3通行证 SDK 的盐。
 pub const OFFICIAL_DS_SALT: &str = "";
 
+// ---------- 渠道账号登录（米哈游 / B站）----------
+
+/// 米哈游通行证：申请短信验证码（需 x-rpc-aigis）。
+pub const MIYOUSHE_SEND_SMS_URL: &str =
+    "https://passport-api.mihoyo.com/account/ma-cn-verifier/verifier/createLoginCaptcha";
+/// 米哈游通行证：验证码登录。
+pub const MIYOUSHE_LOGIN_SMS_URL: &str =
+    "https://passport-api.mihoyo.com/account/ma-cn-passport/app/loginByMobileCaptcha";
+/// 米哈游通行证：密码登录。
+pub const MIYOUSHE_LOGIN_PWD_URL: &str =
+    "https://passport-api.mihoyo.com/account/ma-cn-passport/app/loginByPassword";
+/// 米哈游通行证 RSA 公钥（PKCS1_v1_5 加密手机号/账号/密码）。
+/// 来源：社区公开实现 caisxg/mhylogin（enrsapw.py）。如失效需更新。
+pub const MIYOUSHE_RSA_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDDvekdPMHN3AYhm/vktJT+YJr7\ncI5DcsNKqdsx5DZX0gDuWFuIjzdwButrIYPNmRJ1G8ybDIF7oDW2eEpm5sMbL9zs\n9ExXCdvqrn51qELbqj0XxtMTIpaCHFSI50PfPpTFV9Xt/hmyVwokoOXFlAEgCn+Q\nCgGs52bFoYMtyi+xEQIDAQAB\n-----END PUBLIC KEY-----";
+
+/// B站：发送短信验证码。
+pub const BILI_SMS_SEND_URL: &str = "https://passport.bilibili.com/x/passport-login/sms/send";
+/// B站：短信验证码登录。
+pub const BILI_LOGIN_SMS_URL: &str = "https://passport.bilibili.com/x/passport-login/login/sms";
+/// B站：Web 登录页（获取 RSA 公钥/盐）。
+pub const BILI_WEB_LOGIN_URL: &str = "https://passport.bilibili.com/x/passport-login/web/login";
+/// B站：Web 登录 RSA 公钥接口。
+pub const BILI_WEB_KEY_URL: &str = "https://passport.bilibili.com/x/passport-login/web/key";
+
 // ---------- B 站设备参数模板（user.info 查询用，原样保留） ----------------
 
 pub const BILI_USERINFO_PARAM: &str = r#"{"cur_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","client_timestamp":"1667057013442","sdk_type":"1","isRoot":"0","merchant_id":"590","dp":"1280*720","mac":"08:00:27:53:DD:12","uid":"437470182","support_abis":"x86,armeabi-v7a,armeabi","apk_sign":"4502a02a00395dec05a4134ad593224d","platform_type":"3","old_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","operators":"5","fingerprint":"","model":"MuMu","udid":"XXA31CBAB6CBA63E432E087B58411A213BFB7","net":"5","app_id":"180","brand":"Android","oaid":"","game_id":"180","timestamp":"1667057013275","ver":"6.1.0","c":"1","version_code":"510","server_id":"378","version":"1","domain_switch_count":"0","pf_ver":"12","access_key":"","domain":"line1-sdk-center-login-sh.biligame.net","original_domain":"","imei":"","sdk_log_type":"1","sdk_ver":"3.4.2","android_id":"84567e2dda72d1d4","channel_id":1}"#;
