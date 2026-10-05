@@ -219,6 +219,7 @@ pub async fn mihoyo_send_sms(
     let resp_headers = resp.headers().clone();
     let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
     let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    log::info!("[发送验证码] body: {}", &text[..text.len().min(800)]);
     if json.get("retcode").and_then(|v| v.as_i64()) == Some(0) {
         return Ok(None);
     }
@@ -247,13 +248,11 @@ pub async fn mihoyo_login_sms(
         "captcha": code,
     })
     .to_string();
-    let mut headers = passport_web_headers(device_id, device_fp);
-    if !aigis.is_empty() {
-        if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
-            headers.insert("x-rpc-aigis", v);
-        }
-        headers.insert("x-rpc-aigis_v4", reqwest::header::HeaderValue::from_static("true"));
-    }
+    // 登录步骤用 App 协议（与发短信的通行证 Web 协议不同）：App 版接口返回 body 中的
+    // stoken（data.token.token），Web 版只返回 Cookie（无 stoken）。
+    // 参考 bh3_login_simulation：登录不传 aigis（aigis 仅用于发短信）。
+    let headers = dsprod_headers(device_id, device_fp);
+    let _ = aigis;
     let resp = crate::http::client()
         .post(constants::MIYOUSHE_LOGIN_SMS_URL)
         .headers(headers)
