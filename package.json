@@ -1,6 +1,6 @@
 {
-  "name": "bh3-scanner",
-  "version": "0.1.0",
+  "name": "game-login-scanner",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "tauri": "tauri"

@@ -2,9 +2,6 @@
 
 // ---------- B 站 ----------------
 
-/// B 站登录域名（line1 sdk center）
-pub const BILI_LOGIN: &str = "https://line1-sdk-center-login-sh.biligame.net/";
-
 /// B 站 setSign 签名盐
 pub const BILI_SIGN_SALT: &str = "dbf8f1b4496f430b8a3c0f436a35b931";
 
@@ -108,7 +105,7 @@ pub const MIYOUSHE_LOGIN_PWD_URL: &str =
 /// 来源：社区公开实现 caisxg/mhylogin（enrsapw.py）。如失效需更新。
 pub const MIYOUSHE_RSA_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDDvekdPMHN3AYhm/vktJT+YJr7\ncI5DcsNKqdsx5DZX0gDuWFuIjzdwButrIYPNmRJ1G8ybDIF7oDW2eEpm5sMbL9zs\n9ExXCdvqrn51qELbqj0XxtMTIpaCHFSI50PfPpTFV9Xt/hmyVwokoOXFlAEgCn+Q\nCgGs52bFoYMtyi+xEQIDAQAB\n-----END PUBLIC KEY-----";
 
-/// B站：游戏 SDK 登录域名（崩坏3 游戏 SDK，直接返回游戏 access_key）。
+/// B站：游戏 SDK 登录域名（rsa / start_captcha / login / user.info 均在此域名下）。
 pub const BILI_SDK_LOGIN: &str = "https://line1-sdk-center-login-sh.biligame.net/";
 /// B站游戏 SDK：RSA 公钥申请参数模板（app_id=180 崩坏3）。
 pub const BILI_SDK_RSA_PARAM: &str = r#"{"operators":"5","merchant_id":"590","isRoot":"0","domain_switch_count":"0","sdk_type":"1","sdk_log_type":"1","timestamp":"1613035485639","support_abis":"x86,armeabi-v7a,armeabi","access_key":"","sdk_ver":"3.4.2","oaid":"","dp":"1280*720","original_domain":"","imei":"","version":"1","udid":"KREhESMUIhUjFnJKNko2TDQFYlZkB3cdeQ==","apk_sign":"4502a02a00395dec05a4134ad593224d","platform_type":"3","old_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","android_id":"84567e2dda72d1d4","fingerprint":"","mac":"08:00:27:53:DD:12","server_id":"378","domain":"line1-sdk-center-login-sh.biligame.net","app_id":"180","version_code":"510","net":"4","pf_ver":"12","cur_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","c":"1","brand":"Android","client_timestamp":"1613035486888","channel_id":"1","uid":"","game_id":"180","ver":"6.1.0","model":"MuMu"}"#;

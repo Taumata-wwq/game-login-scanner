@@ -74,20 +74,22 @@ pub fn tv_sign(params: &[(&str, String)]) -> String {
 }
 
 async fn post_form(url: &str, form: &str) -> Result<Value, String> {
-    let resp = crate::http::client()
-        .post(url)
-        .header("User-Agent", "Mozilla/5.0 BH3Scanner")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(form.to_string())
-        .send()
-        .await
-        .map_err(|e| format!("B 站请求失败: {e}"))?;
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    serde_json::from_str(&text)
-        .map_err(|_| format!("B 站响应非 JSON: {}", &text[..text.len().min(200)]))
+    let resp = crate::http::post(
+        url,
+        vec![(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )],
+        form,
+    )
+    .await
+    .map_err(|e| format!("B 站请求失败: {e}"))?;
+    serde_json::from_str(&resp.body).map_err(|_| {
+        format!(
+            "B 站响应非 JSON: {}",
+            &resp.body[..resp.body.len().min(200)]
+        )
+    })
 }
 
 fn tv_signed_form(extra: &[(&str, String)]) -> String {
@@ -180,20 +182,22 @@ pub async fn qr_login_poll(auth_code: &str) -> Result<BiliQrStatus, String> {
 // ---------- 游戏侧用户信息 ----------
 
 async fn send_bili_post(url: &str, data: &str) -> Result<Value, String> {
-    let resp = crate::http::client()
-        .post(url)
-        .header("User-Agent", "Mozilla/5.0 BSGameSDK")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(data.to_string())
-        .send()
-        .await
-        .map_err(|e| format!("B 站请求失败: {e}"))?;
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    serde_json::from_str(&text)
-        .map_err(|_| format!("B 站响应非 JSON: {}", &text[..text.len().min(200)]))
+    let resp = crate::http::post(
+        url,
+        vec![(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )],
+        data,
+    )
+    .await
+    .map_err(|e| format!("B 站请求失败: {e}"))?;
+    serde_json::from_str(&resp.body).map_err(|_| {
+        format!(
+            "B 站响应非 JSON: {}",
+            &resp.body[..resp.body.len().min(200)]
+        )
+    })
 }
 
 /// 获取用户名（失败不影响登录，仅用于展示）。
@@ -204,7 +208,7 @@ pub async fn get_user_info(uid: &str, access_key: &str) -> Result<String, String
     data["access_key"] = Value::String(access_key.to_string());
     let form = set_sign(&mut data);
     let resp = send_bili_post(
-        &format!("{}api/client/user.info", constants::BILI_LOGIN),
+        &format!("{}api/client/user.info", constants::BILI_SDK_LOGIN),
         &form,
     )
     .await?;
@@ -214,7 +218,6 @@ pub async fn get_user_info(uid: &str, access_key: &str) -> Result<String, String
         .unwrap_or("")
         .to_string())
 }
-
 
 // ---------- 游戏 SDK 账密登录（直接返回 access_key）----------
 
@@ -228,8 +231,16 @@ async fn bili_sdk_rsa() -> Result<(String, String), String> {
         &form,
     )
     .await?;
-    let key = resp.get("rsa_key").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let hash = resp.get("hash").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let key = resp
+        .get("rsa_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let hash = resp
+        .get("hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     if key.is_empty() {
         return Err("B站游戏 SDK 公钥为空".to_string());
     }

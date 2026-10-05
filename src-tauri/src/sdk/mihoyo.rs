@@ -80,27 +80,22 @@ fn value_to_str(v: &Value) -> String {
 }
 
 async fn send_post_json_str(url: &str, body: &str) -> Result<Value, String> {
-    let resp = crate::http::client()
-        .post(url)
-        .body(body.to_string())
-        .send()
+    let resp = crate::http::post(url, Vec::new(), body)
         .await
         .map_err(|e| format!("米哈游请求失败: {e}"))?;
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    serde_json::from_str(&text)
-        .map_err(|_| format!("米哈游响应非 JSON: {}", &text[..text.len().min(200)]))
+    serde_json::from_str(&resp.body).map_err(|_| {
+        format!(
+            "米哈游响应非 JSON: {}",
+            &resp.body[..resp.body.len().min(200)]
+        )
+    })
 }
 
 async fn send_get_raw(url: &str) -> Result<String, String> {
-    let resp = crate::http::client()
-        .get(url)
-        .send()
+    let resp = crate::http::get(url, Vec::new())
         .await
         .map_err(|e| format!("GET 请求失败: {e}"))?;
-    resp.text().await.map_err(|e| format!("读取响应失败: {e}"))
+    Ok(resp.body)
 }
 
 /// 获取崩坏3 当前版本号；失败时回退进程内缓存，无缓存则报错。

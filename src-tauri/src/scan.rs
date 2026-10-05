@@ -235,7 +235,6 @@ impl ScanContext {
                 }
                 official::scan(
                     ticket,
-                    &self.official.uid,
                     &self.official.stoken,
                     &self.official.mid,
                     &self.device_id,
@@ -475,7 +474,6 @@ pub struct ScanArgs {
     pub hypergryph: hypergryph::HypergryphToken,
     pub bili: BiliToken,
     pub official: OfficialToken,
-    pub interval_ms: u64,
     pub device_id: String,
     pub clear_clipboard: bool,
     pub auto_close: bool,
@@ -492,14 +490,15 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         hypergryph,
         bili,
         official,
-        interval_ms,
         device_id,
         clear_clipboard,
         auto_close,
         stop,
         display_name,
     } = args;
-    let interval = Duration::from_millis(interval_ms.max(50));
+    // 扫码循环固定 60Hz：扫码期间无论画面是否静止，检测频率不低于 60fps。
+    // 静止屏幕由桌面复制「无新帧零成本跳过」+ 指纹去重兜底，60Hz 轮询近零开销。
+    let interval = Duration::from_millis(16);
     let ch_desc = if current_game.is_hypergryph() {
         "鹰角".to_string()
     } else {
@@ -737,9 +736,7 @@ async fn process_screen(
 /// （`CloseRequested` 事件不会在 `app.exit()` 路径上触发）。
 async fn finalize_success(app: &tauri::AppHandle, clear_clipboard: bool, auto_close: bool) {
     if clear_clipboard {
-        if let Ok(mut cb) = arboard::Clipboard::new() {
-            let _ = cb.clear();
-        }
+        crate::clipboard::clear();
     }
     if auto_close {
         tokio::time::sleep(Duration::from_millis(500)).await;

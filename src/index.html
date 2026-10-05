@@ -377,7 +377,7 @@
       <div class="filter-seg" id="filterSeg">
         <button data-f="official" class="on">官服</button>
         <button data-f="bilibili">B 服</button>
-        <button data-f="hypergryph" hidden>官服</button>
+        <button data-f="hypergryph" hidden>鹰角</button>
       </div>
       <button class="addbtn" id="btnAddAcct" title="添加账号">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -670,7 +670,7 @@
   // ---------- 账号渲染 ----------
   // 当前游戏 id（账号按游戏独立存储；旧数据 game 为空时归入崩坏3）。
   function curGameId() { return config ? (config.current_game || 'bh3') : 'bh3'; }
-  function acctGame(t) { return t.game || 'bh3'; }
+  function acctGame(t) { return t.game; }
   function accountsAll() {
     if (!config) return [];
     const g = curGameId();
@@ -709,7 +709,7 @@
     return t.alias ? (t.alias + '（' + base + '）') : base;
   }
   function channelLabel(ch) {
-    if (ch === 'hypergryph') return '官服';
+    if (ch === 'hypergryph') return '鹰角';
     if (ch === 'official') return '官服';
     return 'B 服';
   }
@@ -1078,12 +1078,12 @@
     }
   }
 
-  // ---------- 统一登录弹窗（二维码 / 验证码 / 密码） ----------
+  // ---------- 统一登录弹窗：验证码 / 密码 ----------
   let loginMode = 'qr';   // qr | sms | pwd
   let credCodeTimer = null;
   function setCredStatus(t) { $('credStatus').textContent = t; }
 
-  /// 切换登录方式页签。
+  // 切换登录方式页签。
   function switchLoginMode(mode) {
     loginMode = mode;
     document.querySelectorAll('#loginModeSeg button').forEach((b) => {
@@ -1104,7 +1104,7 @@
     }
   }
 
-  /// 打开统一登录弹窗（默认二维码）。
+  // 打开统一登录弹窗（默认二维码）。
   function openLogin() {
     $('loginTitle').textContent = (filter === 'official' ? '官服' : 'B 服') + '账号登录';
     $('credPhone').value = ''; $('credCode').value = '';
@@ -1136,7 +1136,7 @@
     }, 1000);
   }
   async function doSendCode(aigis) {
-    return invoke('cred_send_code', { channel: filter, game: curGameId(), phone: $('credPhone').value.trim(), aigis: aigis || '' });
+    return invoke('cred_send_code', { channel: filter, phone: $('credPhone').value.trim(), aigis: aigis || '' });
   }
   $('btnCredSend').addEventListener('click', async () => {
     if (credCodeTimer) return;
@@ -1493,7 +1493,7 @@
     }
   }
 
-  const PREVIEW_INTERVAL = 33;
+  const PREVIEW_INTERVAL = 16.7;   // 显示帧率硬上限 60fps
   const PREVIEW_IDLE_INTERVAL = 140;
   let idleFrames = 0;
   let previewActive = false;
@@ -1659,6 +1659,7 @@
   }
 
   const BASE_MAP_INTERVAL = 33;
+  let baseMapFails = 0;
   async function tileLoop() {
     if (!baseMapActive) return;
     const t0 = performance.now();
@@ -1666,8 +1667,13 @@
       const buf = await invoke('capture_tiles', {
         x: 0, y: 0, w: 0, h: 0, maxWidth: BASE_MAP_TARGET,
       });
+      baseMapFails = 0;
       if (patchTiles(buf)) { baseMapReady = true; }
-    } catch (e) { /* 瓦片失败不影响主流程 */ }
+    } catch (e) {
+      // 桌面复制不可用（HDR / 安全桌面等）：连续失败后放弃底图模式，
+      // 回退实时帧拉伸绘制（解除冻结）。
+      if (++baseMapFails >= 6) { stopBaseMap(); return; }
+    }
     if (!baseMapActive) return;
     const elapsed = performance.now() - t0;
     baseMapTimer = setTimeout(tileLoop, Math.max(0, BASE_MAP_INTERVAL - elapsed));
@@ -1675,6 +1681,9 @@
   function startBaseMap() {
     if (baseMapActive) return;
     baseMapActive = true;
+    // 旧底图来自上一轮拖拽/缩放会话，内容可能已过期：先作废，
+    // 等后端 tile_mode 全量脏瓦片帧（首个 tileLoop 周期）刷新后再启用。
+    baseMapReady = false;
     if (preview) {
       const m = preview.mon;
       invoke('set_tile_mode', { x: m.x, y: m.y, w: m.w, h: m.h, on: true }).catch(() => {});
@@ -1694,6 +1703,10 @@
 
   function drawView() {
     if (!preview) return;
+    // 拖拽/缩放刚启动、新底图刷新中：冻结当前画面，不重绘。
+    // 旧底图已作废（可能还停留在上一轮会话的内容），此时若强行取帧会闪现
+    // 上一轮拖拽/缩放的最后一帧；冻结 1~2 帧后全量瓦片帧到达即恢复。
+    if (viewDirty && baseMapActive && !baseMapReady) return;
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#101010';
     ctx.fillRect(0, 0, canvas.width, canvas.height);

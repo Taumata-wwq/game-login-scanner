@@ -160,13 +160,13 @@ pub fn protect_secret(plain: &str) -> String {
 }
 
 /// 解密一个字符串字段：带前缀走 DPAPI 解密（失败返回空，避免泄漏密文），
-/// 不带前缀视为旧版明文原样返回。
+/// 不带前缀（非本程序写出的数据）返回空。
 pub fn unprotect_secret(stored: &str) -> String {
     match stored.strip_prefix(DPAPI_PREFIX) {
         Some(b64) => match dpapi_unprotect(b64) {
             Some(bytes) => String::from_utf8_lossy(&bytes).to_string(),
             None => String::new(),
         },
-        None => stored.to_string(),
+        None => String::new(),
     }
 }

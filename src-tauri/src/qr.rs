@@ -1,10 +1,11 @@
 //! 剪贴板图片读取 + 二维码解码 + ticket/tk 提取。
+//!
+//! 解码用 rqrr（纯 QR 实现）：亮度闭包直接从 RGB 采样，正常/反色各试一次；
+//! 编码用 qrcodegen 生成 SVG。两者均为零/极轻依赖。
 
 use std::cell::RefCell;
 
 thread_local! {
-    /// 解码用 0xRRGGBB 像素缓冲（线程内复用，避免每帧大块分配）。
-    static DECODE_PIXELS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     /// 2×2 降采样输出缓冲（线程内复用）。
     static DOWNSCALE_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
@@ -99,21 +100,6 @@ pub fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// 构造解码提示字典：TRY_HARDER 提升小码识别；ALSO_INVERTED 支持
-/// 白码黑底（反色）二维码——游戏登录界面常见。
-fn decode_hints() -> rxing::DecodingHintDictionary {
-    let mut hints = rxing::DecodingHintDictionary::new();
-    hints.insert(
-        rxing::DecodeHintType::TRY_HARDER,
-        rxing::DecodeHintValue::TryHarder(true),
-    );
-    hints.insert(
-        rxing::DecodeHintType::ALSO_INVERTED,
-        rxing::DecodeHintValue::AlsoInverted(true),
-    );
-    hints
-}
-
 /// 二维码在图像中的位置（像素，定位点外接框）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QrBox {
@@ -123,23 +109,25 @@ pub struct QrBox {
     pub h: u32,
 }
 
-/// 把定位点集收敛为图像内的外接框；无定位点返回 None。
-fn bbox_from_points(points: &[rxing::Point], width: u32, height: u32) -> Option<QrBox> {
+/// 把四个角点收敛为图像内的外接框（负坐标夹到 0）；空点集返回 None。
+fn bbox_from_points(points: &[(i32, i32)], width: u32, height: u32) -> Option<QrBox> {
     if points.is_empty() {
         return None;
     }
-    let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
-    let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
-    for p in points {
-        min_x = min_x.min(p.x);
-        min_y = min_y.min(p.y);
-        max_x = max_x.max(p.x);
-        max_y = max_y.max(p.y);
+    let (mut min_x, mut min_y) = (i32::MAX, i32::MAX);
+    let (mut max_x, mut max_y) = (0i32, 0i32);
+    for (x, y) in points {
+        min_x = min_x.min(*x);
+        min_y = min_y.min(*y);
+        max_x = max_x.max(*x);
+        max_y = max_y.max(*y);
     }
-    let x0 = min_x.floor().max(0.0) as u32;
-    let y0 = min_y.floor().max(0.0) as u32;
-    let x1 = (max_x.ceil() as u32).min(width);
-    let y1 = (max_y.ceil() as u32).min(height);
+    let w = width as i32;
+    let h = height as i32;
+    let x0 = min_x.clamp(0, w - 1) as u32;
+    let y0 = min_y.clamp(0, h - 1) as u32;
+    let x1 = (max_x + 1).clamp(1, w) as u32;
+    let y1 = (max_y + 1).clamp(1, h) as u32;
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
@@ -181,42 +169,38 @@ pub fn crop_rgb(rgb: &[u8], width: u32, height: u32, b: QrBox) -> Option<(Vec<u8
     Some((out, w, h))
 }
 
-/// 解码单个 RGB 缓冲，返回 (文本, 定位框)。
-/// 像素缓冲线程内复用：只在 `DECODE_PIXELS` 里重建 0xRRGGBB 像素，
-/// 不再每帧分配 w*h 的 Vec<u32>（1080p 单帧约 8MB）。
-fn decode_once(rgb: &[u8], width: u32, height: u32) -> Option<(String, Option<QrBox>)> {
-    use rxing::common::HybridBinarizer;
-    use rxing::{BinaryBitmap, MultiFormatReader, RGBLuminanceSource, Reader};
-
-    DECODE_PIXELS.with(|cell| {
-        let mut pixels = cell.borrow_mut();
-        pixels.clear();
-        pixels.reserve(width as usize * height as usize);
-        pixels.extend(
-            rgb.as_chunks::<3>()
-                .0
-                .iter()
-                .map(|p| ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | (p[2] as u32)),
-        );
-        let source = RGBLuminanceSource::new_with_width_height_pixels(
-            width as usize,
-            height as usize,
-            &pixels,
-        );
-        let mut bitmap = BinaryBitmap::new(HybridBinarizer::new(source));
-        let mut reader = MultiFormatReader::default();
-        reader
-            .decode_with_hints(&mut bitmap, &decode_hints())
-            .ok()
-            .map(|r| {
-                let text = r.getText().to_string();
-                let loc = bbox_from_points(r.getRXingResultPoints(), width, height);
-                (text, loc)
-            })
-    })
+/// 亮度采样：0 为黑、255 为白；`invert` 支持反色码（白码黑底，游戏登录界面常见）。
+fn luminance_fn(rgb: &[u8], width: u32, invert: bool) -> impl Fn(usize, usize) -> u8 + '_ {
+    move |x, y| {
+        let i = (y * width as usize + x) * 3;
+        let l =
+            ((rgb[i] as u32 * 77 + rgb[i + 1] as u32 * 151 + rgb[i + 2] as u32 * 28) >> 8) as u8;
+        if invert {
+            255 - l
+        } else {
+            l
+        }
+    }
 }
 
-/// 用 rxing 解码 RGB 图片，返回 (文本, 二维码位置)。
+/// 解码单个 RGB 缓冲，返回 (文本, 外接框)。正常极性与反色各尝试一次。
+fn decode_once(rgb: &[u8], width: u32, height: u32) -> Option<(String, Option<QrBox>)> {
+    for invert in [false, true] {
+        let lum = luminance_fn(rgb, width, invert);
+        let mut img =
+            rqrr::PreparedImage::prepare_from_greyscale(width as usize, height as usize, lum);
+        let grids = img.detect_grids();
+        let Some(grid) = grids.first() else { continue };
+        let Ok((_, text)) = grid.decode() else {
+            continue;
+        };
+        let corners: Vec<(i32, i32)> = grid.bounds.iter().map(|p| (p.x, p.y)).collect();
+        return Some((text, bbox_from_points(&corners, width, height)));
+    }
+    None
+}
+
+/// 用 rqrr 解码 RGB 图片，返回 (文本, 二维码位置)。
 /// 大图先降采样、失败再用原尺寸；小图失败时放大重试。
 /// 位置坐标始终已换算回原图尺度。
 pub fn decode_rgb_located(rgb: &[u8], width: u32, height: u32) -> Option<(String, Option<QrBox>)> {
@@ -311,18 +295,15 @@ pub fn decode_rgb_fullres(rgb: &[u8], width: u32, height: u32) -> Option<(String
     None
 }
 
-/// 用 rxing 解码 RGB 图片，返回文本。
+/// 解码 RGB 图片，返回文本。
 pub fn decode_rgb(rgb: &[u8], width: u32, height: u32) -> Option<String> {
     decode_rgb_located(rgb, width, height).map(|(text, _)| text)
 }
 
 /// 读取剪贴板图片（转为 RGB），空/非图返回 None。
 pub fn read_clipboard_image() -> Option<(Vec<u8>, u32, u32)> {
-    let mut clipboard = arboard::Clipboard::new().ok()?;
-    let image = clipboard.get_image().ok()?;
-    let w = image.width as u32;
-    let h = image.height as u32;
-    let rgb = rgba_to_rgb(&image.bytes);
+    let (rgba, w, h) = crate::clipboard::read_image_rgba()?;
+    let rgb = rgba_to_rgb(&rgba);
     Some((rgb, w, h))
 }
 
@@ -331,29 +312,20 @@ pub fn read_clipboard_image() -> Option<(Vec<u8>, u32, u32)> {
 /// 把文本编码为二维码 SVG，供前端直接内嵌展示。
 /// MARGIN=0：白边由前端容器的 4px padding 提供（默认 4 模块静区太宽）。
 pub fn qr_svg(text: &str) -> Result<String, String> {
-    use rxing::{BarcodeFormat, MultiFormatWriter, Writer};
-
-    let size = 33 * 8; // 足够容纳最长 ticket URL 的边长
-    let mut hints = rxing::EncodingHintDictionary::new();
-    hints.insert(
-        rxing::EncodeHintType::MARGIN,
-        rxing::EncodeHintValue::Margin("0".to_string()),
-    );
-    let matrix = MultiFormatWriter
-        .encode_with_hints(text, &BarcodeFormat::QR_CODE, size, size, &hints)
-        .map_err(|e| format!("二维码编码失败: {e}"))?;
-    let (w, h) = (matrix.getWidth(), matrix.getHeight());
+    let qr = qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Low)
+        .map_err(|e| format!("二维码编码失败: {e:?}"))?;
+    let n = qr.size(); // 模块数（i32）
     let mut path = String::new();
-    for y in 0..h {
-        for x in 0..w {
-            if matrix.get(x, y) {
+    for y in 0..n {
+        for x in 0..n {
+            if qr.get_module(x, y) {
                 path.push_str(&format!("M{x},{y}h1v1h-1z"));
             }
         }
     }
     Ok(format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" shape-rendering=\"crispEdges\">\
-<rect width=\"{w}\" height=\"{h}\" fill=\"#ffffff\"/>\
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {n} {n}\" shape-rendering=\"crispEdges\">\
+<rect width=\"{n}\" height=\"{n}\" fill=\"#ffffff\"/>\
 <path d=\"{path}\" fill=\"#111111\"/></svg>"
     ))
 }

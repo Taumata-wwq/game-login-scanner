@@ -1,4 +1,4 @@
-﻿//! 渠道账号登录（米哈游通行证 / B站）：短信验证码 + 密码。
+//! 渠道账号登录（米哈游通行证 / B站）：短信验证码 + 密码。
 //!
 //! 极验（geetest）：米哈游/B站的验证码/密码登录可能触发人机验证——响应头返回
 //! `x-rpc-aigis`（米哈游）或 code=...（B站）。此时返回 `NeedCaptcha`，前端渲染
@@ -26,13 +26,10 @@ pub enum CredOutcome {
 /// 米哈游 DSPROD 头（passport 登录接口用）。
 /// 必须与 official.rs 的 dsprod_headers 完全一致（含 device_name/model/sys_version），
 /// 否则服务端判定「请求频繁」(-1001) 风控。
-fn dsprod_headers(device_id: &str, device_fp: &str) -> reqwest::header::HeaderMap {
-    use reqwest::header::{HeaderMap, HeaderValue};
-    let mut h = HeaderMap::new();
-    let mut set = |k: &'static str, v: &str| {
-        if let Ok(v) = HeaderValue::from_str(v) {
-            h.insert(k, v);
-        }
+fn dsprod_headers(device_id: &str, device_fp: &str) -> crate::http::Headers {
+    let mut h: crate::http::Headers = Vec::new();
+    let mut set = |k: &str, v: &str| {
+        h.push((k.to_string(), crate::http::header_utf8(v)));
     };
     set("x-rpc-app_id", constants::DSPROD_APP_ID);
     set("x-rpc-client_type", constants::DSPROD_CLIENT_TYPE);
@@ -51,13 +48,10 @@ fn dsprod_headers(device_id: &str, device_fp: &str) -> reqwest::header::HeaderMa
 /// 米哈游通行证 Web 协议头（createLoginCaptcha / web login 用）。
 /// 与游戏 App 协议（dsprod_headers）不同：通行证的 app_id/client_type/game_biz 都不同，
 /// 极验 aigis 上下文与 app_id 绑定，用错会导致「图片验证码失效」(-302)。
-fn passport_web_headers(device_id: &str, device_fp: &str) -> reqwest::header::HeaderMap {
-    use reqwest::header::{HeaderMap, HeaderValue};
-    let mut h = HeaderMap::new();
-    let mut set = |k: &'static str, v: &str| {
-        if let Ok(v) = HeaderValue::from_str(v) {
-            h.insert(k, v);
-        }
+fn passport_web_headers(device_id: &str, device_fp: &str) -> crate::http::Headers {
+    let mut h: crate::http::Headers = Vec::new();
+    let mut set = |k: &str, v: &str| {
+        h.push((k.to_string(), v.to_string()));
     };
     set("x-rpc-app_id", constants::PASSPORT_WEB_APP_ID);
     set("x-rpc-client_type", "4");
@@ -86,23 +80,31 @@ fn hex16() -> String {
 }
 
 /// 解析米哈游登录响应：成功提取 stoken/mid/uid；触发极验则返回 NeedCaptcha。
-fn parse_mihoyo_login(json: &Value, headers: &reqwest::header::HeaderMap) -> Result<CredOutcome, String> {
+fn parse_mihoyo_login(json: &Value, headers: &crate::http::Headers) -> Result<CredOutcome, String> {
     // 极验：响应头 x-rpc-aigis。
-    if let Some(aigis) = headers.get("x-rpc-aigis") {
-        if let Ok(v) = aigis.to_str() {
-            if !v.is_empty() && v != "null" {
-                if let Ok(parsed) = serde_json::from_str::<Value>(v) {
-                    return Ok(CredOutcome::NeedCaptcha(parsed));
-                }
+    if let Some(v) = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-rpc-aigis"))
+        .map(|(_, v)| v.as_str())
+    {
+        if !v.is_empty() && v != "null" {
+            if let Ok(parsed) = serde_json::from_str::<Value>(v) {
+                return Ok(CredOutcome::NeedCaptcha(parsed));
             }
         }
     }
     if json.get("retcode").and_then(|v| v.as_i64()) != Some(0) {
-        let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("登录失败");
+        let msg = json
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("登录失败");
         return Err(msg.to_string());
     }
     let data = &json["data"];
-    let token = data["token"]["token"].as_str().unwrap_or_default().to_string();
+    let token = data["token"]["token"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let mid = data["user_info"]["mid"]
         .as_str()
         .map(|s| s.to_string())
@@ -128,7 +130,11 @@ const DEVICE_FP_URL: &str = "https://public-data-api.mihoyo.com/device-fp/api/ge
 /// 获取真实设备指纹（风控必需）。
 /// 用 device_id + 随机 seed 请求 getFp，成功则返回 device_fp（32 位 hex）。
 /// 需在登录前调用并持久化，否则 x-rpc-device_fp 用假值会触发「请求频繁」(-1001)。
-pub async fn fetch_device_fp(device_id: &str, seed_id: &str, seed_time: &str) -> Result<String, String> {
+pub async fn fetch_device_fp(
+    device_id: &str,
+    seed_id: &str,
+    seed_time: &str,
+) -> Result<String, String> {
     let body = json!({
         "device_id": device_id,
         "seed_id": seed_id,
@@ -139,16 +145,20 @@ pub async fn fetch_device_fp(device_id: &str, seed_id: &str, seed_time: &str) ->
         "ext_fields": "{}",
     })
     .to_string();
-    let resp = crate::http::client()
-        .post(DEVICE_FP_URL)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("getFp 请求失败: {e}"))?;
-    let json: Value = resp.json().await.map_err(|e| format!("getFp 响应解析失败: {e}"))?;
+    let resp = crate::http::post(
+        DEVICE_FP_URL,
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        &body,
+    )
+    .await
+    .map_err(|e| format!("getFp 请求失败: {e}"))?;
+    let json: Value =
+        serde_json::from_str(&resp.body).map_err(|e| format!("getFp 响应解析失败: {e}"))?;
     if json.get("retcode").and_then(|v| v.as_i64()) != Some(0) {
-        let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+        let msg = json
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("未知错误");
         return Err(format!("getFp 失败: {msg}"));
     }
     json["data"]["device_fp"]
@@ -158,15 +168,17 @@ pub async fn fetch_device_fp(device_id: &str, seed_id: &str, seed_time: &str) ->
 }
 
 /// 从响应头 Set-Cookie 中解析指定 Cookie 字段的值。
-fn cookie_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+fn cookie_value(headers: &crate::http::Headers, name: &str) -> Option<String> {
     let prefix = format!("{name}=");
-    for v in headers.get_all("set-cookie").iter() {
-        if let Ok(s) = v.to_str() {
-            if let Some(rest) = s.trim().strip_prefix(&prefix) {
-                let val = rest.split(';').next().unwrap_or("").trim();
-                if !val.is_empty() {
-                    return Some(val.to_string());
-                }
+    for s in headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+        .map(|(_, v)| v.as_str())
+    {
+        if let Some(rest) = s.trim().strip_prefix(&prefix) {
+            let val = rest.split(';').next().unwrap_or("").trim();
+            if !val.is_empty() {
+                return Some(val.to_string());
             }
         }
     }
@@ -174,9 +186,11 @@ fn cookie_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<Stri
 }
 
 /// 从响应头解析极验数据（x-rpc-aigis）。
-fn extract_aigis(headers: &reqwest::header::HeaderMap) -> Option<Value> {
-    let aigis = headers.get("x-rpc-aigis")?;
-    let v = aigis.to_str().ok()?;
+fn extract_aigis(headers: &crate::http::Headers) -> Option<Value> {
+    let v = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-rpc-aigis"))
+        .map(|(_, v)| v.as_str())?;
     if v.is_empty() || v == "null" {
         return None;
     }
@@ -195,31 +209,26 @@ pub async fn mihoyo_send_sms(
     let enc_area = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, "+86")?;
     let body = json!({ "mobile": enc_mobile, "area_code": enc_area }).to_string();
     let mut headers = passport_web_headers(device_id, device_fp);
+    headers.push(("Content-Type".to_string(), "application/json".to_string()));
     if !aigis.is_empty() {
-        if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
-            headers.insert("x-rpc-aigis", v);
-        }
-        headers.insert("x-rpc-aigis_v4", reqwest::header::HeaderValue::from_static("true"));
+        headers.push(("x-rpc-aigis".to_string(), aigis.to_string()));
+        headers.push(("x-rpc-aigis_v4".to_string(), "true".to_string()));
     }
-    let resp = crate::http::client()
-        .post(constants::MIYOUSHE_SEND_SMS_URL)
-        .headers(headers)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body)
-        .send()
+    let resp = crate::http::post(constants::MIYOUSHE_SEND_SMS_URL, headers, &body)
         .await
         .map_err(|e| format!("请求失败: {e}"))?;
-    let resp_headers = resp.headers().clone();
-    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
-    let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let json: Value = serde_json::from_str(&resp.body).unwrap_or(Value::Null);
     if json.get("retcode").and_then(|v| v.as_i64()) == Some(0) {
         return Ok(None);
     }
     // 触发人机验证：响应头含 x-rpc-aigis。
-    if let Some(a) = extract_aigis(&resp_headers) {
+    if let Some(a) = extract_aigis(&resp.headers) {
         return Ok(Some(a));
     }
-    let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("发送失败");
+    let msg = json
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("发送失败");
     Err(format!("发送验证码失败: {msg}"))
 }
 
@@ -229,7 +238,7 @@ pub async fn mihoyo_login_sms(
     device_fp: &str,
     phone: &str,
     code: &str,
-    aigis: &str,
+    _aigis: &str,
 ) -> Result<CredOutcome, String> {
     let enc_mobile = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, phone)?;
     let enc_area = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, "+86")?;
@@ -243,33 +252,35 @@ pub async fn mihoyo_login_sms(
     // 登录步骤用 App 协议（与发短信的通行证 Web 协议不同）：App 版接口返回 body 中的
     // stoken（data.token.token），Web 版只返回 Cookie（无 stoken）。
     // 参考 bh3_login_simulation：登录不传 aigis（aigis 仅用于发短信）。
-    let headers = dsprod_headers(device_id, device_fp);
-    let _ = aigis;
-    let resp = crate::http::client()
-        .post(constants::MIYOUSHE_LOGIN_SMS_URL)
-        .headers(headers)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body)
-        .send()
+    let mut headers = dsprod_headers(device_id, device_fp);
+    headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    let resp = crate::http::post(constants::MIYOUSHE_LOGIN_SMS_URL, headers, &body)
         .await
         .map_err(|e| format!("请求失败: {e}"))?;
-    let resp_headers = resp.headers().clone();
-    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
-    let json: Value = serde_json::from_str(&text)
-        .map_err(|_| format!("响应非 JSON: {}", &text[..text.len().min(200)]))?;
+    let json: Value = serde_json::from_str(&resp.body)
+        .map_err(|_| format!("响应非 JSON: {}", &resp.body[..resp.body.len().min(200)]))?;
     // 极验触发。
-    if let Some(a) = extract_aigis(&resp_headers) {
+    if let Some(a) = extract_aigis(&resp.headers) {
         return Ok(CredOutcome::NeedCaptcha(a));
     }
     if json.get("retcode").and_then(|v| v.as_i64()) != Some(0) {
-        let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("登录失败");
+        let msg = json
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("登录失败");
         return Err(msg.to_string());
     }
     // app 版成功：stoken 在 body 的 data.token.token；web 版在 Set-Cookie。
     // 两者都尝试，body 优先。
     let data = &json["data"];
-    let body_stoken = data["token"]["token"].as_str().unwrap_or_default().to_string();
-    let body_mid = data["user_info"]["mid"].as_str().unwrap_or_default().to_string();
+    let body_stoken = data["token"]["token"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let body_mid = data["user_info"]["mid"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let body_uid = data["user_info"]["aid"]
         .as_str()
         .map(|s| s.to_string())
@@ -278,26 +289,26 @@ pub async fn mihoyo_login_sms(
     let stoken = if !body_stoken.is_empty() {
         body_stoken
     } else {
-        cookie_value(&resp_headers, "stoken")
-            .or_else(|| cookie_value(&resp_headers, "stoken_v2"))
+        cookie_value(&resp.headers, "stoken")
+            .or_else(|| cookie_value(&resp.headers, "stoken_v2"))
             .unwrap_or_default()
     };
     let mid = if !body_mid.is_empty() {
         body_mid
     } else {
-        cookie_value(&resp_headers, "ltmid")
-            .or_else(|| cookie_value(&resp_headers, "ltmid_v2"))
-            .or_else(|| cookie_value(&resp_headers, "mid"))
-            .or_else(|| cookie_value(&resp_headers, "ltuid"))
-            .or_else(|| cookie_value(&resp_headers, "account_id"))
+        cookie_value(&resp.headers, "ltmid")
+            .or_else(|| cookie_value(&resp.headers, "ltmid_v2"))
+            .or_else(|| cookie_value(&resp.headers, "mid"))
+            .or_else(|| cookie_value(&resp.headers, "ltuid"))
+            .or_else(|| cookie_value(&resp.headers, "account_id"))
             .unwrap_or_default()
     };
     let uid = if !body_uid.is_empty() {
         body_uid
     } else {
-        cookie_value(&resp_headers, "ltuid")
-            .or_else(|| cookie_value(&resp_headers, "ltuid_v2"))
-            .or_else(|| cookie_value(&resp_headers, "account_id"))
+        cookie_value(&resp.headers, "ltuid")
+            .or_else(|| cookie_value(&resp.headers, "ltuid_v2"))
+            .or_else(|| cookie_value(&resp.headers, "account_id"))
             .unwrap_or_default()
     };
     if stoken.is_empty() {
@@ -322,25 +333,17 @@ pub async fn mihoyo_login_pwd(
     let enc_pwd = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, password)?;
     let body = json!({ "account": enc_account, "password": enc_pwd }).to_string();
     let mut headers = dsprod_headers(device_id, device_fp);
+    headers.push(("Content-Type".to_string(), "application/json".to_string()));
     if !aigis.is_empty() {
-        if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
-            headers.insert("x-rpc-aigis", v);
-        }
-        headers.insert("x-rpc-aigis_v4", reqwest::header::HeaderValue::from_static("true"));
+        headers.push(("x-rpc-aigis".to_string(), aigis.to_string()));
+        headers.push(("x-rpc-aigis_v4".to_string(), "true".to_string()));
     }
-    let resp = crate::http::client()
-        .post(constants::MIYOUSHE_LOGIN_PWD_URL)
-        .headers(headers)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body)
-        .send()
+    let resp = crate::http::post(constants::MIYOUSHE_LOGIN_PWD_URL, headers, &body)
         .await
         .map_err(|e| format!("请求失败: {e}"))?;
-    let resp_headers = resp.headers().clone();
-    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
-    let json: Value = serde_json::from_str(&text)
-        .map_err(|_| format!("响应非 JSON: {}", &text[..text.len().min(200)]))?;
-    parse_mihoyo_login(&json, &resp_headers)
+    let json: Value = serde_json::from_str(&resp.body)
+        .map_err(|_| format!("响应非 JSON: {}", &resp.body[..resp.body.len().min(200)]))?;
+    parse_mihoyo_login(&json, &resp.headers)
 }
 
 /// B站：密码登录。走**游戏 SDK**（line1-sdk-center-login-sh.biligame.net，app_id=180），
@@ -356,17 +359,22 @@ pub async fn bili_login_pwd(
     let cap = if captcha_key.is_empty() {
         None
     } else {
-        let v: Value = serde_json::from_str(captcha_key)
-            .map_err(|_| "B站极验结果格式错误".to_string())?;
+        let v: Value =
+            serde_json::from_str(captcha_key).map_err(|_| "B站极验结果格式错误".to_string())?;
         Some((
             v["challenge"].as_str().unwrap_or_default().to_string(),
             v["userid"].as_str().unwrap_or_default().to_string(),
             v["validate"].as_str().unwrap_or_default().to_string(),
         ))
     };
-    let cap_ref = cap.as_ref().map(|(c, u, v)| (c.as_str(), u.as_str(), v.as_str()));
+    let cap_ref = cap
+        .as_ref()
+        .map(|(c, u, v)| (c.as_str(), u.as_str(), v.as_str()));
     let resp = crate::sdk::bili::bili_sdk_login(account, password, cap_ref).await?;
-    log::info!("[B站SDK登录] {}", &resp.to_string()[..resp.to_string().len().min(600)]);
+    log::info!(
+        "[B站SDK登录] {}",
+        &resp.to_string()[..resp.to_string().len().min(600)]
+    );
     // 成功：含 access_key。
     if let Some(ak) = resp.get("access_key").and_then(|v| v.as_str()) {
         if !ak.is_empty() {
@@ -382,9 +390,21 @@ pub async fn bili_login_pwd(
     }
     // 需要验证码：申请极验任务返回前端。
     let cap_data = crate::sdk::bili::bili_sdk_captcha().await?;
-    let gt = cap_data.get("gt").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let challenge = cap_data.get("challenge").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let userid = cap_data.get("gt_user_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let gt = cap_data
+        .get("gt")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let challenge = cap_data
+        .get("challenge")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let userid = cap_data
+        .get("gt_user_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     Ok(CredOutcome::NeedCaptcha(json!({
         "gt": gt,
         "challenge": challenge,

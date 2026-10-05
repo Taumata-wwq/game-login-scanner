@@ -5,6 +5,6 @@
 fn lib_smoke() {
     // 公开 API 冒烟：验证 crate 可链接、可构造默认配置。
     // （配置序列化往返在 unit.rs 覆盖。）
-    let cfg = bh3_scanner_lib::config::AppConfig::default();
-    assert_eq!(cfg.interval_ms, 150);
+    let cfg = game_login_scanner_lib::config::AppConfig::default();
+    assert_eq!(cfg.current_game, game_login_scanner_lib::config::Game::Bh3);
 }

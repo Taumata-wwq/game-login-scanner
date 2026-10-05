@@ -8,12 +8,10 @@ use serde_json::{json, Value};
 use crate::constants;
 use crate::crypto;
 
-use reqwest::header::{HeaderMap, HeaderValue};
+use crate::http::Headers;
 
-fn insert_header(h: &mut HeaderMap, k: &'static str, v: &str) {
-    if let Ok(v) = HeaderValue::from_str(v) {
-        h.insert(k, v);
-    }
+fn insert_header(h: &mut Headers, k: &str, v: &str) {
+    h.push((k.to_string(), crate::http::header_utf8(v)));
 }
 
 fn now_sec() -> i64 {
@@ -49,8 +47,8 @@ fn format_ds(body: &str) -> String {
 }
 
 /// 生成官服 DSPROD 系列请求头（passport 接口使用）。
-fn dsprod_headers(body: &str, device_id: &str, device_fp: &str) -> HeaderMap {
-    let mut h = HeaderMap::new();
+fn dsprod_headers(body: &str, device_id: &str, device_fp: &str) -> Headers {
+    let mut h = Headers::new();
     insert_header(&mut h, "x-rpc-app_id", constants::DSPROD_APP_ID);
     insert_header(&mut h, "x-rpc-client_type", constants::DSPROD_CLIENT_TYPE);
     insert_header(&mut h, "x-rpc-device_id", device_id);
@@ -76,24 +74,19 @@ fn dsprod_headers(body: &str, device_id: &str, device_fp: &str) -> HeaderMap {
 async fn post_json(
     url: &str,
     body: &str,
-    headers: HeaderMap,
-) -> Result<(Value, HeaderMap), String> {
-    let resp = crate::http::client()
-        .post(url)
-        .headers(headers.clone())
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body.to_string())
-        .send()
+    mut headers: Headers,
+) -> Result<(Value, Headers), String> {
+    headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    let resp = crate::http::post(url, headers, body)
         .await
         .map_err(|e| format!("官服请求失败: {e}"))?;
-    let resp_headers = resp.headers().clone();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    let json = serde_json::from_str(&text)
-        .map_err(|_| format!("官服响应非 JSON: {}", &text[..text.len().min(200)]))?;
-    Ok((json, resp_headers))
+    let json = serde_json::from_str(&resp.body).map_err(|_| {
+        format!(
+            "官服响应非 JSON: {}",
+            &resp.body[..resp.body.len().min(200)]
+        )
+    })?;
+    Ok((json, resp.headers))
 }
 
 fn retcode_err(v: &Value, fallback: &str) -> String {
@@ -136,8 +129,11 @@ pub async fn qr_login_start(device_id: &str, device_fp: &str) -> Result<Official
     let (json, resp_headers) = post_json(constants::OFFICIAL_QR_CREATE_URL, "{}", headers).await?;
 
     // 极验：先判响应头 x-rpc-aigis，再判 retcode。
-    if let Some(aigis) = resp_headers.get("x-rpc-aigis") {
-        let v = aigis.to_str().unwrap_or("");
+    if let Some(v) = resp_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-rpc-aigis"))
+        .map(|(_, v)| v.as_str())
+    {
         if !v.is_empty() && v != "null" {
             return Err("触发风控验证，请稍后重试".to_string());
         }
@@ -223,47 +219,48 @@ pub async fn qr_login_poll(
 
 // ---------- combo/panda 扫码 ----------
 
-/// 官服通行证扫码端点使用的完整 DSPROD 请求头。
-///
-/// 米哈游新版安全机制要求携带 `x-rpc-device_id`（设备绑定），否则服务端虽返回
-/// retcode=0，但游戏端在校验令牌时会判定「登录状态失效」（Snap.Hutao #1345 确认）。
-/// 头不完整还会让 getGameToken 返回误导性的「decode err」。
 /// 获取官服昵称（米游社 getUserFullInfo）。
 /// 扫码登录响应的 user_info 只有 aid/mid（无 nickname），故单独查询；
 /// 失败不影响登录，仅用于展示（返回 Err 时调用方回退 uid 显示）。
 pub async fn get_uname(uid: &str, stoken: &str, mid: &str) -> Result<String, String> {
     let url = format!("https://bbs-api.miyoushe.com/user/wapi/getUserFullInfo?uid={uid}&gids=2");
-    let mut headers = HeaderMap::new();
-    insert_header(
-        &mut headers,
-        "Referer",
-        &format!("https://www.miyoushe.com/ys/accountCenter/postList?id={uid}"),
-    );
-    insert_header(&mut headers, "Cookie", &format!("stoken={stoken};mid={mid}"));
-    let resp = crate::http::client()
-        .get(&url)
-        .headers(headers)
-        .send()
+    let headers: Headers = vec![
+        (
+            "Referer".to_string(),
+            format!("https://www.miyoushe.com/ys/accountCenter/postList?id={uid}"),
+        ),
+        ("Cookie".to_string(), format!("stoken={stoken};mid={mid}")),
+    ];
+    let resp = crate::http::get(&url, headers)
         .await
         .map_err(|e| format!("获取昵称请求失败: {e}"))?;
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    let json: Value = serde_json::from_str(&text)
-        .map_err(|_| format!("昵称响应非 JSON: {}", &text[..text.len().min(200)]))?;
+    let json: Value = serde_json::from_str(&resp.body).map_err(|_| {
+        format!(
+            "昵称响应非 JSON: {}",
+            &resp.body[..resp.body.len().min(200)]
+        )
+    })?;
     json["data"]["user_info"]["nickname"]
         .as_str()
         .map(|s| s.to_string())
         .ok_or_else(|| "响应缺少 nickname".to_string())
 }
 
-fn official_full_headers(device_id: &str) -> HeaderMap {
-    let mut h = HeaderMap::new();
+/// 官服通行证扫码端点使用的完整 DSPROD 请求头。
+///
+/// 米哈游新版安全机制要求携带 `x-rpc-device_id`（设备绑定），否则服务端虽返回
+/// retcode=0，但游戏端在校验令牌时会判定「登录状态失效」（Snap.Hutao #1345 确认）。
+/// 头不完整还会让 getGameToken 返回误导性的「decode err」。
+fn official_full_headers(device_id: &str) -> Headers {
+    let mut h = Headers::new();
     insert_header(&mut h, "x-rpc-app_id", constants::DSPROD_APP_ID);
     insert_header(&mut h, "x-rpc-client_type", constants::DSPROD_CLIENT_TYPE);
     insert_header(&mut h, "x-rpc-device_id", device_id);
-    insert_header(&mut h, "x-rpc-device_fp", constants::DSPROD_DEVICE_FP_DEFAULT);
+    insert_header(
+        &mut h,
+        "x-rpc-device_fp",
+        constants::DSPROD_DEVICE_FP_DEFAULT,
+    );
     insert_header(&mut h, "x-rpc-device_name", "游戏扫码器-PC");
     insert_header(&mut h, "x-rpc-device_model", "Windows");
     insert_header(&mut h, "x-rpc-sys_version", "Windows 10");
@@ -297,7 +294,6 @@ fn official_full_headers(device_id: &str) -> HeaderMap {
 /// 会被服务端接受（retcode=0）但游戏端判定「登录状态失效」——必须换用 tk。
 pub async fn scan(
     ticket: &str,
-    _uid: &str,
     stoken: &str,
     mid: &str,
     device_id: &str,
@@ -313,12 +309,7 @@ pub async fn scan(
         "passport_app_id": constants::DSPROD_APP_ID,
     })
     .to_string();
-    let (json, _) = post_json(
-        &constants::panda_scan_url(biz_key),
-        &scan_body,
-        HeaderMap::new(),
-    )
-    .await?;
+    let (json, _) = post_json(&constants::panda_scan_url(biz_key), &scan_body, Vec::new()).await?;
     if json.get("retcode").and_then(|v| v.as_i64()) != Some(0) {
         return Err(retcode_err(&json, "官服扫码失败"));
     }
@@ -330,7 +321,11 @@ pub async fn scan(
 
     let body = json!({ "ticket": tk, "token_types": ["1"] }).to_string();
     let mut headers = official_full_headers(device_id);
-    insert_header(&mut headers, "Cookie", &format!("stoken={stoken};mid={mid}"));
+    insert_header(
+        &mut headers,
+        "Cookie",
+        &format!("stoken={stoken};mid={mid}"),
+    );
 
     let (j, _) = post_json(constants::OFFICIAL_SCAN_QR_URL, &body, headers.clone()).await?;
     if j.get("retcode").and_then(|v| v.as_i64()) != Some(0) {

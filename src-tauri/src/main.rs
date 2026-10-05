@@ -2,5 +2,5 @@
 #![windows_subsystem = "windows"]
 
 fn main() {
-    bh3_scanner_lib::run();
+    game_login_scanner_lib::run();
 }

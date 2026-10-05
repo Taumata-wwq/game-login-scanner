@@ -63,7 +63,6 @@ impl Game {
             Game::Endfield | Game::Arknights => 0,
         }
     }
-
 }
 
 /// 渠道
@@ -99,7 +98,7 @@ pub struct BiliToken {
     pub uid: String,
     pub access_key: String,
     pub uname: String,
-    /// 所属游戏 id（如 "bh3"）；空表示旧数据（归入崩坏3）。
+    /// 所属游戏 id（如 "bh3"）。
     #[serde(default)]
     pub game: String,
     /// 用户备注名（双击账号行编辑；有则主界面显示「备注名（原名）」）。
@@ -123,7 +122,7 @@ pub struct OfficialToken {
     /// 米游社昵称（登录/校验响应中获取，仅用于展示）。
     #[serde(default)]
     pub uname: String,
-    /// 所属游戏 id（如 "bh3"）；空表示旧数据（归入崩坏3）。
+    /// 所属游戏 id（如 "bh3"）。
     #[serde(default)]
     pub game: String,
     /// 用户备注名（双击账号行编辑；有则主界面显示「备注名（原名）」）。
@@ -161,7 +160,6 @@ pub struct AppConfig {
     /// 各游戏「上次使用的渠道」，切换游戏时恢复（game → channel）。
     #[serde(default)]
     pub game_channel: std::collections::HashMap<String, Option<Channel>>,
-    pub interval_ms: u64,
     /// 游戏内显示的账号名（B 服 combo/panda confirm 的 asterisk_name 字段）。
     /// 空则用默认「游戏扫码器用户」。
     #[serde(default)]
@@ -183,14 +181,6 @@ pub struct AppConfig {
     pub fp_seed_id: String,
     #[serde(default)]
     pub fp_seed_time: String,
-    /// 旧版「启动自动扫描」设置（迁移到 auto_login_last 后不再写出）。
-    #[serde(skip_serializing)]
-    pub auto_start_scan: bool,
-    /// 旧版单账号字段：仅用于读取旧配置并迁移，保存时不再写出。
-    #[serde(skip_serializing)]
-    pub bili: Option<BiliToken>,
-    #[serde(skip_serializing)]
-    pub official: Option<OfficialToken>,
 }
 
 impl Default for AppConfig {
@@ -204,7 +194,6 @@ impl Default for AppConfig {
             active_official: std::collections::HashMap::new(),
             active_hypergryph: std::collections::HashMap::new(),
             game_channel: std::collections::HashMap::new(),
-            interval_ms: 150,
             display_name: String::new(),
             auto_login_last: false,
             always_on_top: false,
@@ -216,9 +205,6 @@ impl Default for AppConfig {
             device_fp: String::new(),
             fp_seed_id: String::new(),
             fp_seed_time: String::new(),
-            auto_start_scan: false,
-            bili: None,
-            official: None,
         }
     }
 }
@@ -307,7 +293,8 @@ impl AppConfig {
             None => self.bili_accounts.push(token),
         }
         self.active_bili.insert(game.clone(), uid.clone());
-        self.game_channel.insert(game.clone(), Some(Channel::Bilibili));
+        self.game_channel
+            .insert(game.clone(), Some(Channel::Bilibili));
         self.touch(&game, Channel::Bilibili, &uid);
     }
 
@@ -334,7 +321,8 @@ impl AppConfig {
             None => self.official_accounts.push(token),
         }
         self.active_official.insert(game.clone(), uid.clone());
-        self.game_channel.insert(game.clone(), Some(Channel::Official));
+        self.game_channel
+            .insert(game.clone(), Some(Channel::Official));
         self.touch(&game, Channel::Official, &uid);
     }
 
@@ -459,95 +447,22 @@ impl AppConfig {
         }
     }
 
-    /// 把旧版单账号字段迁移进账号列表（读取时调用一次）。
-    pub fn migrate_legacy(&mut self) {
-        // 旧版「启动自动扫描」→ 新版「启动自动登录上次账号」
-        if self.auto_start_scan {
-            self.auto_login_last = true;
-            self.auto_start_scan = false;
-        }
-        let mut legacy_bili = self.bili.take();
-        if let Some(b) = legacy_bili.take() {
-            if !b.uid.is_empty() && !b.access_key.is_empty() {
-                let mut b = b;
-                if b.game.is_empty() {
-                    b.game = "bh3".to_string();
-                }
-                let g = b.game.clone();
-                if !self.bili_accounts.iter().any(|t| t.uid == b.uid && t.game == g) {
-                    self.active_bili.insert(g.clone(), b.uid.clone());
-                    self.game_channel
-                        .entry(g)
-                        .or_insert(Some(Channel::Bilibili));
-                    self.bili_accounts.push(b);
-                }
-            }
-        }
-        let mut legacy_official = self.official.take();
-        if let Some(o) = legacy_official.take() {
-            if !o.uid.is_empty() && !o.stoken.is_empty() {
-                let mut o = o;
-                if o.game.is_empty() {
-                    o.game = "bh3".to_string();
-                }
-                let g = o.game.clone();
-                if !self.official_accounts.iter().any(|t| t.uid == o.uid && t.game == g) {
-                    self.active_official.insert(g.clone(), o.uid.clone());
-                    self.game_channel
-                        .entry(g)
-                        .or_insert(Some(Channel::Official));
-                    self.official_accounts.push(o);
-                }
-            }
-        }
-    }
-
-    /// 配置目录名（新）。
-    const DIR_NEW: &'static str = "游戏扫码器";
-    /// 配置目录名（旧，用于一次性迁移）。
-    const DIR_OLD: &'static str = "崩坏3扫码器";
+    /// 配置目录名。
+    const DIR: &'static str = "游戏扫码器";
 
     /// 配置文件路径：%APPDATA%\<AppName>\config.json
     pub fn path() -> PathBuf {
         let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        base.join(Self::DIR_NEW).join("config.json")
-    }
-
-    /// 一次性迁移：旧目录存在且新目录无配置时，把旧目录整体复制到新目录。
-    /// 保留旧目录（不删除），以便回滚。
-    pub fn migrate_dir_if_needed() {
-        let Some(base) = dirs::config_dir() else { return };
-        let old = base.join(Self::DIR_OLD);
-        let new = base.join(Self::DIR_NEW);
-        if !old.exists() {
-            return;
-        }
-        // 新目录已有配置则不覆盖（避免每次启动重复复制）。
-        if new.join("config.json").exists() {
-            return;
-        }
-        if std::fs::create_dir_all(&new).is_err() {
-            return;
-        }
-        // 复制 config.json 与日志文件（若存在）。
-        for name in ["config.json", "bh3-scanner.log", "bh3-scanner.log.old"] {
-            let src = old.join(name);
-            if src.exists() {
-                let _ = std::fs::copy(&src, new.join(name));
-            }
-        }
+        base.join(Self::DIR).join("config.json")
     }
 
     /// 从磁盘加载；损坏/无效时备份并回退默认值。
     pub fn load() -> Self {
-        Self::migrate_dir_if_needed();
         let path = Self::path();
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<AppConfig>(&text) {
                 Ok(mut cfg) => {
-                    cfg.migrate_legacy();
                     cfg.decrypt_secrets();
-                    cfg.sanitize();
                     cfg
                 }
                 Err(_) => {
@@ -593,16 +508,6 @@ impl AppConfig {
         }
         for a in self.official_accounts.iter_mut() {
             a.stoken = crypto::unprotect_secret(&a.stoken);
-        }
-    }
-
-    /// 把非法字段收敛到合理范围。
-    pub fn sanitize(&mut self) {
-        if self.interval_ms < 50 {
-            self.interval_ms = 150;
-        }
-        if self.interval_ms > 5000 {
-            self.interval_ms = 5000;
         }
     }
 

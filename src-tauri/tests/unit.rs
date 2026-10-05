@@ -1,11 +1,11 @@
 //! 单元测试集合（原 lib 内联测试迁移至此，见 build.rs / Cargo.toml 中
 //! 关于 Windows 测试 manifest 的说明）。
 
-use bh3_scanner_lib::config::{AppConfig, BiliToken, Channel, OfficialToken};
-use bh3_scanner_lib::constants;
-use bh3_scanner_lib::crypto;
-use bh3_scanner_lib::qr::{self, QrKind};
-use bh3_scanner_lib::sdk::{bili, mihoyo, official};
+use game_login_scanner_lib::config::{AppConfig, BiliToken, Channel, OfficialToken};
+use game_login_scanner_lib::constants;
+use game_login_scanner_lib::crypto;
+use game_login_scanner_lib::qr::{self, QrKind};
+use game_login_scanner_lib::sdk::{bili, mihoyo, official};
 
 use serde_json::{json, Value};
 
@@ -69,27 +69,40 @@ fn decode_rgb_empty() {
     assert!(qr::decode_rgb(&[], 0, 0).is_none());
 }
 
-/// 用 rxing 编码一张二维码，再走 decode_rgb 解码，验证整条识别链路。
-#[test]
-fn decode_rgb_roundtrip() {
-    use rxing::{BarcodeFormat, MultiFormatWriter, Writer};
-
-    let text = "https://webstatic.mihoyo.com/bh3/event/mobile.html?tk=TESTTK123";
-    let size = 200usize;
-    let matrix = MultiFormatWriter
-        .encode(text, &BarcodeFormat::QR_CODE, size as i32, size as i32)
-        .expect("编码二维码失败");
-    let mut rgb = Vec::with_capacity(size * size * 3);
-    for y in 0..size {
-        for x in 0..size {
-            let v = if matrix.get(x as u32, y as u32) {
-                0u8
-            } else {
-                255u8
-            };
-            rgb.extend_from_slice(&[v, v, v]);
+/// 用 qrcodegen 把文本渲染为 size×size 的灰度 RGB 画布（模块最近邻放大），
+/// 供解码链路测试使用；inverted=true 渲染反色码（白码黑底）。
+fn render_qr_rgb(text: &str, size: usize, inverted: bool) -> Vec<u8> {
+    let qrcode =
+        qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Low).expect("编码二维码失败");
+    let n = qrcode.size() as usize;
+    let px = (size / n).max(1);
+    let q = px * n;
+    let off = (size - q) / 2;
+    // inverted: 模块白、背景黑；否则模块黑、背景白。
+    let mut rgb = vec![if inverted { 0u8 } else { 255u8 }; size * size * 3];
+    for my in 0..n {
+        for mx in 0..n {
+            let dark = qrcode.get_module(mx as i32, my as i32) != inverted;
+            let v = if dark { 0u8 } else { 255u8 };
+            for yy in 0..px {
+                for xx in 0..px {
+                    let i = ((off + my * px + yy) * size + (off + mx * px + xx)) * 3;
+                    rgb[i] = v;
+                    rgb[i + 1] = v;
+                    rgb[i + 2] = v;
+                }
+            }
         }
     }
+    rgb
+}
+
+/// 编码一张二维码再解码，验证整条识别链路。
+#[test]
+fn decode_rgb_roundtrip() {
+    let text = "https://webstatic.mihoyo.com/bh3/event/mobile.html?tk=TESTTK123";
+    let size = 200usize;
+    let rgb = render_qr_rgb(text, size, false);
     let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("解码二维码失败");
     assert_eq!(decoded, text);
 }
@@ -97,24 +110,9 @@ fn decode_rgb_roundtrip() {
 /// 小图走 2x 放大重试路径仍可解码。
 #[test]
 fn decode_rgb_small_image_roundtrip() {
-    use rxing::{BarcodeFormat, MultiFormatWriter, Writer};
-
     let text = "https://x/qr_code_in_game.html?ticket=SMALL";
     let size = 120usize; // < 300，触发放大重试分支
-    let matrix = MultiFormatWriter
-        .encode(text, &BarcodeFormat::QR_CODE, size as i32, size as i32)
-        .expect("编码二维码失败");
-    let mut rgb = Vec::with_capacity(size * size * 3);
-    for y in 0..size {
-        for x in 0..size {
-            let v = if matrix.get(x as u32, y as u32) {
-                0u8
-            } else {
-                255u8
-            };
-            rgb.extend_from_slice(&[v, v, v]);
-        }
-    }
+    let rgb = render_qr_rgb(text, size, false);
     let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("解码二维码失败");
     assert_eq!(decoded, text);
 }
@@ -122,61 +120,19 @@ fn decode_rgb_small_image_roundtrip() {
 /// 大图走 2x2 降采样路径仍可解码。
 #[test]
 fn decode_rgb_large_image_roundtrip() {
-    use rxing::{BarcodeFormat, MultiFormatWriter, Writer};
-
     let text = "https://x/qr_code_in_game.html?ticket=BIG";
-    // 生成 200px 二维码，嵌入 1600x1600 的白色画布中心，触发降采样分支
-    let qr_size = 200usize;
-    let matrix = MultiFormatWriter
-        .encode(
-            text,
-            &BarcodeFormat::QR_CODE,
-            qr_size as i32,
-            qr_size as i32,
-        )
-        .expect("编码二维码失败");
     let size = 1600usize; // ≥ 1600 触发降采样
-    let mut rgb = vec![255u8; size * size * 3];
-    let offset = (size - qr_size) / 2;
-    for y in 0..qr_size {
-        for x in 0..qr_size {
-            let v = if matrix.get(x as u32, y as u32) {
-                0u8
-            } else {
-                255u8
-            };
-            let i = ((y + offset) * size + (x + offset)) * 3;
-            rgb[i] = v;
-            rgb[i + 1] = v;
-            rgb[i + 2] = v;
-        }
-    }
+    let rgb = render_qr_rgb(text, size, false);
     let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("解码二维码失败");
     assert_eq!(decoded, text);
 }
 
-/// 反色二维码（白码黑底，游戏登录界面常见）应通过 ALSO_INVERTED 解出。
+/// 反色二维码（白码黑底，游戏登录界面常见）应通过翻转重试解出。
 #[test]
 fn decode_rgb_inverted_roundtrip() {
-    use rxing::{BarcodeFormat, MultiFormatWriter, Writer};
-
     let text = "https://x/qr_code_in_game.html?ticket=INVERTED";
     let size = 200usize;
-    let matrix = MultiFormatWriter
-        .encode(text, &BarcodeFormat::QR_CODE, size as i32, size as i32)
-        .expect("编码二维码失败");
-    let mut rgb = Vec::with_capacity(size * size * 3);
-    for y in 0..size {
-        for x in 0..size {
-            // 反色：模块为白，背景为黑
-            let v = if matrix.get(x as u32, y as u32) {
-                255u8
-            } else {
-                0u8
-            };
-            rgb.extend_from_slice(&[v, v, v]);
-        }
-    }
+    let rgb = render_qr_rgb(text, size, true);
     let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("反色二维码解码失败");
     assert_eq!(decoded, text);
 }
@@ -184,40 +140,26 @@ fn decode_rgb_inverted_roundtrip() {
 /// 解码附带位置信息，且位置外接框落在二维码区域内。
 #[test]
 fn decode_rgb_located_returns_bbox() {
-    use rxing::{BarcodeFormat, MultiFormatWriter, Writer};
-
     let text = "https://x/qr_code_in_game.html?ticket=LOC";
     let qr_size = 200usize;
-    let matrix = MultiFormatWriter
-        .encode(
-            text,
-            &BarcodeFormat::QR_CODE,
-            qr_size as i32,
-            qr_size as i32,
-        )
-        .expect("编码二维码失败");
+    let qr_rgb = render_qr_rgb(text, qr_size, false);
     let size = 800usize;
     let off_x = 300usize;
     let off_y = 200usize;
     let mut rgb = vec![255u8; size * size * 3];
     for y in 0..qr_size {
         for x in 0..qr_size {
-            let v = if matrix.get(x as u32, y as u32) {
-                0u8
-            } else {
-                255u8
-            };
+            let i0 = (y * qr_size + x) * 3;
             let i = ((y + off_y) * size + (x + off_x)) * 3;
-            rgb[i] = v;
-            rgb[i + 1] = v;
-            rgb[i + 2] = v;
+            rgb[i] = qr_rgb[i0];
+            rgb[i + 1] = qr_rgb[i0 + 1];
+            rgb[i + 2] = qr_rgb[i0 + 2];
         }
     }
     let (decoded, loc) = qr::decode_rgb_located(&rgb, size as u32, size as u32).expect("解码失败");
     assert_eq!(decoded, text);
     let b = loc.expect("应返回二维码位置");
-    // 定位点只覆盖三个定位图案中心，外接框略小于二维码本体，
-    // 只需保证其中心大致落在二维码区域内（ROI 用途足够）。
+    // 外接框中心应大致落在二维码区域内（ROI 用途足够）。
     let cx = b.x as i32 + b.w as i32 / 2;
     let cy = b.y as i32 + b.h as i32 / 2;
     let pad = (qr_size / 2) as i32;
@@ -306,21 +248,6 @@ fn config_roundtrip() {
     let s = serde_json::to_string(&cfg).unwrap();
     let back: AppConfig = serde_json::from_str(&s).unwrap();
     assert_eq!(back.active_bili("bh3").unwrap().uname, "tester");
-    // 迁移用 legacy 字段保存时不再写出
-    assert!(!s.contains("\"bili\":{"));
-}
-
-#[test]
-fn config_sanitize() {
-    let mut cfg = AppConfig {
-        interval_ms: 1,
-        ..Default::default()
-    };
-    cfg.sanitize();
-    assert!(cfg.interval_ms >= 50);
-    cfg.interval_ms = 9999;
-    cfg.sanitize();
-    assert!(cfg.interval_ms <= 5000);
 }
 
 #[test]
@@ -330,28 +257,9 @@ fn config_accepts_partial_json() {
         r#"{"channel":"official","scan_channel":"auto","region":{"x":1,"y":2,"w":3,"h":4}}"#,
     )
     .unwrap();
-    assert_eq!(cfg.interval_ms, 150);
+    assert!(!cfg.always_on_top);
     assert!(cfg.bili_accounts.is_empty());
     assert!(cfg.game_channel.is_empty());
-}
-
-#[test]
-fn config_migrates_legacy_accounts() {
-    let mut cfg: AppConfig = serde_json::from_str(
-        r#"{"bili":{"uid":"1","access_key":"k","uname":"old","last_login_succ":true},
-            "official":{"uid":"2","stoken":"s","mid":"m","last_login_succ":true}}"#,
-    )
-    .unwrap();
-    cfg.migrate_legacy();
-    assert_eq!(cfg.bili_accounts.len(), 1);
-    assert_eq!(cfg.official_accounts.len(), 1);
-    assert_eq!(cfg.active_bili.get("bh3").map(|s| s.as_str()), Some("1"));
-    assert_eq!(cfg.active_official.get("bh3").map(|s| s.as_str()), Some("2"));
-    // 旧账号归入崩坏3，渠道推断为 B 服。
-    assert_eq!(
-        cfg.game_channel.get("bh3").copied().flatten(),
-        Some(Channel::Bilibili)
-    );
 }
 
 #[test]
@@ -443,9 +351,9 @@ fn dpapi_prefix_marked() {
 }
 
 #[test]
-fn unprotect_plaintext_passthrough() {
-    // 旧版明文（无前缀）应原样返回，向后兼容。
-    assert_eq!(crypto::unprotect_secret("legacy-plain"), "legacy-plain");
+fn unprotect_without_prefix_is_empty() {
+    // 不带 DPAPI 前缀的数据非本程序写出的密文，返回空（避免当令牌使用）。
+    assert_eq!(crypto::unprotect_secret("legacy-plain"), "");
 }
 
 #[test]
@@ -489,7 +397,10 @@ fn current_channel_single_selection() {
         last_used_at: 0,
     });
     // upsert_official 后该游戏渠道切到官服，但 B 服的 active 账号仍保留。
-    assert_eq!(cfg.active_official.get("bh3").map(|s| s.as_str()), Some("o1"));
+    assert_eq!(
+        cfg.active_official.get("bh3").map(|s| s.as_str()),
+        Some("o1")
+    );
     assert_eq!(
         cfg.game_channel.get("bh3").copied().flatten(),
         Some(Channel::Official)
@@ -516,20 +427,6 @@ fn current_channel_single_selection() {
     cfg.remove_official("bh3", "o1");
     assert_eq!(cfg.game_channel.get("bh3").copied().flatten(), None);
     assert_eq!(cfg.current_uid("bh3"), None);
-}
-
-#[test]
-fn legacy_config_infers_current_channel() {
-    // 旧配置（无 current_channel）按已选中的渠道推断。
-    let mut cfg: AppConfig = serde_json::from_str(
-        r#"{"bili":{"uid":"1","access_key":"k","uname":"old","last_login_succ":true}}"#,
-    )
-    .unwrap();
-    cfg.migrate_legacy();
-    assert_eq!(
-        cfg.game_channel.get("bh3").copied().flatten(),
-        Some(Channel::Bilibili)
-    );
 }
 
 #[test]
@@ -598,7 +495,7 @@ fn tv_sign_sorts_params_and_appends_sec() {
 
 #[test]
 fn game_parse_all_variants() {
-    use bh3_scanner_lib::config::Game;
+    use game_login_scanner_lib::config::Game;
     assert_eq!(Game::parse("bh3"), Some(Game::Bh3));
     assert_eq!(Game::parse("hsr"), Some(Game::Hsr));
     assert_eq!(Game::parse("genshin"), Some(Game::Genshin));
@@ -610,7 +507,7 @@ fn game_parse_all_variants() {
 
 #[test]
 fn game_app_id_mihoyo_vs_hypergryph() {
-    use bh3_scanner_lib::config::Game;
+    use game_login_scanner_lib::config::Game;
     assert_eq!(Game::Bh3.app_id(), 1);
     assert_eq!(Game::Hsr.app_id(), 8);
     assert_eq!(Game::Genshin.app_id(), 4);
@@ -622,7 +519,7 @@ fn game_app_id_mihoyo_vs_hypergryph() {
 
 #[test]
 fn game_is_hypergryph() {
-    use bh3_scanner_lib::config::Game;
+    use game_login_scanner_lib::config::Game;
     assert!(!Game::Bh3.is_hypergryph());
     assert!(Game::Endfield.is_hypergryph());
     assert!(Game::Arknights.is_hypergryph());
@@ -630,7 +527,7 @@ fn game_is_hypergryph() {
 
 #[test]
 fn game_label_non_empty() {
-    use bh3_scanner_lib::config::Game;
+    use game_login_scanner_lib::config::Game;
     for g in [
         Game::Bh3,
         Game::Hsr,
@@ -652,4 +549,3 @@ fn extract_hypergryph_scan_login() {
     assert_eq!(qr.kind, QrKind::Hypergryph);
     assert_eq!(qr.ticket, "SCAN123");
 }
-

@@ -22,8 +22,8 @@ use windows::core::Interface;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_BOX, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BOX,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG,
     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_STAGING,
 };
@@ -222,7 +222,7 @@ impl MonitorDup {
                     Some(&src_box),
                 );
                 self.copied = Some((bx, by, bw, bh));
-                self.tile_want = false;   // 已为该请求拷贝，等消费者下次请求
+                self.tile_want = false; // 已为该请求拷贝，等消费者下次请求
                 let _ = self.dup.ReleaseFrame();
                 return Grab::New;
             }
@@ -257,16 +257,8 @@ impl MonitorDup {
                 bottom: cy + ch,
                 back: 1,
             };
-            self.context.CopySubresourceRegion(
-                &self.staging,
-                0,
-                0,
-                0,
-                0,
-                &tex,
-                0,
-                Some(&src_box),
-            );
+            self.context
+                .CopySubresourceRegion(&self.staging, 0, 0, 0, 0, &tex, 0, Some(&src_box));
             self.copied = Some((cx, cy, cw, ch));
             let _ = self.dup.ReleaseFrame();
             Grab::New
@@ -298,8 +290,8 @@ impl MonitorDup {
         unsafe {
             let mut rects = [windows::Win32::Foundation::RECT::default(); 64];
             let mut required: u32 = 0;
-            let cap = (rects.len() * std::mem::size_of::<windows::Win32::Foundation::RECT>())
-                as u32;
+            let cap =
+                (rects.len() * std::mem::size_of::<windows::Win32::Foundation::RECT>()) as u32;
             if self
                 .dup
                 .GetFrameDirtyRects(cap, rects.as_mut_ptr(), &mut required)
@@ -318,9 +310,9 @@ impl MonitorDup {
             let rt = roi.1 - ot;
             let rr = rl + roi.2;
             let rb = rt + roi.3;
-            rects[..n.min(rects.len())].iter().any(|r| {
-                r.left < rr && r.right > rl && r.top < rb && r.bottom > rt
-            })
+            rects[..n.min(rects.len())]
+                .iter()
+                .any(|r| r.left < rr && r.right > rl && r.top < rb && r.bottom > rt)
         }
     }
 
@@ -364,7 +356,12 @@ impl MonitorDup {
         }
         let x1 = x1.min(self.w);
         let y1 = y1.min(self.h);
-        Some((x0, y0, x1.saturating_sub(x0).max(1), y1.saturating_sub(y0).max(1)))
+        Some((
+            x0,
+            y0,
+            x1.saturating_sub(x0).max(1),
+            y1.saturating_sub(y0).max(1),
+        ))
     }
 
     /// 用脏矩形标记本帧待更新的瓦片。取脏矩形失败时保守标记全部。
@@ -378,7 +375,8 @@ impl MonitorDup {
         unsafe {
             let mut rects = [windows::Win32::Foundation::RECT::default(); 64];
             let mut required: u32 = 0;
-            let cap = (rects.len() * std::mem::size_of::<windows::Win32::Foundation::RECT>()) as u32;
+            let cap =
+                (rects.len() * std::mem::size_of::<windows::Win32::Foundation::RECT>()) as u32;
             if self
                 .dup
                 .GetFrameDirtyRects(cap, rects.as_mut_ptr(), &mut required)
@@ -398,7 +396,9 @@ impl MonitorDup {
                 let dx0 = (r.left.max(0) as u32 * tw / self.w).min(tw.saturating_sub(1));
                 let dy0 = (r.top.max(0) as u32 * th / self.h).min(th.saturating_sub(1));
                 let dx1 = ((r.right.max(0) as u32) * tw / self.w).max(dx0 + 1).min(tw);
-                let dy1 = ((r.bottom.max(0) as u32) * th / self.h).max(dy0 + 1).min(th);
+                let dy1 = ((r.bottom.max(0) as u32) * th / self.h)
+                    .max(dy0 + 1)
+                    .min(th);
                 let c0 = dx0 / TILE_PX;
                 let r0 = dy0 / TILE_PX;
                 let c1 = (dx1 - 1) / TILE_PX;
@@ -632,8 +632,10 @@ impl MonitorDup {
                     // 对应源图范围（按比例回映射）
                     let sx0 = (dx0 as u64 * self.w as u64 / tw as u64) as u32;
                     let sy0 = (dy0 as u64 * self.h as u64 / th as u64) as u32;
-                    let sx1 = ((dx0 + dw) as u64 * self.w as u64 / tw as u64).min(self.w as u64) as u32;
-                    let sy1 = ((dy0 + dh) as u64 * self.h as u64 / th as u64).min(self.h as u64) as u32;
+                    let sx1 =
+                        ((dx0 + dw) as u64 * self.w as u64 / tw as u64).min(self.w as u64) as u32;
+                    let sy1 =
+                        ((dy0 + dh) as u64 * self.h as u64 / th as u64).min(self.h as u64) as u32;
                     // 瓦片源矩形必须完整落在已拷贝的 bbox 内，否则留到下一帧。
                     if sx0 < bx || sy0 < by || sx1 > bx + bw || sy1 > by + bh {
                         remaining[idx] = true;
@@ -650,8 +652,9 @@ impl MonitorDup {
                     sums.resize(n * 3, 0);
                     counts.clear();
                     counts.resize(n, 0);
-                    let xbin: Vec<usize> =
-                        (0..sw as usize).map(|i| i * dw as usize / sw as usize).collect();
+                    let xbin: Vec<usize> = (0..sw as usize)
+                        .map(|i| i * dw as usize / sw as usize)
+                        .collect();
                     for yy in 0..sh as usize {
                         let yb = yy * dh as usize / sh as usize;
                         let rowp = std::slice::from_raw_parts(
@@ -678,7 +681,8 @@ impl MonitorDup {
                             let rr = (sums[i * 3] / cnt) as u8;
                             let gg = (sums[i * 3 + 1] / cnt) as u8;
                             let bb = (sums[i * 3 + 2] / cnt) as u8;
-                            let off = (((dy0 + yy as u32) * tw_us as u32 + (dx0 + xx as u32)) * 4) as isize;
+                            let off = (((dy0 + yy as u32) * tw_us as u32 + (dx0 + xx as u32)) * 4)
+                                as isize;
                             if same
                                 && (*base_ptr_out.offset(off) != rr
                                     || *base_ptr_out.offset(off + 1) != gg
@@ -700,7 +704,8 @@ impl MonitorDup {
                     let mut o = 0usize;
                     for yy in 0..dh as usize {
                         for xx in 0..dw as usize {
-                            let off = (((dy0 + yy as u32) * tw_us as u32 + (dx0 + xx as u32)) * 4) as isize;
+                            let off = (((dy0 + yy as u32) * tw_us as u32 + (dx0 + xx as u32)) * 4)
+                                as isize;
                             *base_ptr_out.offset(off) = tile_rgba[o];
                             *base_ptr_out.offset(off + 1) = tile_rgba[o + 1];
                             *base_ptr_out.offset(off + 2) = tile_rgba[o + 2];
@@ -750,7 +755,7 @@ fn get_or_create(key: MonitorKey) -> Result<Arc<Entry>, Unavailable> {
     if !s.bus_started {
         s.bus_started = true;
         let _ = std::thread::Builder::new()
-            .name("bh3-dup-bus".into())
+            .name("game-scanner-dup-bus".into())
             .spawn(bus_loop);
     }
     let now = std::time::SystemTime::now()
@@ -976,7 +981,7 @@ pub fn set_tile_mode(region: MonitorKey, on: bool) {
             // 每次开启（新一次拖拽）都强制全量：前端起手会重建底图 canvas，
             // 需一次性铺满全部瓦片，否则只收到零星脏瓦片 → 大面积黑屏。
             m.tiles.dirty.iter_mut().for_each(|d| *d = true);
-            m.tile_want = true;   // 请求首帧
+            m.tile_want = true; // 请求首帧
         }
     }
 }

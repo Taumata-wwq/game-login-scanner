@@ -1,5 +1,6 @@
-//! 崩坏3 扫码器库入口：模块声明 + Tauri 命令 + 运行时装配。
+//! 游戏扫码器库入口：模块声明 + Tauri 命令 + 运行时装配。
 
+pub mod clipboard;
 pub mod config;
 pub mod constants;
 pub mod crypto;
@@ -83,8 +84,7 @@ fn save_config(
     state: tauri::State<'_, AppState>,
     cfg: AppConfig,
 ) -> Result<(), String> {
-    let mut c = cfg;
-    c.sanitize();
+    let c = cfg;
     c.save().map_err(|e| e.to_string())?;
     let prev_on_top = state
         .config
@@ -293,12 +293,20 @@ fn reorder_accounts(
     match channel {
         Channel::Bilibili => {
             cfg.bili_accounts.sort_by_key(|t| {
-                if t.game == game { idx(&t.uid) } else { usize::MAX }
+                if t.game == game {
+                    idx(&t.uid)
+                } else {
+                    usize::MAX
+                }
             });
         }
         Channel::Official => {
             cfg.official_accounts.sort_by_key(|t| {
-                if t.game == game { idx(&t.uid) } else { usize::MAX }
+                if t.game == game {
+                    idx(&t.uid)
+                } else {
+                    usize::MAX
+                }
             });
         }
     }
@@ -477,11 +485,9 @@ async fn ensure_device_fp(state: &tauri::State<'_, AppState>) -> Result<String, 
 async fn cred_send_code(
     state: tauri::State<'_, AppState>,
     channel: String,
-    game: String,
     phone: String,
     aigis: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let _ = game;
     let aigis = aigis.unwrap_or_default();
     match channel.as_str() {
         "official" => {
@@ -536,7 +542,8 @@ async fn cred_login_pwd(
         "official" => {
             let device_id = cfg_device_id(&state);
             let device_fp = ensure_device_fp(&state).await?;
-            sdk::cred_login::mihoyo_login_pwd(&device_id, &device_fp, &account, &password, &aigis).await?
+            sdk::cred_login::mihoyo_login_pwd(&device_id, &device_fp, &account, &password, &aigis)
+                .await?
         }
         "bilibili" => sdk::cred_login::bili_login_pwd(&account, &password, &aigis).await?,
         _ => return Err("未知渠道".to_string()),
@@ -637,11 +644,8 @@ async fn hypergryph_login(
     Ok(())
 }
 
-// ---------- 扫码登录（账号登录，双渠道同一张界面同时等待） ----------
+// ---------- 扫码登录（账号登录二维码） ----------
 
-/// 为 B 服与官服**同时**生成登录二维码：B 服码用 B 站 App 扫、官服码用米游社
-/// App 扫，哪个先确认就用哪个登录，无需切换渠道。
-/// 返回 (bili_svg, official_svg)。
 /// 生成指定渠道的登录二维码（主界面选中哪个渠道，就生成哪个）。
 /// 返回 (渠道名, 二维码 SVG)。
 #[tauri::command]
@@ -677,11 +681,9 @@ async fn login_qr_start(
             svg
         }
         config::Channel::Official => {
-            let official = sdk::official::qr_login_start(
-                &device_id,
-                constants::DSPROD_DEVICE_FP_DEFAULT,
-            )
-            .await?;
+            let official =
+                sdk::official::qr_login_start(&device_id, constants::DSPROD_DEVICE_FP_DEFAULT)
+                    .await?;
             let svg = qr::qr_svg(&official.qr_url)?;
             slots.official = Some(official);
             svg
@@ -924,7 +926,7 @@ fn login_qr_cancel(state: tauri::State<'_, AppState>) {
 
 // ---------- 扫描区域 ----------
 
-/// 预览 GDI 兜底缓存：桌面复制不可用时降级（内部限频 15fps），
+/// 预览 GDI 兜底缓存：桌面复制不可用时降级（内部限频 60fps），
 /// 保存最近一次负载（前 24 字节为头部，用于「帧未变」的头部专用响应）。
 struct GdiPreviewCache {
     at: std::time::Instant,
@@ -957,8 +959,7 @@ async fn capture_preview(
     h: i32,
     max_width: Option<u32>,
 ) -> Result<tauri::ipc::Response, String> {
-    // 用带 1 秒缓存的 screen_rects() 取代每帧的 screenshots::Screen::all()
-    //（后者每次枚举所有显示器，是预览帧率上不去的瓶颈之一）。
+    // 用带 1 秒缓存的 screen_rects() 枚举显示器（每帧实时枚举是预览帧率上不去的瓶颈之一）。
     let screens = crate::screenshot::screen_rects();
     if screens.is_empty() {
         return Err("未找到可用显示器".to_string());
@@ -1019,7 +1020,7 @@ async fn capture_preview(
             Ok(tauri::ipc::Response::new(vec![0u8; 24]))
         }
         Err(_) => {
-            // GDI 兜底：限频 15fps，未到间隔时沿用缓存帧。
+            // GDI 兜底：限频 60fps（16ms），未到间隔时沿用缓存帧。
             let mut g = GDI_PREVIEW
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1086,7 +1087,10 @@ fn capture_tiles(
         .and_then(|win| {
             let pos = win.outer_position().ok()?;
             let size = win.outer_size().ok()?;
-            Some((pos.x + size.width as i32 / 2, pos.y + size.height as i32 / 2))
+            Some((
+                pos.x + size.width as i32 / 2,
+                pos.y + size.height as i32 / 2,
+            ))
         })
         .unwrap_or((0, 0));
     let d = screens
@@ -1097,7 +1101,11 @@ fn capture_tiles(
         .copied()
         .unwrap_or(screens[0]);
     let (dx, dy, mw, mh) = d;
-    let (rx, ry, rw, rh) = if w > 0 && h > 0 { (x, y, w, h) } else { (dx, dy, mw, mh) };
+    let (rx, ry, rw, rh) = if w > 0 && h > 0 {
+        (x, y, w, h)
+    } else {
+        (dx, dy, mw, mh)
+    };
     let want_w = max_width.clamp(80, 4096);
     match crate::duplication::tile_frame((rx, ry, rw, rh), want_w) {
         Ok(Some((tw, th, tiles))) => {
@@ -1239,7 +1247,6 @@ fn try_start_scan(app: &tauri::AppHandle, state: &AppState) -> Result<(), String
                 hypergryph: hyper,
                 bili,
                 official,
-                interval_ms: cfg.interval_ms,
                 device_id: cfg.device_id,
                 clear_clipboard: cfg.clear_clipboard,
                 auto_close: cfg.auto_close,
@@ -1346,9 +1353,9 @@ fn take_captcha_result(state: tauri::State<'_, AppState>) -> Option<String> {
 // ---------- 运行入口 ----------
 
 /// 初始化文件日志与 panic 记录。GUI 进程无控制台，闪退 / 异常只有落到文件
-/// 才能事后排查（`%APPDATA%\游戏扫码器\bh3-scanner.log`，超过 2MB 轮转为 .old）。
+/// 才能事后排查（`%APPDATA%\游戏扫码器\game-login-scanner.log`，超过 2MB 轮转为 .old）。
 fn init_file_logging() {
-    let path = AppConfig::path().with_file_name("bh3-scanner.log");
+    let path = AppConfig::path().with_file_name("game-login-scanner.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

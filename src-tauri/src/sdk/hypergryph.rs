@@ -46,24 +46,30 @@ fn now_sec() -> i64 {
 /// POST JSON 到鹰角，返回解析后的 JSON。
 async fn post_json(path: &str, body: &Value, token: Option<&str>) -> Result<Value, String> {
     let url = format!("{AS_HOST}{path}");
-    let mut req = crate::http::client()
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("User-Agent", SKLAND_UA)
-        .body(body.to_string());
+    let mut headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("Accept".to_string(), "application/json".to_string()),
+        ("User-Agent".to_string(), SKLAND_UA.to_string()),
+    ];
     if let Some(t) = token {
-        req = req.header("cred", t);   // 鹰角部分接口用 cred 头
+        headers.push(("cred".to_string(), t.to_string())); // 鹰角部分接口用 cred 头
     }
-    let resp = req.send().await.map_err(|e| format!("鹰角请求失败: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    let resp = crate::http::post(&url, headers, &body.to_string())
+        .await
+        .map_err(|e| format!("鹰角请求失败: {e}"))?;
     // 参数校验失败走 HTTP 400：响应无 status，只有 msg。
-    let json: Value = serde_json::from_str(&text)
-        .map_err(|_| format!("鹰角响应非 JSON: {}", &text[..text.len().min(200)]))?;
-    if !status.is_success() {
-        let msg = json.get("msg").and_then(|v| v.as_str()).unwrap_or("请求失败");
-        return Err(format!("鹰角接口错误({status}): {msg}"));
+    let json: Value = serde_json::from_str(&resp.body).map_err(|_| {
+        format!(
+            "鹰角响应非 JSON: {}",
+            &resp.body[..resp.body.len().min(200)]
+        )
+    })?;
+    if !(200..300).contains(&resp.status) {
+        let msg = json
+            .get("msg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("请求失败");
+        return Err(format!("鹰角接口错误({}): {msg}", resp.status));
     }
     Ok(json)
 }
