@@ -343,23 +343,6 @@ pub async fn mihoyo_login_pwd(
     parse_mihoyo_login(&json, &resp_headers)
 }
 
-/// B站：获取 Web 登录 RSA 公钥 + 盐。
-async fn bili_web_key() -> Result<(String, String), String> {
-    let resp = crate::http::client()
-        .get(constants::BILI_WEB_KEY_URL)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BiliLogin/1.0")
-        .send()
-        .await
-        .map_err(|e| format!("获取 B站公钥失败: {e}"))?;
-    let json: Value = resp.json().await.map_err(|e| format!("B站公钥响应解析失败: {e}"))?;
-    let key = json["data"]["key"].as_str().unwrap_or_default().to_string();
-    let salt = json["data"]["hash"].as_str().unwrap_or_default().to_string();
-    if key.is_empty() {
-        return Err("B站公钥为空".to_string());
-    }
-    Ok((key, salt))
-}
-
 /// 把键值对编码为 application/x-www-form-urlencoded 字符串。
 fn url_encode(pairs: &[(String, String)]) -> String {
     url::form_urlencoded::Serializer::new(String::new())
@@ -573,47 +556,51 @@ pub async fn bili_login_sms(
     Ok(bili_extract_cookies(&headers, &json))
 }
 
-/// B站：密码登录。
+/// B站：密码登录。走**游戏 SDK**（line1-sdk-center-login-sh.biligame.net，app_id=180），
+/// 直接返回游戏 access_key，避开通行证 Web 登录的严苛风控（86103）。
+/// captcha_key 为空时直接尝试登录；若服务端要求验证码则返回 NeedCaptcha
+/// （含 gt/challenge/userid），前端完成极验后以 JSON {challenge,userid,validate} 重试。
 pub async fn bili_login_pwd(
     account: &str,
     password: &str,
     captcha_key: &str,
 ) -> Result<CredOutcome, String> {
-    // 首次调用（无极验结果）：先申请极验任务返回前端。
-    if captcha_key.is_empty() {
-        return Ok(CredOutcome::NeedCaptcha(bili_captcha().await?));
+    // 解析极验结果（若有）。
+    let cap = if captcha_key.is_empty() {
+        None
+    } else {
+        let v: Value = serde_json::from_str(captcha_key)
+            .map_err(|_| "B站极验结果格式错误".to_string())?;
+        Some((
+            v["challenge"].as_str().unwrap_or_default().to_string(),
+            v["userid"].as_str().unwrap_or_default().to_string(),
+            v["validate"].as_str().unwrap_or_default().to_string(),
+        ))
+    };
+    let cap_ref = cap.as_ref().map(|(c, u, v)| (c.as_str(), u.as_str(), v.as_str()));
+    let resp = crate::sdk::bili::bili_sdk_login(account, password, cap_ref).await?;
+    log::info!("[B站SDK登录] {}", &resp.to_string()[..resp.to_string().len().min(600)]);
+    // 成功：含 access_key。
+    if let Some(ak) = resp.get("access_key").and_then(|v| v.as_str()) {
+        if !ak.is_empty() {
+            let uid = resp
+                .get("uid")
+                .map(|v| v.to_string().trim_matches('"').to_string())
+                .unwrap_or_default();
+            return Ok(CredOutcome::BiliOk {
+                uid,
+                access_key: ak.to_string(),
+            });
+        }
     }
-    let (token, challenge, validate, seccode) = bili_parse_captcha(captcha_key)?;
-    let (key, salt) = bili_web_key().await?;
-    let enc_pwd = crypto::rsa_encrypt_b64(&key, &format!("{salt}{password}"))?;
-    // 密码登录：username + password(带盐 RSA) + keep=0 + source=main_web + 极验四参数。
-    let form = vec![
-        ("username".to_string(), account.to_string()),
-        ("password".to_string(), enc_pwd),
-        ("keep".to_string(), "0".to_string()),
-        ("source".to_string(), "main_web".to_string()),
-        ("token".to_string(), token),
-        ("challenge".to_string(), challenge),
-        ("validate".to_string(), validate),
-        ("seccode".to_string(), seccode),
-    ];
-    let body = url_encode(&form);
-    let resp = crate::http::client()
-        .post(constants::BILI_WEB_LOGIN_URL)
-        .headers(bili_headers_with_buvid().await)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
-    let headers = resp.headers().clone();
-    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
-    let json: Value = serde_json::from_str(&text)
-        .map_err(|_| format!("响应非 JSON: {}", &text[..text.len().min(200)]))?;
-    let code_num = json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
-    if code_num != 0 {
-        let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("登录失败");
-        return Err(format!("B站密码登录失败: {msg}"));
-    }
-    Ok(bili_extract_cookies(&headers, &json))
+    // 需要验证码：申请极验任务返回前端。
+    let cap_data = crate::sdk::bili::bili_sdk_captcha().await?;
+    let gt = cap_data.get("gt").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let challenge = cap_data.get("challenge").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let userid = cap_data.get("gt_user_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    Ok(CredOutcome::NeedCaptcha(json!({
+        "gt": gt,
+        "challenge": challenge,
+        "userid": userid,
+    })))
 }

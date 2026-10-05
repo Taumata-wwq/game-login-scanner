@@ -82,12 +82,11 @@
                 const v = captcha.getValidate();
                 logx('GT3 onSuccess, validate=' + JSON.stringify(v));
                 if (!v) { fail('验证结果为空'); return; }
-                // B站格式：JSON（token 经 sessionId 传入；seccode 自带 |jordan）。
+                // B站游戏 SDK 格式：{challenge, userid, validate}（userid 经 sessionId 传入）。
                 const res = JSON.stringify({
-                  token: sessionId,
                   challenge: v.geetest_challenge,
+                  userid: sessionId,
                   validate: v.geetest_validate,
-                  seccode: v.geetest_seccode,
                 });
                 hint.textContent = '验证成功，正在返回…';
                 if (invoke) invoke('captcha_result', { aigis: res }).catch(() => {});
@@ -102,10 +101,9 @@
                 if (v && v.geetest_validate) {
                   done = true;
                   const res = JSON.stringify({
-                    token: sessionId,
                     challenge: v.geetest_challenge,
+                    userid: sessionId,
                     validate: v.geetest_validate,
-                    seccode: v.geetest_seccode,
                   });
                   hint.textContent = '验证成功，正在返回…';
                   if (invoke) invoke('captcha_result', { aigis: res }).catch(() => {});

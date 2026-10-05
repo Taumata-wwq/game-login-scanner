@@ -214,3 +214,69 @@ pub async fn get_user_info(uid: &str, access_key: &str) -> Result<String, String
         .unwrap_or("")
         .to_string())
 }
+
+
+// ---------- 游戏 SDK 账密登录（直接返回 access_key）----------
+
+/// B站游戏 SDK：申请 RSA 公钥与盐。
+async fn bili_sdk_rsa() -> Result<(String, String), String> {
+    let mut data: Value = serde_json::from_str(constants::BILI_SDK_RSA_PARAM)
+        .map_err(|e| format!("rsaParam 解析失败: {e}"))?;
+    let form = set_sign(&mut data);
+    let resp = send_bili_post(
+        &format!("{}api/client/rsa", constants::BILI_SDK_LOGIN),
+        &form,
+    )
+    .await?;
+    let key = resp.get("rsa_key").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let hash = resp.get("hash").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    if key.is_empty() {
+        return Err("B站游戏 SDK 公钥为空".to_string());
+    }
+    Ok((key, hash))
+}
+
+/// B站游戏 SDK：申请极验验证码（当账密登录返回需要验证码时调用）。
+pub async fn bili_sdk_captcha() -> Result<Value, String> {
+    let mut data: Value = serde_json::from_str(constants::BILI_SDK_CAPTCHA_PARAM)
+        .map_err(|e| format!("captchaParam 解析失败: {e}"))?;
+    let form = set_sign(&mut data);
+    send_bili_post(
+        &format!("{}api/client/start_captcha", constants::BILI_SDK_LOGIN),
+        &form,
+    )
+    .await
+}
+
+/// B站游戏 SDK：账密登录。返回 access_key / uid，或需验证码（含 gt/challenge/userid）。
+/// `cap` 非空时为二次登录（携带极验结果）。
+pub async fn bili_sdk_login(
+    account: &str,
+    password: &str,
+    cap: Option<(&str, &str, &str)>,
+) -> Result<Value, String> {
+    let (public_key, hash) = bili_sdk_rsa().await?;
+    let mut data: Value = serde_json::from_str(constants::BILI_SDK_LOGIN_PARAM)
+        .map_err(|e| format!("loginParam 解析失败: {e}"))?;
+    let enc_pwd = crypto::rsa_encrypt_b64(&public_key, &format!("{hash}{password}"))?;
+    data["user_id"] = Value::String(account.to_string());
+    data["pwd"] = Value::String(enc_pwd);
+    data["access_key"] = Value::String(String::new());
+    data["uid"] = Value::String(String::new());
+    if let Some((challenge, gt_user, validate)) = cap {
+        data["challenge"] = Value::String(challenge.to_string());
+        data["gt_user_id"] = Value::String(gt_user.to_string());
+        data["validate"] = Value::String(validate.to_string());
+        data["seccode"] = Value::String(format!("{validate}|jordan"));
+    } else {
+        data["challenge"] = Value::String(String::new());
+        data["gt_user_id"] = Value::String(String::new());
+        data["validate"] = Value::String(String::new());
+    }
+    let form = set_sign(&mut data);
+    send_bili_post(
+        &format!("{}api/client/login", constants::BILI_SDK_LOGIN),
+        &form,
+    )
+    .await
+}
