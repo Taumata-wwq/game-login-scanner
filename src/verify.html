@@ -36,19 +36,25 @@
       hint.textContent = msg;
       if (invoke) invoke('captcha_result', { aigis: '' }).catch(() => {});
     }
-    // popup 模式：点击后弹出居中验证面板（与普通网站一致）。
-    // 关键参数（参照 genshin.py 的国服实现）：
-    // - userInfo: 国服 App 用 {mmt_key: session_id}（海外新 OS 才用 session_id），
-    //   极验据此把本次验证与米哈游 aigis 会话绑定；缺它会「图片验证码失效」(-302)。
-    // - riskType: 米哈游下发的验证形式（icon/slide），不传可能导致验证方式不符。
-    const initParams = { captchaId, product: 'popup', language: 'zho' };
-    if (sessionId) initParams.userInfo = JSON.stringify({ mmt_key: sessionId });
+    // 参数完全对齐米哈游通行证登录页的真实初始化（浏览器抓包）：
+    // product: 'bind' + hideSuccess: true，userInfo: {session_id}（不是 mmt_key）。
+    const initParams = {
+      captchaId,
+      product: 'bind',
+      language: 'zho',
+      hideSuccess: true,
+    };
+    if (sessionId) initParams.userInfo = JSON.stringify({ session_id: sessionId });
     if (riskType) initParams.riskType = riskType;
     window.initGeetest4(
       initParams,
       (captcha) => {
       captcha.appendTo(document.getElementById('box'));
-      captcha.onReady(() => { hint.textContent = '请完成验证'; });
+      captcha.onReady(() => {
+        hint.textContent = '请完成验证';
+        // bind 模式不自动弹出，需手动调用 showCaptcha。
+        captcha.showCaptcha();
+      });
       captcha.onSuccess(() => {
         const v = captcha.getValidate();
         if (!v) { fail('验证结果为空'); return; }

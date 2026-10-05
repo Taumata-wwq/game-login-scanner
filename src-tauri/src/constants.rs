@@ -91,12 +91,15 @@ pub const OFFICIAL_DS_SALT: &str = "";
 
 // ---------- 渠道账号登录（米哈游 / B站）----------
 
+/// 米哈游通行证 Web 版 app_id（通行证登录页 user.mihoyo.com 使用，与游戏 App 不同）。
+/// 极验 aigis 与 app_id 绑定，通行证短信/登录必须用此值。
+pub const PASSPORT_WEB_APP_ID: &str = "dw9y09jqjpxc";
 /// 米哈游通行证：申请短信验证码（需 x-rpc-aigis）。
 pub const MIYOUSHE_SEND_SMS_URL: &str =
     "https://passport-api.mihoyo.com/account/ma-cn-verifier/verifier/createLoginCaptcha";
-/// 米哈游通行证：验证码登录。
+/// 米哈游通行证：验证码登录（通行证 Web 版；与 App 版 app_id 不同）。
 pub const MIYOUSHE_LOGIN_SMS_URL: &str =
-    "https://passport-api.mihoyo.com/account/ma-cn-passport/app/loginByMobileCaptcha";
+    "https://passport-api.mihoyo.com/account/ma-cn-passport/web/loginByMobileCaptcha";
 /// 米哈游通行证：密码登录。
 pub const MIYOUSHE_LOGIN_PWD_URL: &str =
     "https://passport-api.mihoyo.com/account/ma-cn-passport/app/loginByPassword";

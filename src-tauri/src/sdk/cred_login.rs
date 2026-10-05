@@ -55,6 +55,29 @@ fn dsprod_headers(device_id: &str, device_fp: &str) -> reqwest::header::HeaderMa
     h
 }
 
+/// 米哈游通行证 Web 协议头（createLoginCaptcha / web login 用）。
+/// 与游戏 App 协议（dsprod_headers）不同：通行证的 app_id/client_type/game_biz 都不同，
+/// 极验 aigis 上下文与 app_id 绑定，用错会导致「图片验证码失效」(-302)。
+fn passport_web_headers(device_id: &str, device_fp: &str) -> reqwest::header::HeaderMap {
+    use reqwest::header::{HeaderMap, HeaderValue};
+    let mut h = HeaderMap::new();
+    let mut set = |k: &'static str, v: &str| {
+        if let Ok(v) = HeaderValue::from_str(v) {
+            h.insert(k, v);
+        }
+    };
+    set("x-rpc-app_id", constants::PASSPORT_WEB_APP_ID);
+    set("x-rpc-client_type", "4");
+    set("x-rpc-game_biz", "plat_cn");
+    set("x-rpc-device_id", device_id);
+    set("x-rpc-device_fp", device_fp);
+    set("x-rpc-device_name", "Chrome");
+    set("x-rpc-device_model", "Chrome%20152.0.0.0");
+    set("x-rpc-device_os", "Windows%2010%2064-bit");
+    set("x-rpc-sdk_version", "2.57.0");
+    h
+}
+
 /// 解析米哈游登录响应：成功提取 stoken/mid/uid；触发极验则返回 NeedCaptcha。
 fn parse_mihoyo_login(json: &Value, headers: &reqwest::header::HeaderMap) -> Result<CredOutcome, String> {
     // 极验：响应头 x-rpc-aigis。
@@ -148,12 +171,11 @@ pub async fn mihoyo_send_sms(
     let enc_mobile = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, phone)?;
     let enc_area = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, "+86")?;
     let body = json!({ "mobile": enc_mobile, "area_code": enc_area }).to_string();
-    let mut headers = dsprod_headers(device_id, device_fp);
+    let mut headers = passport_web_headers(device_id, device_fp);
     if !aigis.is_empty() {
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);
         }
-        // 极验第四代标识：服务端据此按 GT4 校验 aigis（缺此头会误判为 GT3）。
         headers.insert("x-rpc-aigis_v4", reqwest::header::HeaderValue::from_static("true"));
     }
     let resp = crate::http::client()
@@ -195,7 +217,7 @@ pub async fn mihoyo_login_sms(
         "captcha": code,
     })
     .to_string();
-    let mut headers = dsprod_headers(device_id, device_fp);
+    let mut headers = passport_web_headers(device_id, device_fp);
     if !aigis.is_empty() {
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);
