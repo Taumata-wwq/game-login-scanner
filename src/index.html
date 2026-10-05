@@ -111,17 +111,6 @@
   .sectitle::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 
   /* ===== 扫描区域（实时监视器） ===== */
-  .regionbox {
-    border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); overflow: hidden;
-    flex: none;   /* 固定高度（4:3 预览），不随窗口伸缩；窗口加高时空隙留在最下方 */
-  }
-  .region-head {
-    padding: 6px 8px; display: flex; align-items: center; gap: 6px;
-    color: var(--text); font-size: 10px;
-  }
-  .region-head > svg { flex: none; color: var(--muted); }
-  .region-head > span { font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
-  .region-body { padding: 0 10px 10px; }
   .preview-wrap { position: relative; background: #101010; border-radius: var(--radius); overflow: hidden; flex: none; }
   /* 底部固定操作栏 */
   .startbar { flex: none; display: flex; align-items: center; padding-top: 4px; }
@@ -1504,7 +1493,6 @@
     if (!paused && !baseMapActive) { stopPreview(); startBaseMap(); }
     const loop = () => {
       const moving = stepView();
-      dragDirty = true;
       drawView();
       if (moving || dragging) {
         viewRaf = requestAnimationFrame(loop);
@@ -1599,7 +1587,7 @@
       const buf = await invoke('capture_tiles', {
         x: 0, y: 0, w: 0, h: 0, maxWidth: BASE_MAP_TARGET,
       });
-      if (patchTiles(buf)) { baseMapReady = true; dragDirty = true; }
+      if (patchTiles(buf)) { baseMapReady = true; }
     } catch (e) { /* 瓦片失败不影响主流程 */ }
     if (!baseMapActive) return;
     const elapsed = performance.now() - t0;
@@ -1660,7 +1648,6 @@
 
   // ---------- 拖拽 / 缩放 ----------
   let panStart = null;
-  let dragDirty = true;
   let viewDirty = false;
   function enterDrag() {
     if (dragging) return;

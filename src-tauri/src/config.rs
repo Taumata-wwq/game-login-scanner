@@ -35,33 +35,9 @@ impl Game {
         }
     }
 
-    /// 游戏显示名。
-    pub fn label(self) -> &'static str {
-        match self {
-            Game::Bh3 => "崩坏3",
-            Game::Hsr => "崩坏：星穹铁道",
-            Game::Genshin => "原神",
-            Game::Zzz => "绝区零",
-            Game::Endfield => "明日方舟：终末地",
-            Game::Arknights => "明日方舟",
-        }
-    }
-
     /// 是否为鹰角系游戏（用鹰角账号确认，而非米哈游/B站账号）。
     pub fn is_hypergryph(self) -> bool {
         matches!(self, Game::Endfield | Game::Arknights)
-    }
-
-    /// 该游戏官方默认 biz_key（二维码未携带时回退；实际以二维码为准）。
-    /// 鹰角系游戏无此概念（返回空串）。
-    pub fn default_biz_key(self) -> &'static str {
-        match self {
-            Game::Bh3 => "bh3_cn",
-            Game::Hsr => "hkrpg_cn",
-            Game::Genshin => "hk4e_cn",
-            Game::Zzz => "nap_cn",
-            Game::Endfield | Game::Arknights => "",
-        }
     }
 
     /// 该游戏的米哈游 app_id（B 服 combo/panda 与官服确认用）。
@@ -76,10 +52,6 @@ impl Game {
         }
     }
 
-    /// 该游戏是否支持 B 服（B 站渠道）——仅米哈游系支持，鹰角系无。
-    pub fn supports_bilibili(self) -> bool {
-        !self.is_hypergryph()
-    }
 }
 
 /// 渠道
