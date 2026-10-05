@@ -390,18 +390,26 @@ async fn bili_buvid() -> Result<(String, String), String> {
         .send()
         .await
         .map_err(|e| format!("获取 buvid 失败: {e}"))?;
-    let json: Value = resp.json().await.map_err(|e| format!("buvid 响应解析失败: {e}"))?;
+    let text = resp.text().await.map_err(|e| format!("buvid 读取失败: {e}"))?;
+    log::info!("[B站buvid] {}", &text[..text.len().min(400)]);
+    let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     let b3 = json["data"]["b_3"].as_str().unwrap_or_default().to_string();
     let b4 = json["data"]["b_4"].as_str().unwrap_or_default().to_string();
     Ok((b3, b4))
 }
 
-/// B站短信/登录通用请求头（含 buvid 设备指纹 Cookie）。
+/// B站短信/登录通用请求头（含 buvid 设备指纹 Cookie + 设备请求信息头）。
 async fn bili_headers_with_buvid() -> reqwest::header::HeaderMap {
     let mut h = bili_headers();
     if let Ok((b3, b4)) = bili_buvid().await {
         if !b3.is_empty() {
-            if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("buvid3={b3}; buvid4={b4}")) {
+            // buvid3/buvid4 是登录风控必需的设备指纹；b_nut 为获取时间戳。
+            let nut = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let cookie = format!("buvid3={b3}; buvid4={b4}; b_nut={nut}");
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(&cookie) {
                 h.insert("Cookie", v);
             }
         }
@@ -424,6 +432,12 @@ fn bili_headers() -> reqwest::header::HeaderMap {
     );
     set("Referer", "https://passport.bilibili.com/login");
     set("Origin", "https://passport.bilibili.com");
+    // 登录页真实请求携带的设备/位置信息头（缺失可能触发风控）。
+    set(
+        "x-bili-device-req-json",
+        "{\"platform\":\"web\",\"device\":\"pc\",\"spmid\":\"333.1228\",\"mobi_app\":\"web_cn\"}",
+    );
+    set("x-bili-locale-json", "{\"c_locale\":{\"language\":\"zh\",\"script\":\"Hans\"},\"always_translate\":true}");
     h
 }
 
@@ -471,6 +485,7 @@ pub async fn bili_send_sms(phone: &str, captcha_key: &str) -> Result<Option<Valu
         ("seccode".to_string(), seccode),
     ];
     let body = url_encode(&form);
+    log::info!("[B站发短信] 请求参数: {body}");
     let resp = crate::http::client()
         .post(constants::BILI_SMS_SEND_URL)
         .headers(bili_headers_with_buvid().await)
