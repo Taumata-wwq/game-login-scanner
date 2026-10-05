@@ -153,6 +153,8 @@ pub async fn mihoyo_send_sms(
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);
         }
+        // 极验第四代标识：服务端据此按 GT4 校验 aigis（缺此头会误判为 GT3）。
+        headers.insert("x-rpc-aigis_v4", reqwest::header::HeaderValue::from_static("true"));
     }
     let resp = crate::http::client()
         .post(constants::MIYOUSHE_SEND_SMS_URL)
@@ -198,6 +200,7 @@ pub async fn mihoyo_login_sms(
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);
         }
+        headers.insert("x-rpc-aigis_v4", reqwest::header::HeaderValue::from_static("true"));
     }
     let resp = crate::http::client()
         .post(constants::MIYOUSHE_LOGIN_SMS_URL)
@@ -230,6 +233,7 @@ pub async fn mihoyo_login_pwd(
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);
         }
+        headers.insert("x-rpc-aigis_v4", reqwest::header::HeaderValue::from_static("true"));
     }
     let resp = crate::http::client()
         .post(constants::MIYOUSHE_LOGIN_PWD_URL)

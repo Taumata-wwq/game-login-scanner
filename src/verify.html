@@ -36,7 +36,11 @@
       if (invoke) invoke('captcha_result', { aigis: '' }).catch(() => {});
     }
     // popup 模式：点击后弹出居中验证面板（与普通网站一致）。
-    window.initGeetest4({ captchaId, product: 'popup', language: 'zho' }, (captcha) => {
+    // userInfo 绑定 aigis 会话：GT4 需携带 session_id，否则米哈游服务端二次校验极验
+    // 结果时会判定「图片验证码失效」（-302）。
+    window.initGeetest4(
+      { captchaId, product: 'popup', language: 'zho', userInfo: JSON.stringify({ session_id: sessionId }) },
+      (captcha) => {
       captcha.appendTo(document.getElementById('box'));
       captcha.onReady(() => { hint.textContent = '请完成验证'; });
       captcha.onSuccess(() => {
