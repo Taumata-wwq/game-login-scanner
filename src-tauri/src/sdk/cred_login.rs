@@ -75,7 +75,21 @@ fn passport_web_headers(device_id: &str, device_fp: &str) -> reqwest::header::He
     set("x-rpc-device_model", "Chrome%20152.0.0.0");
     set("x-rpc-device_os", "Windows%2010%2064-bit");
     set("x-rpc-sdk_version", "2.57.0");
+    // 关键：告知服务器请求来自通行证登录页。缺失时服务器返回「游戏 App 环境」的
+    // 极验配置（不同的 gt），导致极验结果与 app_id 上下文不匹配 → 图片验证码失效(-302)。
+    set(
+        "x-rpc-mi_referrer",
+        "https://user.mihoyo.com/login-platform/index.html?app_id=dw9y09jqjpxc&theme=passport&token_type=4&game_biz=plat_cn&message_origin=https%253A%252F%252Fuser.mihoyo.com&succ_back_type=message%253Alogin-platform%253Alogin-success&fail_back_type=message%253Alogin-platform%253Alogin-fail&ux_mode=popup&iframe_level=1#/login/captcha",
+    );
+    set("x-rpc-lifecycle_id", &hex16());
     h
+}
+
+/// 生成 16 位十六进制随机串（用于 x-rpc-lifecycle_id）。
+fn hex16() -> String {
+    use rand::Rng;
+    let n: u64 = rand::thread_rng().gen();
+    format!("{n:016x}")
 }
 
 /// 解析米哈游登录响应：成功提取 stoken/mid/uid；触发极验则返回 NeedCaptcha。
