@@ -403,6 +403,104 @@ fn hypergryph_set_meta(
     Ok(())
 }
 
+// ---------- 渠道账号登录（米哈游 / B站：验证码 / 密码） ----------
+
+/// 发送短信验证码（channel: official | bilibili）。
+#[tauri::command]
+async fn cred_send_code(channel: String, game: String, phone: String) -> Result<(), String> {
+    let _ = game;
+    match channel.as_str() {
+        "official" => sdk::cred_login::mihoyo_send_sms(&phone, "").await,
+        "bilibili" => sdk::cred_login::bili_send_sms(&phone).await,
+        _ => Err("未知渠道".to_string()),
+    }
+}
+
+/// 验证码登录。
+#[tauri::command]
+async fn cred_login_sms(
+    state: tauri::State<'_, AppState>,
+    channel: String,
+    game: String,
+    phone: String,
+    code: String,
+) -> Result<serde_json::Value, String> {
+    let outcome = match channel.as_str() {
+        "official" => sdk::cred_login::mihoyo_login_sms(&phone, &code, "").await?,
+        "bilibili" => sdk::cred_login::bili_login_sms(&phone, &code, "").await?,
+        _ => return Err("未知渠道".to_string()),
+    };
+    apply_cred_outcome(&state, &game, outcome)
+}
+
+/// 密码登录。
+#[tauri::command]
+async fn cred_login_pwd(
+    state: tauri::State<'_, AppState>,
+    channel: String,
+    game: String,
+    account: String,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    let outcome = match channel.as_str() {
+        "official" => sdk::cred_login::mihoyo_login_pwd(&account, &password, "").await?,
+        "bilibili" => sdk::cred_login::bili_login_pwd(&account, &password, "").await?,
+        _ => return Err("未知渠道".to_string()),
+    };
+    apply_cred_outcome(&state, &game, outcome)
+}
+
+/// 把登录结果写入配置（成功）或转成前端可渲染的 captcha 响应。
+fn apply_cred_outcome(
+    state: &tauri::State<'_, AppState>,
+    game: &str,
+    outcome: sdk::cred_login::CredOutcome,
+) -> Result<serde_json::Value, String> {
+    use sdk::cred_login::CredOutcome;
+    match outcome {
+        CredOutcome::NeedCaptcha(data) => {
+            Ok(serde_json::json!({ "status": "captcha", "aigis": data }))
+        }
+        CredOutcome::MiyousheOk { uid, stoken, mid } => {
+            let mut cfg = state
+                .config
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cfg.upsert_official(config::OfficialToken {
+                uid,
+                stoken,
+                mid,
+                uname: String::new(),
+                game: game.to_string(),
+                alias: String::new(),
+                remark: String::new(),
+                last_login_succ: true,
+                last_used_at: 0,
+            });
+            let _ = cfg.save();
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        CredOutcome::BiliOk { uid, access_key } => {
+            let mut cfg = state
+                .config
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cfg.upsert_bili(config::BiliToken {
+                uid,
+                access_key,
+                uname: String::new(),
+                game: game.to_string(),
+                alias: String::new(),
+                remark: String::new(),
+                last_login_succ: true,
+                last_used_at: 0,
+            });
+            let _ = cfg.save();
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+    }
+}
+
 // ---------- 鹰角账号登录（短信验证码） ----------
 
 /// 发送鹰角登录短信验证码。
@@ -1163,6 +1261,9 @@ pub fn run() {
             login_qr_cancel,
             hypergryph_send_code,
             hypergryph_login,
+            cred_send_code,
+            cred_login_sms,
+            cred_login_pwd,
             hypergryph_select,
             hypergryph_delete,
             hypergryph_set_meta,
