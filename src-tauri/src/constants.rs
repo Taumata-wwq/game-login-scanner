@@ -108,8 +108,8 @@ pub const MIYOUSHE_LOGIN_PWD_URL: &str =
 /// 来源：社区公开实现 caisxg/mhylogin（enrsapw.py）。如失效需更新。
 pub const MIYOUSHE_RSA_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDDvekdPMHN3AYhm/vktJT+YJr7\ncI5DcsNKqdsx5DZX0gDuWFuIjzdwButrIYPNmRJ1G8ybDIF7oDW2eEpm5sMbL9zs\n9ExXCdvqrn51qELbqj0XxtMTIpaCHFSI50PfPpTFV9Xt/hmyVwokoOXFlAEgCn+Q\nCgGs52bFoYMtyi+xEQIDAQAB\n-----END PUBLIC KEY-----";
 
-/// B站：发送短信验证码。
-pub const BILI_SMS_SEND_URL: &str = "https://passport.bilibili.com/x/passport-login/sms/send";
+/// B站：发送短信验证码（Web 端）。
+pub const BILI_SMS_SEND_URL: &str = "https://passport.bilibili.com/x/passport-login/web/sms/send";
 /// B站：短信验证码登录。
 pub const BILI_SMS_LOGIN_URL: &str = "https://passport.bilibili.com/x/passport-login/login/sms";
 /// B站：Web 密码登录。
