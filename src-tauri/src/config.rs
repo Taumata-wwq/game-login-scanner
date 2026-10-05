@@ -502,14 +502,45 @@ impl AppConfig {
         }
     }
 
+    /// 配置目录名（新）。
+    const DIR_NEW: &'static str = "游戏扫码器";
+    /// 配置目录名（旧，用于一次性迁移）。
+    const DIR_OLD: &'static str = "崩坏3扫码器";
+
     /// 配置文件路径：%APPDATA%\<AppName>\config.json
     pub fn path() -> PathBuf {
         let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        base.join("崩坏3扫码器").join("config.json")
+        base.join(Self::DIR_NEW).join("config.json")
+    }
+
+    /// 一次性迁移：旧目录存在且新目录无配置时，把旧目录整体复制到新目录。
+    /// 保留旧目录（不删除），以便回滚。
+    pub fn migrate_dir_if_needed() {
+        let Some(base) = dirs::config_dir() else { return };
+        let old = base.join(Self::DIR_OLD);
+        let new = base.join(Self::DIR_NEW);
+        if !old.exists() {
+            return;
+        }
+        // 新目录已有配置则不覆盖（避免每次启动重复复制）。
+        if new.join("config.json").exists() {
+            return;
+        }
+        if std::fs::create_dir_all(&new).is_err() {
+            return;
+        }
+        // 复制 config.json 与日志文件（若存在）。
+        for name in ["config.json", "bh3-scanner.log", "bh3-scanner.log.old"] {
+            let src = old.join(name);
+            if src.exists() {
+                let _ = std::fs::copy(&src, new.join(name));
+            }
+        }
     }
 
     /// 从磁盘加载；损坏/无效时备份并回退默认值。
     pub fn load() -> Self {
+        Self::migrate_dir_if_needed();
         let path = Self::path();
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<AppConfig>(&text) {

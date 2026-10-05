@@ -1348,7 +1348,7 @@ fn take_captcha_result(state: tauri::State<'_, AppState>) -> Option<String> {
 // ---------- 运行入口 ----------
 
 /// 初始化文件日志与 panic 记录。GUI 进程无控制台，闪退 / 异常只有落到文件
-/// 才能事后排查（`%APPDATA%\崩坏3扫码器\bh3-scanner.log`，超过 2MB 轮转为 .old）。
+/// 才能事后排查（`%APPDATA%\游戏扫码器\bh3-scanner.log`，超过 2MB 轮转为 .old）。
 fn init_file_logging() {
     let path = AppConfig::path().with_file_name("bh3-scanner.log");
     if let Some(parent) = path.parent() {
