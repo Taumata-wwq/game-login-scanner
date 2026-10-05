@@ -30,8 +30,10 @@ fn now_sec() -> i64 {
         .unwrap_or(0)
 }
 
-/// 米哈游 DSPROD 头（passport 登录接口用；与 official.rs 一致但独立以免耦合）。
-fn dsprod_headers() -> reqwest::header::HeaderMap {
+/// 米哈游 DSPROD 头（passport 登录接口用）。
+/// 必须与 official.rs 的 dsprod_headers 完全一致（含 device_name/model/sys_version），
+/// 否则服务端判定「请求频繁」(-1001) 风控。
+fn dsprod_headers(device_id: &str) -> reqwest::header::HeaderMap {
     use reqwest::header::{HeaderMap, HeaderValue};
     let mut h = HeaderMap::new();
     let mut set = |k: &'static str, v: &str| {
@@ -41,8 +43,11 @@ fn dsprod_headers() -> reqwest::header::HeaderMap {
     };
     set("x-rpc-app_id", constants::DSPROD_APP_ID);
     set("x-rpc-client_type", constants::DSPROD_CLIENT_TYPE);
-    set("x-rpc-device_id", constants::DSPROD_DEVICE_FP_DEFAULT);
+    set("x-rpc-device_id", device_id);
     set("x-rpc-device_fp", constants::DSPROD_DEVICE_FP_DEFAULT);
+    set("x-rpc-device_name", "崩坏3扫码器-PC");
+    set("x-rpc-device_model", "Windows");
+    set("x-rpc-sys_version", "Windows 10");
     set("x-rpc-game_biz", constants::DSPROD_GAME_BIZ);
     set("x-rpc-app_version", constants::DSPROD_APP_VERSION);
     set("x-rpc-sdk_version", constants::DSPROD_SDK_VERSION);
@@ -89,11 +94,11 @@ fn parse_mihoyo_login(json: &Value, headers: &reqwest::header::HeaderMap) -> Res
 
 /// 米哈游：发送短信验证码。
 /// aigis 为空时若触发风控会返回 NeedCaptcha（但此接口 Result<(),_> 无法表达，故触发时报错引导）。
-pub async fn mihoyo_send_sms(phone: &str, aigis: &str) -> Result<(), String> {
+pub async fn mihoyo_send_sms(device_id: &str, phone: &str, aigis: &str) -> Result<(), String> {
     let enc_mobile = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, phone)?;
     let enc_area = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, "+86")?;
     let body = json!({ "mobile": enc_mobile, "area_code": enc_area }).to_string();
-    let mut headers = dsprod_headers();
+    let mut headers = dsprod_headers(device_id);
     if !aigis.is_empty() {
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);
@@ -119,6 +124,7 @@ pub async fn mihoyo_send_sms(phone: &str, aigis: &str) -> Result<(), String> {
 
 /// 米哈游：验证码登录。
 pub async fn mihoyo_login_sms(
+    device_id: &str,
     phone: &str,
     code: &str,
     aigis: &str,
@@ -132,7 +138,7 @@ pub async fn mihoyo_login_sms(
         "captcha": code,
     })
     .to_string();
-    let mut headers = dsprod_headers();
+    let mut headers = dsprod_headers(device_id);
     if !aigis.is_empty() {
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);
@@ -155,6 +161,7 @@ pub async fn mihoyo_login_sms(
 
 /// 米哈游：密码登录。
 pub async fn mihoyo_login_pwd(
+    device_id: &str,
     account: &str,
     password: &str,
     aigis: &str,
@@ -162,7 +169,7 @@ pub async fn mihoyo_login_pwd(
     let enc_account = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, account)?;
     let enc_pwd = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, password)?;
     let body = json!({ "account": enc_account, "password": enc_pwd }).to_string();
-    let mut headers = dsprod_headers();
+    let mut headers = dsprod_headers(device_id);
     if !aigis.is_empty() {
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);

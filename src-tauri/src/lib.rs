@@ -405,12 +405,33 @@ fn hypergryph_set_meta(
 
 // ---------- 渠道账号登录（米哈游 / B站：验证码 / 密码） ----------
 
+/// 读取配置中的 device_id（空则回退默认），供登录接口设备绑定。
+fn cfg_device_id(state: &tauri::State<'_, AppState>) -> String {
+    let id = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .device_id
+        .clone();
+    if id.is_empty() {
+        constants::DSPROD_DEVICE_FP_DEFAULT.to_string()
+    } else {
+        id
+    }
+}
+
 /// 发送短信验证码（channel: official | bilibili）。
 #[tauri::command]
-async fn cred_send_code(channel: String, game: String, phone: String) -> Result<(), String> {
+async fn cred_send_code(
+    state: tauri::State<'_, AppState>,
+    channel: String,
+    game: String,
+    phone: String,
+) -> Result<(), String> {
     let _ = game;
+    let device_id = cfg_device_id(&state);
     match channel.as_str() {
-        "official" => sdk::cred_login::mihoyo_send_sms(&phone, "").await,
+        "official" => sdk::cred_login::mihoyo_send_sms(&device_id, &phone, "").await,
         "bilibili" => sdk::cred_login::bili_send_sms(&phone).await,
         _ => Err("未知渠道".to_string()),
     }
@@ -427,8 +448,9 @@ async fn cred_login_sms(
     aigis: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let aigis = aigis.unwrap_or_default();
+    let device_id = cfg_device_id(&state);
     let outcome = match channel.as_str() {
-        "official" => sdk::cred_login::mihoyo_login_sms(&phone, &code, &aigis).await?,
+        "official" => sdk::cred_login::mihoyo_login_sms(&device_id, &phone, &code, &aigis).await?,
         "bilibili" => sdk::cred_login::bili_login_sms(&phone, &code, &aigis).await?,
         _ => return Err("未知渠道".to_string()),
     };
@@ -446,8 +468,9 @@ async fn cred_login_pwd(
     aigis: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let aigis = aigis.unwrap_or_default();
+    let device_id = cfg_device_id(&state);
     let outcome = match channel.as_str() {
-        "official" => sdk::cred_login::mihoyo_login_pwd(&account, &password, &aigis).await?,
+        "official" => sdk::cred_login::mihoyo_login_pwd(&device_id, &account, &password, &aigis).await?,
         "bilibili" => sdk::cred_login::bili_login_pwd(&account, &password, &aigis).await?,
         _ => return Err("未知渠道".to_string()),
     };
