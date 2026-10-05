@@ -92,9 +92,23 @@ fn parse_mihoyo_login(json: &Value, headers: &reqwest::header::HeaderMap) -> Res
     })
 }
 
+/// 从响应头解析极验数据（x-rpc-aigis）。
+fn extract_aigis(headers: &reqwest::header::HeaderMap) -> Option<Value> {
+    let aigis = headers.get("x-rpc-aigis")?;
+    let v = aigis.to_str().ok()?;
+    if v.is_empty() || v == "null" {
+        return None;
+    }
+    serde_json::from_str(v).ok()
+}
+
 /// 米哈游：发送短信验证码。
-/// aigis 为空时若触发风控会返回 NeedCaptcha（但此接口 Result<(),_> 无法表达，故触发时报错引导）。
-pub async fn mihoyo_send_sms(device_id: &str, phone: &str, aigis: &str) -> Result<(), String> {
+/// 返回 Some(aigis) 表示触发人机验证（前端渲染极验后带 aigis 重试）；None 表示已发送。
+pub async fn mihoyo_send_sms(
+    device_id: &str,
+    phone: &str,
+    aigis: &str,
+) -> Result<Option<Value>, String> {
     let enc_mobile = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, phone)?;
     let enc_area = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, "+86")?;
     let body = json!({ "mobile": enc_mobile, "area_code": enc_area }).to_string();
@@ -112,14 +126,18 @@ pub async fn mihoyo_send_sms(device_id: &str, phone: &str, aigis: &str) -> Resul
         .send()
         .await
         .map_err(|e| format!("请求失败: {e}"))?;
-    let status = resp.status();
+    let resp_headers = resp.headers().clone();
     let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
     let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     if json.get("retcode").and_then(|v| v.as_i64()) == Some(0) {
-        return Ok(());
+        return Ok(None);
+    }
+    // 触发人机验证：响应头含 x-rpc-aigis。
+    if let Some(a) = extract_aigis(&resp_headers) {
+        return Ok(Some(a));
     }
     let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("发送失败");
-    Err(format!("发送验证码失败({status}): {msg}"))
+    Err(format!("发送验证码失败: {msg}"))
 }
 
 /// 米哈游：验证码登录。

@@ -427,12 +427,20 @@ async fn cred_send_code(
     channel: String,
     game: String,
     phone: String,
-) -> Result<(), String> {
+    aigis: Option<String>,
+) -> Result<serde_json::Value, String> {
     let _ = game;
     let device_id = cfg_device_id(&state);
+    let aigis = aigis.unwrap_or_default();
     match channel.as_str() {
-        "official" => sdk::cred_login::mihoyo_send_sms(&device_id, &phone, "").await,
-        "bilibili" => sdk::cred_login::bili_send_sms(&phone).await,
+        "official" => match sdk::cred_login::mihoyo_send_sms(&device_id, &phone, &aigis).await? {
+            Some(a) => Ok(serde_json::json!({ "status": "captcha", "aigis": a })),
+            None => Ok(serde_json::json!({ "status": "ok" })),
+        },
+        "bilibili" => {
+            sdk::cred_login::bili_send_sms(&phone).await?;
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
         _ => Err("未知渠道".to_string()),
     }
 }

@@ -524,10 +524,23 @@
         </div>
         <button class="btn" id="btnCredLogin" style="height:28px;width:100%;margin-top:8px">登录</button>
         <div class="qr-status" id="credStatus"></div>
-        <div id="credCaptchaWrap" hidden style="margin-top:8px">
-          <div class="flbl">需要人机验证，请在下方完成</div>
-          <div id="credCaptcha" style="min-height:44px"></div>
-        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 人机验证弹窗（独立叠加） -->
+  <div class="overlay" id="captchaOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        人机验证
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="captchaOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="qr-status" id="captchaHint">请完成下方验证</div>
+        <div id="captchaBox" style="min-height:44px"></div>
       </div>
     </div>
   </div>
@@ -1117,7 +1130,6 @@
     $('credPhone').value = ''; $('credCode').value = '';
     $('credAccount').value = ''; $('credPassword').value = '';
     $('credStatus').textContent = '';
-    $('credCaptchaWrap').hidden = true;
     credMode = 'sms';
     document.querySelectorAll('#credModeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === 'sms'));
     $('credSmsPage').hidden = false;
@@ -1132,29 +1144,44 @@
       $('credPwdPage').hidden = credMode !== 'pwd';
     });
   });
+  function credCountdown() {
+    const btn = $('btnCredSend');
+    let left = 60;
+    btn.disabled = true; btn.style.opacity = '0.55'; btn.textContent = left + 's';
+    credCodeTimer = setInterval(() => {
+      left--;
+      if (left <= 0) {
+        clearInterval(credCodeTimer); credCodeTimer = null;
+        btn.disabled = false; btn.style.opacity = ''; btn.textContent = '发送验证码';
+      } else { btn.textContent = left + 's'; }
+    }, 1000);
+  }
+  async function doSendCode(aigis) {
+    return invoke('cred_send_code', { channel: filter, game: curGameId(), phone: $('credPhone').value.trim(), aigis: aigis || '' });
+  }
   $('btnCredSend').addEventListener('click', async () => {
     if (credCodeTimer) return;
     const phone = $('credPhone').value.trim();
     if (!phone) { setCredStatus('请输入手机号'); return; }
     setCredStatus('发送中…');
     try {
-      await invoke('cred_send_code', { channel: filter, game: curGameId(), phone });
+      const r = await doSendCode('');
+      if (r && r.status === 'captcha') {
+        setCredStatus('需要人机验证');
+        showCaptcha(r.aigis, (aigis) => {
+          setCredStatus('发送中…');
+          doSendCode(aigis).then((r2) => {
+            if (r2 && r2.status === 'captcha') { setCredStatus('需再次验证，请关闭后重试'); return; }
+            setCredStatus('验证码已发送');
+            credCountdown();
+          }).catch((e) => setCredStatus('发送失败: ' + e));
+        });
+        return;
+      }
       setCredStatus('验证码已发送');
-      const btn = $('btnCredSend');
-      let left = 60;
-      btn.disabled = true; btn.style.opacity = '0.55'; btn.textContent = left + 's';
-      credCodeTimer = setInterval(() => {
-        left--;
-        if (left <= 0) {
-          clearInterval(credCodeTimer); credCodeTimer = null;
-          btn.disabled = false; btn.style.opacity = ''; btn.textContent = '发送验证码';
-        } else { btn.textContent = left + 's'; }
-      }, 1000);
+      credCountdown();
     } catch (e) { setCredStatus('发送失败: ' + e); }
   });
-  // 待验证上下文：登录触发极验时保存，验证完成后带 aigis 重试。
-  let credPending = null;
-
   async function doCredLogin(aigis) {
     const game = curGameId();
     if (credMode === 'sms') {
@@ -1169,7 +1196,6 @@
 
   $('btnCredLogin').addEventListener('click', async () => {
     setCredStatus('登录中…');
-    $('credCaptchaWrap').hidden = true;
     try {
       if (credMode === 'sms') {
         if (!$('credPhone').value.trim() || !$('credCode').value.trim()) { setCredStatus('请填写手机号和验证码'); return; }
@@ -1178,10 +1204,14 @@
       }
       const r = await doCredLogin('');
       if (r && r.status === 'captcha') {
-        credPending = r.aigis;
-        $('credCaptchaWrap').hidden = false;
-        setCredStatus('请完成下方人机验证');
-        renderCaptcha(r.aigis);
+        setCredStatus('需要人机验证');
+        showCaptcha(r.aigis, (aigis) => {
+          setCredStatus('验证通过，正在登录…');
+          doCredLogin(aigis).then((r2) => {
+            if (r2 && r2.status === 'captcha') { setCredStatus('需再次验证，请关闭后重试'); return; }
+            onCredSuccess();
+          }).catch((e) => setCredStatus('登录失败: ' + e));
+        });
         return;
       }
       onCredSuccess();
@@ -1193,52 +1223,57 @@
       config = c;
       renderAll();
       $('credOverlay').hidden = true;
-      $('credCaptchaWrap').hidden = true;
       log((filter === 'official' ? '官服' : 'B 服') + '账号登录成功', 'success');
     });
   }
 
-  // 极验渲染：动态加载极验 SDK，完成后回传 aigis 重试登录。
-  function renderCaptcha(aigis) {
-    const box = $('credCaptcha');
-    box.textContent = '';
+  // ---------- 人机验证（极验 GT3，独立弹窗） ----------
+  // 米哈游用极验第三代：aigis = { session_id, data: { gt, challenge, ... } }；
+  // 完成验证后组装 "session_id;base64(getValidate())" 回传。
+  let captchaRetry = null;   // 验证完成后重试的回调
+  function showCaptcha(aigis, retryFn) {
+    const data = aigis && aigis.data ? aigis.data : aigis;
     const sid = aigis && aigis.session_id ? aigis.session_id : '';
-    const gt = aigis && aigis.data ? (aigis.data.gt || '') : '';
-    const challenge = aigis && aigis.data ? (aigis.data.challenge || '') : '';
-    const captchaId = aigis && aigis.data ? (aigis.data.captcha_id || gt) : gt;
-    if (!captchaId) { box.textContent = '验证参数缺失，请重试'; return; }
-    // 动态加载极验第四代 SDK（GT4）。加载失败时提示。
-    if (!window.initGeetest4) {
-      const s = document.createElement('script');
-      s.src = 'https://static.geetest.com/v4/gt4.js';
-      s.onerror = () => { box.textContent = '极验 SDK 加载失败（网络或 CSP）'; };
-      s.onload = () => initGt4(box, captchaId, sid);
-      document.head.appendChild(s);
-    } else {
-      initGt4(box, captchaId, sid);
+    const gt = data ? (data.gt || '') : '';
+    const challenge = data ? (data.challenge || '') : '';
+    if (!gt || !challenge) {
+      if (retryFn) retryFn(''); else setCredStatus('验证参数缺失');
+      return;
     }
-  }
-  function initGt4(box, captchaId, sid) {
-    try {
-      window.initGeetest4({ captchaId, product: 'bind' }, (captcha) => {
-        captcha.appendTo(box);
-        captcha.onSuccess(() => {
-          const result = captcha.getValidate();
-          if (!result) { setCredStatus('验证结果缺失，请重试'); return; }
-          // 组装 aigis：session_id;base64(验证结果 JSON)。
-          const payload = btoa(unescape(encodeURIComponent(JSON.stringify(result))));
-          const aigisStr = sid + ';' + payload;
-          setCredStatus('验证通过，正在登录…');
-          doCredLogin(aigisStr).then((r) => {
-            if (r && r.status === 'captcha') { setCredStatus('需再次验证'); return; }
-            onCredSuccess();
-          }).catch((e) => setCredStatus('登录失败: ' + e));
+    captchaRetry = retryFn;
+    $('captchaHint').textContent = '请完成下方验证';
+    const box = $('captchaBox');
+    box.textContent = '';
+    $('captchaOverlay').hidden = false;
+    loadGt3(() => {
+      try {
+        window.initGeetest({ gt, challenge, offline: false, new_captcha: true }, (captcha) => {
+          captcha.appendTo(box);
+          captcha.onSuccess(() => {
+            const v = captcha.getValidate();
+            $('captchaOverlay').hidden = true;
+            if (!v) { if (captchaRetry) captchaRetry(''); captchaRetry = null; return; }
+            const payload = btoa(unescape(encodeURIComponent(JSON.stringify(v))));
+            const aigisStr = sid + ';' + payload;
+            const fn = captchaRetry;
+            captchaRetry = null;
+            if (fn) fn(aigisStr);
+          });
+          captcha.onError(() => { $('captchaHint').textContent = '验证出错，请关闭重试'; });
+          captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭本窗口重试'; });
         });
-        captcha.onError(() => setCredStatus('人机验证出错，请重试'));
-      });
-    } catch (e) {
-      box.textContent = '极验初始化失败: ' + e;
-    }
+      } catch (e) {
+        box.textContent = '极验初始化失败: ' + e;
+      }
+    });
+  }
+  function loadGt3(cb) {
+    if (window.initGeetest) { cb(); return; }
+    const s = document.createElement('script');
+    s.src = 'https://static.geetest.com/static/js/gt.0.4.9.js';
+    s.onerror = () => { $('captchaBox').textContent = '极验 SDK 加载失败（网络或 CSP）'; };
+    s.onload = cb;
+    document.head.appendChild(s);
   }
 
   // ---------- 鹰角账号登录 ----------
