@@ -518,7 +518,7 @@ async fn cred_login_sms(
         "bilibili" => sdk::cred_login::bili_login_sms(&phone, &code, &aigis).await?,
         _ => return Err("未知渠道".to_string()),
     };
-    apply_cred_outcome(&state, &game, outcome)
+    apply_cred_outcome(&state, &game, outcome).await
 }
 
 /// 密码登录。
@@ -541,11 +541,11 @@ async fn cred_login_pwd(
         "bilibili" => sdk::cred_login::bili_login_pwd(&account, &password, &aigis).await?,
         _ => return Err("未知渠道".to_string()),
     };
-    apply_cred_outcome(&state, &game, outcome)
+    apply_cred_outcome(&state, &game, outcome).await
 }
 
 /// 把登录结果写入配置（成功）或转成前端可渲染的 captcha 响应。
-fn apply_cred_outcome(
+async fn apply_cred_outcome(
     state: &tauri::State<'_, AppState>,
     game: &str,
     outcome: sdk::cred_login::CredOutcome,
@@ -556,6 +556,10 @@ fn apply_cred_outcome(
             Ok(serde_json::json!({ "status": "captcha", "aigis": data }))
         }
         CredOutcome::MiyousheOk { uid, stoken, mid } => {
+            // 查询米游社昵称（失败不影响登录，回退 uid 显示）。
+            let uname = sdk::official::get_uname(&uid, &stoken, &mid)
+                .await
+                .unwrap_or_default();
             let mut cfg = state
                 .config
                 .lock()
@@ -564,7 +568,7 @@ fn apply_cred_outcome(
                 uid,
                 stoken,
                 mid,
-                uname: String::new(),
+                uname,
                 game: game.to_string(),
                 alias: String::new(),
                 remark: String::new(),

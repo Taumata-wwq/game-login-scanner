@@ -4,6 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>崩坏3 扫码器</title>
+<!-- 极验 GT4：页面加载时即引入，以采集用户行为数据（登录时动态加载会导致初始化失败） -->
+<script src="https://static.geetest.com/v4/gt4.js" defer></script>
 <style>
   /* ===== 设计令牌：Adobe 风格专业黑白 ===== */
   :root {
@@ -624,6 +626,14 @@
 
   const $ = (id) => document.getElementById(id);
   const logEl = $('log');
+
+  // 全局错误捕获：极验等第三方脚本异常写入日志，便于诊断。
+  window.addEventListener('error', (e) => {
+    try { log('脚本错误: ' + (e.message || '') + ' @ ' + (e.filename || ''), 'error'); } catch (x) {}
+  }, true);
+  window.addEventListener('unhandledrejection', (e) => {
+    try { log('未处理 Promise 拒绝: ' + (e.reason || ''), 'error'); } catch (x) {}
+  });
 
   // ---------- 全局交互 ----------
   // 禁用全局右键菜单（问题4）。
