@@ -88,8 +88,21 @@
                 if (invoke) invoke('captcha_result', { aigis: res }).catch(() => {});
               });
               captcha.onError((e) => { logx('GT3 onError: ' + JSON.stringify(e)); if (!done) fail('验证出错，请关闭重试'); });
-              // onClose 在验证成功后也会触发（面板关闭），用 done 标志避免覆盖成功结果。
-              captcha.onClose(() => { logx('GT3 onClose, done=' + done); if (!done) fail(''); });
+              // 兼容：某些极验 GT3 环境完成后不触发 onSuccess，仅触发 onClose。
+              // 故 onClose 时也读 getValidate()，有验证结果即视为成功。
+              captcha.onClose(() => {
+                if (done) return;
+                const v = captcha.getValidate();
+                logx('GT3 onClose, getValidate=' + JSON.stringify(v));
+                if (v && v.geetest_validate) {
+                  done = true;
+                  const res = [sessionId, v.geetest_challenge, v.geetest_validate, v.geetest_seccode].join('|');
+                  hint.textContent = '验证成功，正在返回…';
+                  if (invoke) invoke('captcha_result', { aigis: res }).catch(() => {});
+                } else {
+                  fail('');
+                }
+              });
             }
           );
         } catch (e) { fail('极验初始化失败: ' + e); }
