@@ -1240,10 +1240,11 @@
     }
     if (!data || typeof data !== 'object') data = {};
     const sid = aigis && aigis.session_id ? aigis.session_id : '';
-    // GT4：含 captcha_id；GT3：含 gt + challenge。
-    const captchaId = data.captcha_id || data.captchaId || '';
     const gt = data.gt || '';
     const challenge = data.challenge || '';
+    // 米哈游主要用极验 GT4（data.use_v4=true），此时 gt 即 captchaId，无 challenge。
+    const useV4 = data.use_v4 === true || data.use_v4 === 1 || !!data.captcha_id;
+    const captchaId = data.captcha_id || data.captchaId || (useV4 ? gt : '');
     if (!captchaId && (!gt || !challenge)) {
       if (retryFn) retryFn(''); else setCredStatus('验证参数缺失');
       return;
@@ -1264,7 +1265,7 @@
       if (fn) fn(aigisStr);
     };
     if (captchaId) {
-      // GT4
+      // GT4：captchaId 即 gt。验证结果为 {captcha_id, lot_number, pass_token, ...}。
       loadScript('https://static.geetest.com/v4/gt4.js', 'gt4', () => {
         try {
           window.initGeetest4({ captchaId, product: 'bind' }, (captcha) => {
