@@ -33,7 +33,11 @@
     // gt3=1 表示第三代（B站）；否则第四代（米哈游）。
     const isGt3 = params.get('gt3') === '1';
     const hint = document.getElementById('hint');
+    function logx(msg) {
+      if (invoke) invoke('frontend_log', { level: 'info', msg: '[极验窗口] ' + msg }).catch(() => {});
+    }
     function fail(msg) {
+      logx('fail: ' + msg);
       hint.textContent = msg;
       if (invoke) invoke('captcha_result', { aigis: '' }).catch(() => {});
     }
@@ -56,21 +60,23 @@
           window.initGeetest(
             { gt: captchaId, challenge, offline: false, new_captcha: true, lang: 'zh-cn' },
             (captcha) => {
+              logx('GT3 captcha 就绪，gt=' + captchaId);
               captcha.appendTo(box);
-              captcha.onReady(() => { hint.textContent = '请完成验证'; });
+              captcha.onReady(() => { logx('GT3 onReady'); hint.textContent = '请完成验证'; });
               captcha.onSuccess(() => {
                 if (done) return;
                 done = true;
                 const v = captcha.getValidate();
+                logx('GT3 onSuccess, validate=' + JSON.stringify(v));
                 if (!v) { fail('验证结果为空'); return; }
                 // B站格式：token|challenge|validate|seccode（token 经 sessionId 传入）。
                 const res = [sessionId, v.geetest_challenge, v.geetest_validate, v.geetest_seccode].join('|');
                 hint.textContent = '验证成功，正在返回…';
                 if (invoke) invoke('captcha_result', { aigis: res }).catch(() => {});
               });
-              captcha.onError(() => { if (!done) fail('验证出错，请关闭重试'); });
+              captcha.onError((e) => { logx('GT3 onError: ' + JSON.stringify(e)); if (!done) fail('验证出错，请关闭重试'); });
               // onClose 在验证成功后也会触发（面板关闭），用 done 标志避免覆盖成功结果。
-              captcha.onClose(() => { if (!done) fail(''); });
+              captcha.onClose(() => { logx('GT3 onClose, done=' + done); if (!done) fail(''); });
             }
           );
         } catch (e) { fail('极验初始化失败: ' + e); }

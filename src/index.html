@@ -1259,9 +1259,11 @@
       const fn = captchaRetry;
       captchaRetry = null;
       if (res) {
+        log('极验结果: ' + res, 'info');
         setCredStatus('验证通过，正在继续…');
         if (fn) fn(res);
       } else {
+        log('极验结果为空（用户取消或验证失败）', 'error');
         setCredStatus('验证已取消');
       }
     }, 400);
