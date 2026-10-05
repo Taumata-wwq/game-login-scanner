@@ -1266,15 +1266,24 @@
     };
     if (captchaId) {
       // GT4：captchaId 即 gt。验证结果为 {captcha_id, lot_number, pass_token, ...}。
+      log('GT4 初始化 captchaId=' + captchaId, 'info');
       loadScript('https://static.geetest.com/v4/gt4.js', 'gt4', () => {
         try {
-          window.initGeetest4({ captchaId, product: 'bind' }, (captcha) => {
-            captcha.appendTo(box);
-            captcha.onSuccess(() => onValidated(captcha.getValidate()));
-            captcha.onError(() => { $('captchaHint').textContent = '验证出错，请关闭重试'; });
-            captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭重试'; });
-          });
-        } catch (e) { box.textContent = '极验初始化失败: ' + e; }
+          window.initGeetest4(
+            { captchaId, product: 'float', language: 'zho', riskType: data.risk_type || 'slide' },
+            (captcha) => {
+              log('GT4 captcha 对象已就绪，appendTo', 'info');
+              box.style.minHeight = '300px';
+              captcha.appendTo(box);
+              captcha.onSuccess(() => onValidated(captcha.getValidate()));
+              captcha.onError((e) => { log('GT4 onError: ' + JSON.stringify(e), 'error'); $('captchaHint').textContent = '验证出错，请关闭重试'; });
+              captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭重试'; });
+            }
+          );
+        } catch (e) {
+          log('GT4 初始化异常: ' + e, 'error');
+          box.textContent = '极验初始化失败: ' + e;
+        }
       });
     } else {
       // GT3
@@ -1294,8 +1303,8 @@
     if ((key === 'gt4' && window.initGeetest4) || (key === 'gt3' && window.initGeetest)) { cb(); return; }
     const s = document.createElement('script');
     s.src = src;
-    s.onerror = () => { $('captchaBox').textContent = '极验 SDK 加载失败（网络或 CSP）'; };
-    s.onload = cb;
+    s.onerror = () => { log('极验 SDK 加载失败: ' + src, 'error'); $('captchaBox').textContent = '极验 SDK 加载失败（网络或 CSP）'; };
+    s.onload = () => { log('极验 SDK 加载成功: ' + src, 'info'); cb(); };
     document.head.appendChild(s);
   }
 
