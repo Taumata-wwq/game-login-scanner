@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>人机验证</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #232323; color: #e4e4e4;
+    font: 12px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; overflow: hidden; }
+  #hint { padding: 10px 12px 4px; font-size: 11px; color: #9a9a9a; }
+  #box { display: flex; justify-content: center; padding: 8px; }
+</style>
+</head>
+<body>
+  <div id="hint">请完成下方人机验证…</div>
+  <div id="box"></div>
+  <script src="https://static.geetest.com/v4/gt4.js"></script>
+  <script>
+  (function () {
+    const T = window.__TAURI__;
+    const invoke = T && T.core ? T.core.invoke : null;
+    const params = new URLSearchParams(location.search);
+    const captchaId = params.get('captcha_id') || '';
+    const sessionId = params.get('session_id') || '';
+    const hint = document.getElementById('hint');
+    if (!captchaId) { hint.textContent = '缺少验证参数'; return; }
+    function fail(msg) {
+      hint.textContent = msg;
+      if (invoke) invoke('captcha_result', { aigis: '' }).catch(() => {});
+    }
+    window.initGeetest4({ captchaId, language: 'zho' }, (captcha) => {
+      captcha.appendTo(document.getElementById('box'));
+      captcha.onSuccess(() => {
+        const v = captcha.getValidate();
+        if (!v) { fail('验证结果为空'); return; }
+        const payload = btoa(unescape(encodeURIComponent(JSON.stringify(v))));
+        const aigis = sessionId + ';' + payload;
+        hint.textContent = '验证成功，正在返回…';
+        if (invoke) invoke('captcha_result', { aigis }).catch(() => {});
+      });
+      captcha.onError(() => fail('验证出错，请关闭重试'));
+      captcha.onClose(() => fail(''));
+    });
+  })();
+  </script>
+</body>
+</html>

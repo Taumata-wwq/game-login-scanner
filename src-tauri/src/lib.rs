@@ -39,6 +39,8 @@ pub struct AppState {
     pub region: Mutex<Option<(i32, i32, i32, i32)>>,
     /// 最近扫码成功的时刻（秒），用于 2 分钟内最多 10 次的频率限制。
     scan_success_times: Mutex<Vec<i64>>,
+    /// 独立人机验证窗口返回的结果（aigis 字符串）。
+    captcha_result: Mutex<Option<String>>,
 }
 
 fn now_sec() -> i64 {
@@ -1278,6 +1280,62 @@ fn stop_scan(state: tauri::State<'_, AppState>) {
     state.stop.store(true, Ordering::SeqCst);
 }
 
+// ---------- 独立人机验证窗口 ----------
+
+/// 打开独立的人机验证窗口（加载 verify.html，GT4 在完整窗口内渲染）。
+#[tauri::command]
+async fn open_captcha_window(
+    app: tauri::AppHandle,
+    captcha_id: String,
+    session_id: String,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    let url = WebviewUrl::App(
+        format!("verify.html?captcha_id={captcha_id}&session_id={session_id}").into(),
+    );
+    // 已存在则先关闭，避免重复。
+    if let Some(w) = app.get_webview_window("captcha") {
+        let _ = w.close();
+    }
+    WebviewWindowBuilder::new(&app, "captcha", url)
+        .title("人机验证")
+        .inner_size(420.0, 460.0)
+        .resizable(true)
+        .center()
+        .build()
+        .map_err(|e| format!("打开验证窗口失败: {e}"))?;
+    Ok(())
+}
+
+/// 验证窗口回传结果：aigis 非空 = 成功；空 = 用户关闭/失败。
+#[tauri::command]
+fn captcha_result(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    aigis: String,
+) -> Result<(), String> {
+    *state
+        .captcha_result
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(aigis);
+    // 关闭验证窗口。
+    if let Some(w) = app.get_webview_window("captcha") {
+        let _ = w.close();
+    }
+    let _ = app.emit("captcha-done", ());
+    Ok(())
+}
+
+/// 前端轮询取验证结果（取走并清空）。
+#[tauri::command]
+fn take_captcha_result(state: tauri::State<'_, AppState>) -> Option<String> {
+    state
+        .captcha_result
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
 // ---------- 运行入口 ----------
 
 /// 初始化文件日志与 panic 记录。GUI 进程无控制台，闪退 / 异常只有落到文件
@@ -1340,6 +1398,7 @@ pub fn run() {
         login_qr_seq: Mutex::new(0),
         region: Mutex::new(None),
         scan_success_times: Mutex::new(Vec::new()),
+        captcha_result: Mutex::new(None),
     };
 
     tauri::Builder::default()
@@ -1367,6 +1426,9 @@ pub fn run() {
             hypergryph_set_meta,
             start_scan,
             stop_scan,
+            open_captcha_window,
+            captcha_result,
+            take_captcha_result,
             capture_preview,
             capture_tiles,
             set_tile_mode,

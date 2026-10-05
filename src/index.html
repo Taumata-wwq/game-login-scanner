@@ -530,23 +530,6 @@
     </div>
   </div>
 
-  <!-- 人机验证弹窗（独立叠加；窗口仅 300px 宽，弹窗限制在窗口内） -->
-  <div class="overlay" id="captchaOverlay" hidden>
-    <div class="dialog" style="max-width:262px">
-      <div class="dhead">
-        人机验证
-        <span class="spacer"></span>
-        <button class="ibtn" data-close="captchaOverlay" title="关闭">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
-      </div>
-      <div class="dbody" style="padding:0">
-        <div class="qr-status" id="captchaHint" style="padding:6px">请完成下方验证</div>
-        <div id="captchaBox" style="width:340px;height:300px;transform:scale(0.73);transform-origin:top left"></div>
-      </div>
-    </div>
-  </div>
-
   <!-- 游戏选择弹窗 -->
   <div class="overlay" id="gameOverlay" hidden>
     <div class="dialog">
@@ -1241,9 +1224,9 @@
   // 米哈游用极验第三代：aigis = { session_id, data: { gt, challenge, ... } }；
   // 完成验证后组装 "session_id;base64(getValidate())" 回传。
   let captchaRetry = null;   // 验证完成后重试的回调
-  function showCaptcha(aigis, retryFn) {
+  // 打开独立验证窗口；窗口完成后经 captcha-done 事件通知，前端取回 aigis。
+  async function showCaptcha(aigis, retryFn) {
     log('人机验证数据: ' + JSON.stringify(aigis), 'info');
-    // aigis.data 可能是对象，也可能是 JSON 字符串（米哈游两种都出现）——统一解析为对象。
     let data = aigis && aigis.data !== undefined ? aigis.data : aigis;
     if (typeof data === 'string') {
       try { data = JSON.parse(data); } catch (e) { data = {}; }
@@ -1251,80 +1234,34 @@
     if (!data || typeof data !== 'object') data = {};
     const sid = aigis && aigis.session_id ? aigis.session_id : '';
     const gt = data.gt || '';
-    const challenge = data.challenge || '';
-    // 米哈游主要用极验 GT4（data.use_v4=true），此时 gt 即 captchaId，无 challenge。
-    const useV4 = data.use_v4 === true || data.use_v4 === 1 || !!data.captcha_id;
-    const captchaId = data.captcha_id || data.captchaId || (useV4 ? gt : '');
-    if (!captchaId && (!gt || !challenge)) {
+    const captchaId = data.captcha_id || data.captchaId || gt;
+    if (!captchaId) {
       if (retryFn) retryFn(''); else setCredStatus('验证参数缺失');
       return;
     }
     captchaRetry = retryFn;
-    $('captchaHint').textContent = '请完成下方验证';
-    const box = $('captchaBox');
-    box.textContent = '';
-    $('captchaOverlay').hidden = false;
-    // 统一回调：把验证结果组装成 "session_id;base64(结果JSON)" 并重试。
-    const onValidated = (result) => {
-      $('captchaOverlay').hidden = true;
-      if (!result) { if (captchaRetry) captchaRetry(''); captchaRetry = null; return; }
-      const payload = btoa(unescape(encodeURIComponent(JSON.stringify(result))));
-      const aigisStr = sid + ';' + payload;
+    setCredStatus('请在弹出的验证窗口中完成验证…');
+    try {
+      await invoke('open_captcha_window', { captchaId, sessionId: sid });
+    } catch (e) {
+      setCredStatus('打开验证窗口失败: ' + e);
+      return;
+    }
+    // 轮询取回验证结果（窗口通过 captcha_result 命令写回）。
+    const timer = setInterval(async () => {
+      let res;
+      try { res = await invoke('take_captcha_result'); } catch (e) { return; }
+      if (res === null || res === undefined) return;
+      clearInterval(timer);
       const fn = captchaRetry;
       captchaRetry = null;
-      if (fn) fn(aigisStr);
-    };
-    if (captchaId) {
-      // GT4：captchaId 即 gt。验证结果为 {captcha_id, lot_number, pass_token, ...}。
-      log('GT4 初始化 captchaId=' + captchaId, 'info');
-      loadScript('https://static.geetest.com/v4/gt4.js', 'gt4', () => {
-        let fired = false;
-        try {
-          window.initGeetest4({ captchaId, language: 'zho' }, (captcha) => {
-            fired = true;
-            log('GT4 回调触发，appendTo', 'info');
-            captcha.appendTo(box);
-            captcha.onReady(() => log('GT4 onReady', 'info'));
-            captcha.onSuccess(() => {
-              const v = captcha.getValidate();
-              log('GT4 getValidate: ' + JSON.stringify(v), 'info');
-              onValidated(v);
-            });
-            captcha.onError((e) => { log('GT4 onError: ' + JSON.stringify(e), 'error'); $('captchaHint').textContent = '验证出错，请关闭重试'; });
-            captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭重试'; });
-          });
-        } catch (e) {
-          log('GT4 初始化异常: ' + e, 'error');
-          box.textContent = '极验初始化失败: ' + e;
-        }
-        setTimeout(() => {
-          if (!fired) {
-            log('GT4 回调 5 秒未触发（initGeetest4 存在=' + (typeof window.initGeetest4) + '）', 'error');
-            box.textContent = '人机验证初始化超时，请关闭重试';
-          }
-        }, 5000);
-      });
-    } else {
-      // GT3
-      loadScript('https://static.geetest.com/static/js/gt.0.4.9.js', 'gt3', () => {
-        try {
-          window.initGeetest({ gt, challenge, offline: false, new_captcha: true }, (captcha) => {
-            captcha.appendTo(box);
-            captcha.onSuccess(() => onValidated(captcha.getValidate()));
-            captcha.onError(() => { $('captchaHint').textContent = '验证出错，请关闭重试'; });
-            captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭重试'; });
-          });
-        } catch (e) { box.textContent = '极验初始化失败: ' + e; }
-      });
-    }
-  }
-  function loadScript(src, key, cb) {
-    if ((key === 'gt4' && window.initGeetest4) || (key === 'gt3' && window.initGeetest)) { cb(); return; }
-    const s = document.createElement('script');
-    s.src = src;
-    s.onerror = () => { log('极验 SDK 加载失败: ' + src, 'error'); $('captchaBox').textContent = '极验 SDK 加载失败（网络或 CSP）'; };
-    s.onload = () => { log('极验 SDK 加载成功: ' + src, 'info'); cb(); };
-    document.head.appendChild(s);
+      if (res) {
+        setCredStatus('验证通过，正在继续…');
+        if (fn) fn(res);
+      } else {
+        setCredStatus('验证已取消');
+      }
+    }, 400);
   }
 
   // ---------- 鹰角账号登录 ----------
