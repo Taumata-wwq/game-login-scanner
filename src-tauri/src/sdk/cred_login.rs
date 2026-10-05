@@ -382,6 +382,33 @@ pub fn bili_parse_captcha(captcha_key: &str) -> Result<(String, String, String, 
     Ok((token, challenge, validate, seccode))
 }
 
+/// 获取 B站设备指纹 buvid3/buvid4（新版登录风控必需，缺失报 86103）。
+async fn bili_buvid() -> Result<(String, String), String> {
+    let resp = crate::http::client()
+        .get("https://api.bilibili.com/x/frontend/finger/spi")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .send()
+        .await
+        .map_err(|e| format!("获取 buvid 失败: {e}"))?;
+    let json: Value = resp.json().await.map_err(|e| format!("buvid 响应解析失败: {e}"))?;
+    let b3 = json["data"]["b_3"].as_str().unwrap_or_default().to_string();
+    let b4 = json["data"]["b_4"].as_str().unwrap_or_default().to_string();
+    Ok((b3, b4))
+}
+
+/// B站短信/登录通用请求头（含 buvid 设备指纹 Cookie）。
+async fn bili_headers_with_buvid() -> reqwest::header::HeaderMap {
+    let mut h = bili_headers();
+    if let Ok((b3, b4)) = bili_buvid().await {
+        if !b3.is_empty() {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("buvid3={b3}; buvid4={b4}")) {
+                h.insert("Cookie", v);
+            }
+        }
+    }
+    h
+}
+
 /// B站短信/登录通用请求头。
 fn bili_headers() -> reqwest::header::HeaderMap {
     use reqwest::header::{HeaderMap, HeaderValue};
@@ -405,7 +432,7 @@ fn bili_headers() -> reqwest::header::HeaderMap {
 pub async fn bili_captcha() -> Result<Value, String> {
     let resp = crate::http::client()
         .get(constants::BILI_CAPTCHA_URL)
-        .headers(bili_headers())
+        .headers(bili_headers_with_buvid().await)
         .send()
         .await
         .map_err(|e| format!("B站极验申请失败: {e}"))?;
@@ -446,7 +473,7 @@ pub async fn bili_send_sms(phone: &str, captcha_key: &str) -> Result<Option<Valu
     let body = url_encode(&form);
     let resp = crate::http::client()
         .post(constants::BILI_SMS_SEND_URL)
-        .headers(bili_headers())
+        .headers(bili_headers_with_buvid().await)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -513,7 +540,7 @@ pub async fn bili_login_sms(
     let body = url_encode(&form);
     let resp = crate::http::client()
         .post(constants::BILI_SMS_LOGIN_URL)
-        .headers(bili_headers())
+        .headers(bili_headers_with_buvid().await)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -558,7 +585,7 @@ pub async fn bili_login_pwd(
     let body = url_encode(&form);
     let resp = crate::http::client()
         .post(constants::BILI_WEB_LOGIN_URL)
-        .headers(bili_headers())
+        .headers(bili_headers_with_buvid().await)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
