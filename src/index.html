@@ -1,0 +1,1818 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>崩坏3 扫码器</title>
+<style>
+  /* ===== 设计令牌：Adobe 风格专业黑白 ===== */
+  :root {
+    --bg: #1c1c1c;
+    --panel: #232323;
+    --panel-2: #2a2a2a;
+    --panel-3: #303030;
+    --hover: #323232;
+    --active: #3a3a3a;
+    --border: #3a3a3a;
+    --line: #313131;
+    --text: #e4e4e4;
+    --text-strong: #ffffff;
+    --muted: #9a9a9a;
+    --faint: #6e6e6e;
+    --primary-bg: #e8e8e8;
+    --primary-fg: #1a1a1a;
+    --ok: #5cb075;
+    --warn: #d9a94a;
+    --danger: #cf4a4a;
+    --radius: 3px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 11px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 7px;
+    height: 34px; flex: none;
+    padding: 0 0 0 9px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .logo { width: 15px; height: 15px; flex: none; display: grid; place-items: center; color: var(--text-strong); }
+  header h1 { font-size: 11px; font-weight: 600; margin: 0; padding-top: 2px; letter-spacing: 0.04em; color: var(--text-strong); }
+  header .spacer { flex: 1; height: 100%; }
+  .hbtns { display: flex; align-items: center; gap: 2px; padding-right: 5px; }
+
+  .ibtn {
+    width: 22px; height: 22px; flex: none;
+    display: inline-grid; place-items: center;
+    background: transparent; color: var(--muted);
+    border: none; border-radius: var(--radius);
+    cursor: pointer; padding: 0;
+    transition: background 0.1s, color 0.1s;
+  }
+  .ibtn:hover { background: var(--hover); color: var(--text-strong); }
+  .ibtn:active { background: var(--active); }
+  .ibtn.open { color: var(--text-strong); background: var(--panel-3); }
+  .ibtn svg { display: block; }
+  .wbtn {
+    width: 22px; height: 22px; flex: none;
+    display: inline-grid; place-items: center;
+    background: transparent; color: var(--muted);
+    border: none; border-radius: var(--radius); cursor: pointer; padding: 0;
+    transition: background 0.1s, color 0.1s;
+  }
+  .wbtn:hover { background: var(--hover); color: var(--text-strong); }
+  .wbtn.close:hover { background: var(--danger); color: #fff; }
+  .wbtn svg { display: block; }
+
+  main { flex: 1; overflow: hidden; padding: 10px; display: flex; flex-direction: column; gap: 9px; }
+
+  #btnStart {
+    flex: 1 1 auto; width: 100%;
+    height: 28px; padding: 0 14px;
+    background: var(--primary-bg); color: var(--primary-fg);
+    border: none; border-radius: var(--radius);
+    font: 600 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    letter-spacing: 0.02em;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    cursor: pointer; transition: background 0.1s;
+  }
+  #btnStart:hover { background: #ffffff; }
+  #btnStart.running { background: var(--panel-2); color: #ff8f8f; box-shadow: inset 0 0 0 1px rgba(207, 74, 74, 0.55); }
+  #btnStart.running:hover { background: var(--panel-3); }
+  #btnStart.running::after {
+    content: ""; width: 9px; height: 9px; border-radius: 50%;
+    border: 2px solid rgba(207, 74, 74, 0.3); border-top-color: #ff8f8f;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 9.5px; padding: 1px 7px; border-radius: 999px; font-weight: 500; flex: none;
+    color: #cfcfcf; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #7a7a7a; }
+  .badge.run::before { background: var(--warn); }
+
+  .sectitle {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 9.5px; font-weight: 600; color: var(--faint);
+    letter-spacing: 0.1em; text-transform: uppercase;
+    height: 13px; flex: none; margin-top: 1px;
+  }
+  .sectitle::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  /* ===== 扫描区域（实时监视器） ===== */
+  .regionbox {
+    border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); overflow: hidden;
+    flex: none;   /* 固定高度（4:3 预览），不随窗口伸缩；窗口加高时空隙留在最下方 */
+  }
+  .region-head {
+    padding: 6px 8px; display: flex; align-items: center; gap: 6px;
+    color: var(--text); font-size: 10px;
+  }
+  .region-head > svg { flex: none; color: var(--muted); }
+  .region-head > span { font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
+  .region-body { padding: 0 10px 10px; }
+  .preview-wrap { position: relative; background: #101010; border-radius: var(--radius); overflow: hidden; flex: none; }
+  /* 底部固定操作栏 */
+  .startbar { flex: none; display: flex; align-items: center; padding-top: 4px; }
+  /* 显示区固定横向 4:3：宽度撑满容器、高度由宽高比自动得出，不随窗口高度拉伸。 */
+  #previewCanvas { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; cursor: grab; touch-action: none; }
+  #previewCanvas.dragging { cursor: grabbing; }
+  .region-reset {
+    position: absolute; top: 6px; right: 6px;
+    width: 20px; height: 20px;
+    display: grid; place-items: center;
+    background: rgba(20, 20, 20, 0.75); color: #cfcfcf;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    cursor: pointer; padding: 0; opacity: 0.85;
+    transition: opacity 0.1s, background 0.1s;
+  }
+  .region-reset:hover { opacity: 1; background: var(--hover); color: var(--text-strong); }
+  .fps {
+    position: absolute; left: 6px; top: 6px;
+    height: 20px; padding: 0 6px;
+    display: grid; place-items: center;
+    background: rgba(20, 20, 20, 0.75); color: #9fe0a0;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    font: 10px/1 Consolas, "Courier New", monospace;
+    cursor: pointer; opacity: 0.85; user-select: none;
+    transition: opacity 0.1s, background 0.1s;
+  }
+  .fps:hover { opacity: 1; background: var(--hover); }
+  .fps.paused { color: #e0a09f; }
+  .region-reset svg { display: block; }
+
+  /* ===== 账号区 ===== */
+  .acct-filter { display: flex; align-items: center; gap: 4px; flex: none; }
+  .filter-seg { display: flex; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+  .filter-seg button {
+    height: 20px; border: none; border-radius: 2px;
+    background: transparent; color: var(--muted);
+    font: 500 10px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 0 9px; cursor: pointer; transition: background 0.1s, color 0.1s;
+  }
+  .filter-seg button:hover { color: var(--text); background: var(--hover); }
+  .filter-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  .acct-filter .addbtn {
+    margin-left: auto; height: 24px; display: inline-flex; align-items: center; gap: 5px;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 0 9px; font: 500 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer; transition: background 0.1s;
+  }
+  .acct-filter .addbtn:hover { background: var(--hover); border-color: #4a4a4a; }
+
+  /* 账号区自身滚动：占据剩余空间、行高不压缩；滚动条只出现在账号区内部，
+     不影响上方扫描区域（overscroll-behavior 阻断滚动链，避免外层出现滚动条）。 */
+  .acct-list {
+    display: flex; flex-direction: column; gap: 2px;
+    flex: 1 1 auto; min-height: 40px;
+    overflow-y: auto; overscroll-behavior: contain;
+  }
+  .acct-item {
+    display: flex; align-items: center; gap: 7px;
+    height: 27px; flex: none; padding: 0 5px 0 8px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    cursor: pointer; transition: background 0.1s, border-color 0.1s;
+  }
+  .acct-item:hover { background: var(--hover); }
+  .acct-item.on { border-color: #555555; }
+  .radio {
+    width: 10px; height: 10px; flex: none; border-radius: 50%;
+    border: 1px solid var(--faint); background: transparent;
+  }
+  .acct-item.on .radio { border-color: var(--primary-bg); background: var(--primary-bg); box-shadow: inset 0 0 0 2px var(--panel); }
+  .chip {
+    font-size: 9.5px; font-weight: 600; flex: none;
+    padding: 1px 6px; border-radius: 2px;
+    background: var(--panel-3); color: var(--text);
+  }
+  .nm { flex: 1; min-width: 0; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .acct-item.on .nm { color: var(--text-strong); font-weight: 600; }
+  .remark { font-size: 10px; color: var(--faint); flex: none; max-width: 90px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .acct-item.dragging { opacity: 0.5; }
+  .acct-item .ibtn { width: 18px; height: 18px; visibility: hidden; }
+  .acct-item:hover .ibtn { visibility: visible; }
+  .acct-item .ibtn:hover { color: #ff8f8f; background: rgba(207, 74, 74, 0.12); }
+  .acct-empty { flex: none; padding: 6px 8px; font-size: 10px; color: var(--faint); border: 1px dashed var(--border); border-radius: var(--radius); text-align: center; }
+
+  .btn {
+    height: 24px; padding: 0 11px;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    cursor: pointer; font: 500 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    transition: background 0.1s, border-color 0.1s;
+  }
+  .btn:hover { background: var(--hover); border-color: #4a4a4a; }
+  .btn.ghost { background: transparent; }
+  .btn.ghost:hover { background: var(--panel-2); }
+
+  /* ===== 居中弹窗 ===== */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .overlay[hidden] { display: none; }
+  .dialog {
+    width: 100%; max-width: 293px; max-height: 100%;
+    display: flex; flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+  }
+  .dhead {
+    display: flex; align-items: center; gap: 6px;
+    height: 30px; flex: none; padding: 0 4px 0 11px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.03em; color: var(--text-strong);
+  }
+  .dhead .spacer { flex: 1; }
+  .dbody { padding: 10px 11px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 8px; }
+  .dsec {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 9.5px; font-weight: 600; color: var(--faint);
+    letter-spacing: 0.1em; text-transform: uppercase;
+  }
+  .dsec::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .dsec .btn { margin-left: auto; }
+  .opt-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .opt-row .lbl { font-size: 11px; }
+  .opt-row .lbl small { display: block; color: var(--faint); font-size: 9.5px; margin-top: 1px; }
+  .switch { position: relative; width: 30px; height: 17px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    transition: background 0.12s, border-color 0.12s; cursor: pointer;
+  }
+  .switch .track::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 11px; height: 11px; border-radius: 50%; background: var(--faint);
+    transition: transform 0.12s, background 0.12s;
+  }
+  .switch input:checked + .track { background: var(--primary-bg); border-color: var(--primary-bg); }
+  .switch input:checked + .track::after { transform: translateX(13px); background: #1a1a1a; }
+  /* 标题栏游戏切换按钮 */
+  .game-btn {
+    border: none; background: transparent; color: inherit;
+    font: inherit; padding: 0 2px; cursor: pointer;
+    border-bottom: 1px dashed var(--muted);
+  }
+  .game-btn:hover { color: #fff; border-bottom-color: currentColor; }
+  /* 游戏选择：厂商切换 + 游戏列表 */
+  .vendor-seg { display: flex; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; margin-bottom: 6px; }
+  .vendor-seg button {
+    flex: 1; height: 22px; border: none; border-radius: 2px;
+    background: transparent; color: var(--muted);
+    font: 500 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer; transition: background 0.1s, color 0.1s;
+  }
+  .vendor-seg button:hover { color: var(--text); background: var(--hover); }
+  .vendor-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  .game-list { display: flex; flex-direction: column; gap: 3px; }
+  .game-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 10px; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--panel-2); cursor: pointer; transition: background 0.1s, border-color 0.1s;
+  }
+  .game-item:hover { background: var(--hover); }
+  .game-item.on { border-color: #8a8a8a; }
+  .game-item .gname { font-weight: 600; font-size: 11.5px; }
+  .game-item .gdesc { font-size: 9.5px; color: var(--faint); margin-left: auto; }
+  .txtin {
+    width: 130px; height: 22px; padding: 0 8px;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    outline: none; font: inherit;
+  }
+  .txtin:focus { border-color: #8a8a8a; }
+  .txtin.full { width: 100%; height: 24px; }
+  /* 添加账号弹窗 */
+  .seg2 { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+  .seg2 button {
+    height: 22px; border: none; border-radius: 2px;
+    background: transparent; color: var(--muted);
+    font: 500 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer; transition: background 0.1s, color 0.1s;
+  }
+  .seg2 button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  .field-row { display: flex; flex-direction: column; gap: 4px; }
+  .field-row .flbl { font-size: 10px; color: var(--faint); }
+  .field-row input {
+    height: 24px; padding: 0 8px;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    outline: none; font: inherit;
+  }
+  .field-row input:focus { border-color: #8a8a8a; }
+  /* 验证码行：输入框占满剩余宽度，按钮等宽；两者等高对齐。 */
+  .code-row { display: flex; gap: 6px; align-items: stretch; }
+  .code-row input { flex: 1 1 auto; min-width: 0; height: 24px; }
+  .code-row button { flex: 0 0 76px; height: 24px; padding: 0; font-size: 10px; }
+  /* 双二维码并排 */
+  .qr-page { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 2px 0; }
+  .qr-page[hidden] { display: none; }
+  .qr-label { font-size: 9.5px; color: var(--muted); font-weight: 600; }
+  .qr-img {
+    width: 100%; aspect-ratio: 1 / 1; max-width: 176px; padding: 4px;
+    background: #fff; border-radius: var(--radius);
+  }
+  .qr-img svg { width: 100%; height: 100%; display: block; }
+  .qr-img:empty { background: var(--panel-2); }
+  .qr-status { font-size: 9.5px; color: var(--muted); text-align: center; }
+  .qr-status.scanned { color: var(--warn); }
+  .qr-status.expired { color: var(--danger); }
+  .qr-status.confirmed { color: var(--ok); }
+  .add-actions { display: flex; gap: 6px; }
+
+  /* 日志 */
+  #log {
+    min-height: 100px; max-height: 170px; overflow-y: auto; margin: 0;
+    padding: 7px 9px;
+    background: #181818;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    font: 10.5px/1.7 Consolas, "Courier New", monospace;
+    color: var(--muted);
+    user-select: text;
+  }
+  #log .success { color: var(--ok); }
+  #log .error { color: #e07a7a; }
+  #log .info { color: var(--muted); }
+  #log .time { color: #5a5a5a; margin-right: 6px; }
+
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #363636; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #454545; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body autocomplete="off">
+  <!-- deep 拖拽区：子树内任意位置可拖（按钮等可点击元素自动豁免）；
+       裸属性只对「直接点击该元素」生效，点 logo 图标(svg)会失效——历史「有时拖不动」的根因 -->
+  <header data-tauri-drag-region="deep">
+    <div class="logo">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square">
+        <rect x="4" y="4" width="16" height="16" rx="1.5"/>
+        <path d="M8 8h3v3H8zM13 8h3v3h-3zM8 13h3v3H8z"/>
+      </svg>
+    </div>
+    <h1><button class="game-btn" id="btnGame" title="切换游戏">崩坏3</button> 扫码器</h1>
+    <span class="spacer"></span>
+    <div class="hbtns">
+      <button class="ibtn" id="btnTools" title="选项与日志">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="3"/>
+        </svg>
+      </button>
+      <button class="wbtn" id="btnMin" title="最小化">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 12h14"/></svg>
+      </button>
+      <button class="wbtn close" id="btnClose" title="关闭">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <!-- 扫描区域：实时监视器，可视区即扫码区（无外框） -->
+    <div class="preview-wrap">
+      <canvas id="previewCanvas" width="384" height="256"></canvas>
+      <button class="region-reset" id="btnRegionReset" title="重置视图">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/><path d="M3 12h18"/></svg>
+      </button>
+      <span class="fps" id="fpsMeter" title="预览帧率（点击暂停/继续）">--</span>
+    </div>
+
+    <div class="sectitle">账号</div>
+    <div class="acct-filter">
+      <div class="filter-seg" id="filterSeg">
+        <button data-f="official" class="on">官服</button>
+        <button data-f="bilibili">B 服</button>
+        <button data-f="hypergryph" hidden>官服</button>
+      </div>
+      <button class="addbtn" id="btnAddAcct" title="添加账号">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
+    <div class="acct-list" id="acctList"></div>
+    <div class="startbar">
+      <button id="btnStart" title="开始 / 停止扫码">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
+        <span>开始扫码</span>
+      </button>
+    </div>
+  </main>
+
+  <!-- 编辑备注弹窗 -->
+  <div class="overlay" id="remarkOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        编辑备注
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="remarkOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="field-row">
+          <div class="flbl">备注名</div>
+          <input type="text" id="remarkAlias" placeholder="留空则使用原昵称" maxlength="32" autocomplete="off" />
+        </div>
+        <div class="field-row">
+          <div class="flbl">备注信息</div>
+          <input type="text" id="remarkText" placeholder="留空则不显示" maxlength="64" autocomplete="off" />
+        </div>
+        <button class="btn" id="btnRemarkSave" style="height:28px;width:100%">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 鹰角账号登录弹窗（短信验证码） -->
+  <div class="overlay" id="hyperOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        鹰角账号登录
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="hyperOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="field-row">
+          <div class="flbl">手机号</div>
+          <input type="text" id="hyperPhone" placeholder="鹰角账号手机号" maxlength="20" autocomplete="off" inputmode="numeric" />
+        </div>
+        <div class="field-row">
+          <div class="flbl">验证码</div>
+          <div class="code-row">
+            <input type="text" id="hyperCode" placeholder="6 位验证码" maxlength="6" autocomplete="off" inputmode="numeric" />
+            <button class="btn ghost" id="btnHyperSend">发送验证码</button>
+          </div>
+        </div>
+        <button class="btn" id="btnHyperLogin" style="height:28px;width:100%">登录</button>
+        <div class="qr-status" id="hyperStatus"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加账号弹窗 -->
+  <div class="overlay" id="addOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        添加账号
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="addOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="qr-page">
+          <div class="qr-label" id="addQrLabel">生成中…</div>
+          <div class="qr-img" id="addQrImg"></div>
+          <div class="qr-status" id="addQrStatus">生成中…</div>
+        </div>
+        <div class="add-actions">
+          <button class="btn ghost" id="btnQrRefresh" style="display:none">重新生成</button>
+          <button class="btn ghost" id="btnCredEntry">验证码/密码登录</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 渠道账号登录弹窗（米哈游/B站：验证码 / 密码） -->
+  <div class="overlay" id="credOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        <span id="credTitle">账号登录</span>
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="credOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="field-row">
+          <div class="seg2" id="credModeSeg">
+            <button data-mode="sms" class="on">验证码登录</button>
+            <button data-mode="pwd">密码登录</button>
+          </div>
+        </div>
+        <div id="credSmsPage">
+          <div class="field-row">
+            <div class="flbl">手机号</div>
+            <input type="text" id="credPhone" placeholder="手机号" maxlength="20" autocomplete="off" inputmode="numeric" />
+          </div>
+          <div class="field-row">
+            <div class="flbl">验证码</div>
+            <div class="code-row">
+              <input type="text" id="credCode" placeholder="6 位验证码" maxlength="6" autocomplete="off" inputmode="numeric" />
+              <button class="btn ghost" id="btnCredSend">发送验证码</button>
+            </div>
+          </div>
+        </div>
+        <div id="credPwdPage" hidden>
+          <div class="field-row">
+            <div class="flbl">账号</div>
+            <input type="text" id="credAccount" placeholder="手机号 / 邮箱" maxlength="64" autocomplete="off" />
+          </div>
+          <div class="field-row">
+            <div class="flbl">密码</div>
+            <input type="password" id="credPassword" placeholder="密码" maxlength="64" autocomplete="off" />
+          </div>
+        </div>
+        <button class="btn" id="btnCredLogin" style="height:28px;width:100%;margin-top:8px">登录</button>
+        <div class="qr-status" id="credStatus"></div>
+        <div id="credCaptchaWrap" hidden style="margin-top:8px">
+          <div class="flbl">需要人机验证，请在下方完成</div>
+          <div id="credCaptcha" style="min-height:44px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 游戏选择弹窗 -->
+  <div class="overlay" id="gameOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        选择游戏
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="gameOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="vendor-seg" id="vendorSeg"></div>
+        <div class="game-list" id="gameList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 选项 + 日志 弹窗 -->
+  <div class="overlay" id="toolsOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        选项与日志
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="toolsOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="dsec">登入名</div>
+        <input class="txtin full" id="displayName" type="text" maxlength="20" placeholder="崩坏3桌面扫码器用户" autocomplete="off" />
+
+        <div class="dsec">启动</div>
+        <div class="opt-row">
+          <span class="lbl">启动时自动开启扫码</span>
+          <label class="switch"><input type="checkbox" id="autoLoginLast" /><span class="track"></span></label>
+        </div>
+        <div class="opt-row">
+          <span class="lbl">窗口置顶</span>
+          <label class="switch"><input type="checkbox" id="alwaysOnTop" /><span class="track"></span></label>
+        </div>
+
+        <div class="dsec">扫码成功后</div>
+        <div class="opt-row">
+          <span class="lbl">扫码成功后自动退出</span>
+          <label class="switch"><input type="checkbox" id="autoClose" /><span class="track"></span></label>
+        </div>
+        <div class="opt-row">
+          <span class="lbl">扫码成功后清空剪贴板</span>
+          <label class="switch"><input type="checkbox" id="clearClip" /><span class="track"></span></label>
+        </div>
+
+        <div class="dsec">日志
+          <button class="btn ghost" id="btnClearLog" style="height:18px;font-size:10px;padding:0 7px">清空</button>
+        </div>
+        <div id="log"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  const T = window.__TAURI__;
+  const invoke = T && T.core ? T.core.invoke : null;
+  const listen = T && T.event ? T.event.listen : null;
+  const appWindow = T && T.window ? T.window.getCurrentWindow() : null;
+
+  let config = null;
+  let scanning = false;
+  let filter = 'official';            // 账号筛选：official | bilibili（默认官服）
+  // 扫描区域（实时监视器）
+  let preview = null;                 // {mon:{x,y,w,h}} 预览所在显示器信息
+  let view = { scale: 1, fx: 0.5, fy: 0.5 };   // 实际显示的视口（平滑插值后的值）
+  // 目标视口：鼠标/滚轮直接设置它，view 每帧快速追向它（把瞬时跳变变为平滑滑动，
+  // 削弱起手/缩放时的卡顿感）。重置视图也只需设目标值。
+  let viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+
+  const $ = (id) => document.getElementById(id);
+  const logEl = $('log');
+
+  // ---------- 全局交互 ----------
+  // 禁用全局右键菜单（问题4）。
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // 标题栏拖拽：完全由 data-tauri-drag-region="deep" 的注入脚本驱动。
+  // 不要再加 JS startDragging 兜底——两处同时调用会互相竞争（实测 ~50% 拖不动；
+  // 而双击后 e.detail=2 时注入脚本转去 toggle_maximize 不再 start_dragging，
+  // 只剩单次调用反而必成——这正是「连点两次必能拖动」的根因）。
+
+  // ---------- 日志 ----------
+  function log(msg, type) {
+    const line = document.createElement('div');
+    line.className = type || 'info';
+    const t = document.createElement('span');
+    t.className = 'time';
+    t.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    line.appendChild(t);
+    line.appendChild(document.createTextNode(msg));
+    logEl.appendChild(line);
+    while (logEl.childNodes.length > 500) logEl.removeChild(logEl.firstChild);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  $('btnClearLog').addEventListener('click', (e) => { e.stopPropagation(); logEl.textContent = ''; });
+
+  // ---------- 窗口控制 ----------
+  function win(action) {
+    invoke('frontend_log', { level: 'info', msg: '窗口操作: ' + action }).catch(() => {});
+    if (!appWindow) { log('窗口 API 不可用（__TAURI__.window 缺失）', 'error'); return; }
+    try {
+      const p = appWindow[action]();
+      if (p && p.catch) p.catch((e) => {
+        log('窗口操作失败(' + action + '): ' + e, 'error');
+        invoke('frontend_log', { level: 'error', msg: '窗口操作失败(' + action + '): ' + e }).catch(() => {});
+      });
+    } catch (e) {
+      log('窗口操作异常(' + action + '): ' + e, 'error');
+      invoke('frontend_log', { level: 'error', msg: '窗口操作异常(' + action + '): ' + e }).catch(() => {});
+    }
+  }
+  // 标题栏按钮：pointerdown 为主路径（WebView2 最小化还原后，首次 click 可能被
+  // 「激活点击」吞掉——表现为按钮一时全部失灵）；click 兜底，done 标志去重。
+  function bindWinButton(id, fn) {
+    const el = $(id);
+    let fired = false;
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      fired = true;
+      fn();
+    });
+    el.addEventListener('click', () => {
+      if (fired) { fired = false; return; }
+      fn();
+    });
+  }
+  bindWinButton('btnTools', () => setToolsOpen($('toolsOverlay').hidden));
+  bindWinButton('btnMin', () => win('minimize'));
+  bindWinButton('btnClose', () => win('close'));
+
+  // ---------- 弹窗 ----------
+  function setToolsOpen(open) { $('toolsOverlay').hidden = !open; $('btnTools').classList.toggle('open', open); }
+  document.querySelectorAll('[data-close]').forEach((b) => {
+    b.addEventListener('click', () => {
+      $(b.dataset.close).hidden = true;
+      if (b.dataset.close === 'addOverlay') cancelQr();
+    });
+  });
+  document.querySelectorAll('.overlay').forEach((o) => {
+    o.addEventListener('mousedown', (e) => {
+      if (e.target === o) {
+        o.hidden = true;
+        if (o.id === 'addOverlay') cancelQr();
+      }
+    });
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.overlay').forEach((o) => {
+        o.hidden = true;
+        if (o.id === 'addOverlay') cancelQr();
+      });
+    }
+  });
+
+  // ---------- 账号渲染 ----------
+  // 当前游戏 id（账号按游戏独立存储；旧数据 game 为空时归入崩坏3）。
+  function curGameId() { return config ? (config.current_game || 'bh3') : 'bh3'; }
+  function acctGame(t) { return t.game || 'bh3'; }
+  function accountsAll() {
+    if (!config) return [];
+    const g = curGameId();
+    const out = [];
+    // 保留配置中的存储顺序（用户可拖拽调整），不再按使用时间排序。
+    (config.bili_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'bilibili', t }); });
+    (config.official_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'official', t }); });
+    (config.hypergryph_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'hypergryph', t }); });
+    return out;
+  }
+  // 当前游戏下某渠道的激活账号标识（active_* 现为 { game: id } 映射）。
+  function activeUidOf(ch) {
+    if (!config) return null;
+    const g = curGameId();
+    if (ch === 'bilibili') return (config.active_bili || {})[g];
+    if (ch === 'hypergryph') return (config.active_hypergryph || {})[g];
+    return (config.active_official || {})[g];
+  }
+  // 鹰角账号以 phone 作标识；其余以 uid。
+  function acctKey(ch, t) { return ch === 'hypergryph' ? t.phone : t.uid; }
+  // 是否「当前账号」：该游戏该渠道的激活标识匹配。
+  function isCurrentAccount(ch, key) {
+    if (!config) return false;
+    const g = curGameId();
+    if (ch === 'hypergryph') return (config.active_hypergryph || {})[g] === key;
+    const curCh = (config.game_channel || {})[g];
+    return curCh === ch && activeUidOf(ch) === key;
+  }
+  function accountName(ch, t) {
+    if (ch === 'hypergryph') {
+      const base = t.phone || '未知';
+      return t.alias ? (t.alias + '（' + base + '）') : base;
+    }
+    const base = ch === 'bilibili' ? (t.uname || 'UID ' + t.uid) : (t.uname || 'uid ' + t.uid);
+    // 有备注名时显示「备注名（原名）」。
+    return t.alias ? (t.alias + '（' + base + '）') : base;
+  }
+  function channelLabel(ch) {
+    if (ch === 'hypergryph') return '官服';
+    if (ch === 'official') return '官服';
+    return 'B 服';
+  }
+
+  // ---------- 游戏（多游戏支持） ----------
+  // 各游戏共享同一批账号（同一米游社/B站账号可登录米哈游全系游戏）；
+  // 切换游戏只改变扫描确认时使用的 biz_key 与协议端点。
+  const VENDORS = [
+    { id: 'mihoyo', name: '米哈游' },
+    { id: 'hypergryph', name: '鹰角' },
+  ];
+  const GAMES = [
+    { id: 'bh3', name: '崩坏3', vendor: 'mihoyo', desc: '官服 / B服', official: true, bili: true, hyper: false },
+    { id: 'hsr', name: '崩坏：星穹铁道', vendor: 'mihoyo', desc: '官服 / B服', official: true, bili: true, hyper: false },
+    { id: 'genshin', name: '原神', vendor: 'mihoyo', desc: '官服 / B服', official: true, bili: true, hyper: false },
+    { id: 'zzz', name: '绝区零', vendor: 'mihoyo', desc: '官服 / B服', official: true, bili: true, hyper: false },
+    { id: 'endfield', name: '明日方舟：终末地', vendor: 'hypergryph', desc: '鹰角账号', official: false, bili: false, hyper: true },
+    { id: 'arknights', name: '明日方舟', vendor: 'hypergryph', desc: '鹰角账号', official: false, bili: false, hyper: true },
+  ];
+  let vendorTab = 'mihoyo';   // 游戏弹窗当前厂商页
+  function gameMeta(id) { return GAMES.find((g) => g.id === id) || GAMES[0]; }
+  function gameLabel(id) { return gameMeta(id).name; }
+  function vendorOf(id) { const g = gameMeta(id); return g.vendor; }
+  function renderGame() {
+    if (!config) return;
+    $('btnGame').textContent = gameLabel(config.current_game || 'bh3');
+  }
+  function renderVendorSeg() {
+    const seg = $('vendorSeg');
+    seg.textContent = '';
+    VENDORS.forEach((v) => {
+      const b = document.createElement('button');
+      b.textContent = v.name;
+      b.className = v.id === vendorTab ? 'on' : '';
+      b.addEventListener('click', () => { vendorTab = v.id; renderGameList(); });
+      seg.appendChild(b);
+    });
+  }
+  function renderGameList() {
+    renderVendorSeg();
+    const list = $('gameList');
+    list.textContent = '';
+    const cur = config ? (config.current_game || 'bh3') : 'bh3';
+    const games = GAMES.filter((g) => g.vendor === vendorTab);
+    games.forEach((g) => {
+      const item = document.createElement('div');
+      item.className = 'game-item' + (g.id === cur ? ' on' : '');
+      const nm = document.createElement('span');
+      nm.className = 'gname';
+      nm.textContent = g.name;
+      const ds = document.createElement('span');
+      ds.className = 'gdesc';
+      ds.textContent = g.desc;
+      item.append(nm, ds);
+      item.addEventListener('click', () => switchGame(g.id));
+      list.appendChild(item);
+    });
+  }
+  async function switchGame(id) {
+    if (!config || config.current_game === id) { $('gameOverlay').hidden = true; return; }
+    try {
+      await invoke('switch_game', { game: id });
+      config = await invoke('get_config');
+    } catch (e) {
+      log('切换游戏失败: ' + e, 'error');
+      return;
+    }
+    $('gameOverlay').hidden = true;
+    // 恢复目标游戏上次的渠道；不支持时由 renderFilter 回退。
+    const g = gameMeta(id);
+    const saved = (config.game_channel || {})[id];
+    if (g.hyper) filter = 'hypergryph';
+    else if (saved) filter = saved;
+    renderGame();
+    renderAll();
+    log('已切换到 ' + gameLabel(id), 'info');
+  }
+
+  function renderFilter() {
+    const g = gameMeta(config ? (config.current_game || 'bh3') : 'bh3');
+    document.querySelectorAll('#filterSeg button').forEach((b) => {
+      const f = b.dataset.f;
+      const supported = f === 'bilibili' ? g.bili : (f === 'official' ? g.official : g.hyper);
+      b.hidden = !supported;
+      b.classList.toggle('on', f === filter && supported);
+    });
+    // 当前 filter 若该游戏不支持，回退到支持的渠道。
+    if (g.hyper) {
+      if (filter !== 'hypergryph') filter = 'hypergryph';
+    } else {
+      if (filter === 'hypergryph') filter = 'official';
+      if (filter === 'bilibili' && !g.bili) filter = 'official';
+      if (filter === 'official' && !g.official) filter = 'bilibili';
+    }
+  }
+
+  function renderAccounts() {
+    const list = $('acctList');
+    list.textContent = '';
+    const rows = accountsAll().filter((a) => a.ch === filter);
+    if (rows.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'acct-empty';
+      empty.textContent = '该渠道暂无账号，点击右上「+」登录';
+      list.appendChild(empty);
+      return;
+    }
+    rows.forEach(({ ch, t }, idx) => {
+      const key = acctKey(ch, t);
+      const row = document.createElement('div');
+      const isCurrent = isCurrentAccount(ch, key);
+      row.className = 'acct-item' + (isCurrent ? ' on' : '');
+      row.draggable = true;
+      row.dataset.uid = key;
+      row.dataset.ch = ch;
+      row.dataset.idx = idx;
+      // 选中按钮：仅点击它才切换当前账号。
+      const radio = document.createElement('span');
+      radio.className = 'radio';
+      radio.title = '设为当前账号';
+      radio.addEventListener('click', (e) => { e.stopPropagation(); selectAccount(ch, key); });
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = channelLabel(ch);
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = accountName(ch, t);
+      nm.title = '双击修改备注';
+      // 右侧备注（无则为空）。
+      const remark = document.createElement('span');
+      remark.className = 'remark';
+      remark.textContent = t.remark || '';
+      remark.title = t.remark || '';
+      const del = document.createElement('button');
+      del.className = 'ibtn';
+      del.title = '删除该账号';
+      del.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+      del.addEventListener('click', (e) => { e.stopPropagation(); deleteAccount(ch, key); });
+      row.append(radio, chip, nm, remark, del);
+      // 双击行（非按钮/选中点）→ 编辑备注（内部弹窗）。
+      row.addEventListener('dblclick', (e) => {
+        if (e.target.closest('.radio') || e.target.closest('.ibtn')) return;
+        openRemarkDialog(ch, key);
+      });
+      // 拖拽排序。
+      row.addEventListener('dragstart', (e) => {
+        dragUid = key;
+        row.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      row.addEventListener('dragend', () => { dragUid = null; row.classList.remove('dragging'); renderAccounts(); });
+      row.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+      row.addEventListener('drop', (e) => {
+        e.preventDefault();
+        if (!dragUid || dragUid === key) return;
+        reorderAccounts(ch, dragUid, key);
+      });
+      list.appendChild(row);
+    });
+  }
+
+  // 拖拽排序：把 dragUid 移到 targetUid 位置并保存。
+  let dragUid = null;
+  async function reorderAccounts(ch, dragUid, targetUid) {
+    if (ch === 'hypergryph') {
+      // 鹰角账号按 phone 重排（本地重排后保存整份配置）。
+      const arr = config.hypergryph_accounts || [];
+      const order = arr.map((a) => a.phone);
+      const from = order.indexOf(dragUid);
+      const to = order.indexOf(targetUid);
+      if (from < 0 || to < 0) return;
+      order.splice(from, 1);
+      order.splice(to, 0, dragUid);
+      const map = new Map(arr.map((a) => [a.phone, a]));
+      config.hypergryph_accounts = order.map((p) => map.get(p)).filter(Boolean);
+      await saveCfg({});
+      renderAccounts();
+      return;
+    }
+    const order = (ch === 'bilibili' ? config.bili_accounts : config.official_accounts).map((a) => a.uid);
+    const from = order.indexOf(dragUid);
+    const to = order.indexOf(targetUid);
+    if (from < 0 || to < 0) return;
+    order.splice(from, 1);
+    order.splice(to, 0, dragUid);
+    try {
+      await invoke('reorder_accounts', { game: curGameId(), channel: ch, order });
+      config = await invoke('get_config');
+      renderAccounts();
+    } catch (e) { log('调整顺序失败: ' + e, 'error'); }
+  }
+
+  // 双击行编辑备注名 + 备注信息（内部弹窗）。
+  let remarkTarget = null;   // { ch, uid }
+  function openRemarkDialog(ch, uid) {
+    const arr = ch === 'bilibili' ? config.bili_accounts
+              : (ch === 'hypergryph' ? config.hypergryph_accounts : config.official_accounts);
+    const t = (arr || []).find((a) => (ch === 'hypergryph' ? a.phone : a.uid) === uid);
+    if (!t) return;
+    remarkTarget = { ch, uid };
+    $('remarkAlias').value = t.alias || '';
+    $('remarkText').value = t.remark || '';
+    $('remarkOverlay').hidden = false;
+    $('remarkAlias').focus();
+  }
+  function closeRemarkDialog() { $('remarkOverlay').hidden = true; remarkTarget = null; }
+  async function saveRemarkDialog() {
+    if (!remarkTarget) return;
+    const { ch, uid } = remarkTarget;
+    const alias = $('remarkAlias').value.trim();
+    const remark = $('remarkText').value.trim();
+    try {
+      const game = curGameId();
+      if (ch === 'hypergryph') {
+        await invoke('hypergryph_set_meta', { game, phone: uid, alias, remark });
+      } else {
+        await invoke('set_account_meta', { game, channel: ch, uid, alias, remark });
+      }
+      config = await invoke('get_config');
+      closeRemarkDialog();
+      renderAccounts();
+    } catch (e) { log('保存备注失败: ' + e, 'error'); }
+  }
+
+  async function saveCfg(patch) {
+    config = Object.assign({}, config, patch);
+    await invoke('save_config', { cfg: config });
+  }
+
+  async function selectAccount(ch, uid) {
+    try {
+      const game = curGameId();
+      if (ch === 'hypergryph') {
+        await invoke('hypergryph_select', { game, phone: uid });
+      } else {
+        await invoke('select_account', { game, channel: ch, uid });
+      }
+      config = await invoke('get_config');
+      log('已切换到 ' + channelLabel(ch) + ' 账号 ' + uid, 'info');
+      renderAll();
+    } catch (e) {
+      log('切换账号失败: ' + e, 'error');
+    }
+  }
+
+  async function deleteAccount(ch, uid) {
+    try {
+      const game = curGameId();
+      if (ch === 'hypergryph') {
+        await invoke('hypergryph_delete', { game, phone: uid });
+      } else {
+        await invoke('delete_account', { game, channel: ch, uid });
+      }
+      config = await invoke('get_config');
+      log('已删除 ' + channelLabel(ch) + ' 账号 ' + uid, 'info');
+      renderAll();
+    } catch (e) {
+      log('删除账号失败: ' + e, 'error');
+    }
+  }
+
+  // ---------- 添加账号弹窗（跟随主界面渠道，单渠道二维码） ----------
+  const $qrImg = $('addQrImg');
+  const $qrStatus = $('addQrStatus');
+  const $qrLabel = $('addQrLabel');
+  let qrActive = false;
+  let pollTimer = null;
+  let pollFails = 0;
+  let qrStartSeq = 0;
+  let qrAutoRetry = 0;
+
+  function qrChannelLabel(ch) {
+    return ch === 'official' ? '官服 · 米游社 App 扫码' : 'B 服 · B 站 App 扫码';
+  }
+  function setQrStatus(text, cls) {
+    $qrStatus.textContent = text;
+    $qrStatus.className = 'qr-status' + (cls ? ' ' + cls : '');
+  }
+  function stopPolling() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
+
+  async function startQrLogin() {
+    if (qrActive) return;
+    const ch = filter;
+    const seq = ++qrStartSeq;
+    qrActive = true;
+    pollFails = 0;
+    $qrLabel.textContent = qrChannelLabel(ch);
+    $qrImg.innerHTML = '';
+    setQrStatus('生成中…', '');
+    $('btnQrRefresh').style.display = 'none';
+    try {
+      const [, svg] = await invoke('login_qr_start', { channel: ch });
+      if (seq !== qrStartSeq) { invoke('login_qr_cancel').catch(() => {}); return; }
+      $qrImg.innerHTML = svg;
+      setQrStatus('等待扫码…', '');
+      log('已生成' + (ch === 'official' ? '官服' : 'B 服') + '登录二维码（180 秒内有效）', 'info');
+      pollLoop();
+    } catch (e) {
+      if (seq !== qrStartSeq) return;
+      qrActive = false;
+      setQrStatus('生成失败', 'expired');
+      $('btnQrRefresh').style.display = '';
+      log('生成二维码失败: ' + e, 'error');
+    }
+  }
+
+  function pollLoop() {
+    stopPolling();
+    pollTimer = setTimeout(async () => {
+      if (!qrActive) return;
+      let r;
+      try {
+        r = await invoke('login_qr_poll');
+        pollFails = 0;
+      } catch (e) {
+        if (String(e).includes('没有进行中的扫码登录')) { qrActive = false; return; }
+        pollFails++;
+        if (pollFails >= 8) {
+          qrActive = false;
+          setQrStatus('网络异常，请点「重新生成」', 'expired');
+          $('btnQrRefresh').style.display = '';
+          log('扫码登录轮询连续失败: ' + e, 'error');
+          return;
+        }
+        pollLoop();
+        return;
+      }
+      const [status, channel, uid, name] = r;
+      if (status === 'waiting') {
+        setQrStatus($qrImg.innerHTML ? '等待扫码…' : '生成中…', '');
+        pollLoop();
+      } else if (status === 'scanned') {
+        setQrStatus('已扫码，请在手机上确认', 'scanned');
+        pollLoop();
+      } else if (status === 'expired') {
+        qrAutoRetry++;
+        if (qrAutoRetry <= 3) {
+          setQrStatus('已过期，重新生成…', 'expired');
+          stopPolling();
+          qrActive = false;
+          startQrLogin();
+        } else {
+          setQrStatus('多次过期，请手动重新生成', 'expired');
+          $('btnQrRefresh').style.display = '';
+        }
+      } else if (status === 'confirmed') {
+        setQrStatus('登录成功', 'confirmed');
+        try { config = await invoke('get_config'); } catch (e) {}
+        qrActive = false;
+        invoke('login_qr_cancel').catch(() => {});
+        renderAll();
+        log(channelLabel(channel) + '扫码登录成功' + (name ? '：' + name : ''), 'success');
+        setTimeout(() => { $('addOverlay').hidden = true; }, 800);
+      }
+    }, 1500);
+  }
+
+  function cancelQr() {
+    stopPolling();
+    if (qrActive) {
+      qrActive = false;
+      invoke('login_qr_cancel').catch(() => {});
+      log('已取消扫码登录', 'info');
+    }
+  }
+
+  // ---------- 渠道账号登录（米哈游 / B站：验证码 / 密码） ----------
+  let credMode = 'sms';
+  let credCodeTimer = null;
+  function setCredStatus(t) { $('credStatus').textContent = t; }
+  function openCredLogin() {
+    cancelQr();
+    $('addOverlay').hidden = true;
+    $('credTitle').textContent = (filter === 'official' ? '官服' : 'B 服') + '账号登录';
+    $('credPhone').value = ''; $('credCode').value = '';
+    $('credAccount').value = ''; $('credPassword').value = '';
+    $('credStatus').textContent = '';
+    $('credCaptchaWrap').hidden = true;
+    credMode = 'sms';
+    document.querySelectorAll('#credModeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === 'sms'));
+    $('credSmsPage').hidden = false;
+    $('credPwdPage').hidden = true;
+    $('credOverlay').hidden = false;
+  }
+  document.querySelectorAll('#credModeSeg button').forEach((b) => {
+    b.addEventListener('click', () => {
+      credMode = b.dataset.mode;
+      document.querySelectorAll('#credModeSeg button').forEach((x) => x.classList.toggle('on', x === b));
+      $('credSmsPage').hidden = credMode !== 'sms';
+      $('credPwdPage').hidden = credMode !== 'pwd';
+    });
+  });
+  $('btnCredSend').addEventListener('click', async () => {
+    if (credCodeTimer) return;
+    const phone = $('credPhone').value.trim();
+    if (!phone) { setCredStatus('请输入手机号'); return; }
+    setCredStatus('发送中…');
+    try {
+      await invoke('cred_send_code', { channel: filter, game: curGameId(), phone });
+      setCredStatus('验证码已发送');
+      const btn = $('btnCredSend');
+      let left = 60;
+      btn.disabled = true; btn.style.opacity = '0.55'; btn.textContent = left + 's';
+      credCodeTimer = setInterval(() => {
+        left--;
+        if (left <= 0) {
+          clearInterval(credCodeTimer); credCodeTimer = null;
+          btn.disabled = false; btn.style.opacity = ''; btn.textContent = '发送验证码';
+        } else { btn.textContent = left + 's'; }
+      }, 1000);
+    } catch (e) { setCredStatus('发送失败: ' + e); }
+  });
+  $('btnCredLogin').addEventListener('click', async () => {
+    setCredStatus('登录中…');
+    try {
+      const game = curGameId();
+      let r;
+      if (credMode === 'sms') {
+        const phone = $('credPhone').value.trim();
+        const code = $('credCode').value.trim();
+        if (!phone || !code) { setCredStatus('请填写手机号和验证码'); return; }
+        r = await invoke('cred_login_sms', { channel: filter, game, phone, code });
+      } else {
+        const account = $('credAccount').value.trim();
+        const password = $('credPassword').value;
+        if (!account || !password) { setCredStatus('请填写账号和密码'); return; }
+        r = await invoke('cred_login_pwd', { channel: filter, game, account, password });
+      }
+      if (r && r.status === 'captcha') {
+        $('credCaptchaWrap').hidden = false;
+        setCredStatus('请完成下方人机验证');
+        $('credCaptcha').textContent = '（人机验证组件待接入）';
+        return;
+      }
+      config = await invoke('get_config');
+      renderAll();
+      $('credOverlay').hidden = true;
+      log((filter === 'official' ? '官服' : 'B 服') + '账号登录成功', 'success');
+    } catch (e) { setCredStatus('登录失败: ' + e); }
+  });
+
+  // ---------- 鹰角账号登录 ----------
+  let hyperCodeTimer = null;
+  function startHyperCountdown() {
+    const btn = $('btnHyperSend');
+    let left = 60;
+    btn.disabled = true;
+    btn.style.opacity = '0.55';
+    btn.textContent = left + 's';
+    hyperCodeTimer = setInterval(() => {
+      left--;
+      if (left <= 0) {
+        clearInterval(hyperCodeTimer);
+        hyperCodeTimer = null;
+        btn.disabled = false;
+        btn.style.opacity = '';
+        btn.textContent = '发送验证码';
+      } else {
+        btn.textContent = left + 's';
+      }
+    }, 1000);
+  }
+  $('btnHyperSend').addEventListener('click', async () => {
+    if (hyperCodeTimer) return;
+    const phone = $('hyperPhone').value.trim();
+    if (!phone) { $('hyperStatus').textContent = '请输入手机号'; return; }
+    $('hyperStatus').textContent = '发送中…';
+    try {
+      await invoke('hypergryph_send_code', { phone });
+      $('hyperStatus').textContent = '验证码已发送';
+      startHyperCountdown();
+    } catch (e) { $('hyperStatus').textContent = '发送失败: ' + e; }
+  });
+  $('btnHyperLogin').addEventListener('click', async () => {
+    const phone = $('hyperPhone').value.trim();
+    const code = $('hyperCode').value.trim();
+    if (!phone || !code) { $('hyperStatus').textContent = '请填写手机号和验证码'; return; }
+    $('hyperStatus').textContent = '登录中…';
+    try {
+      await invoke('hypergryph_login', { phone, code });
+      config = await invoke('get_config');
+      renderAll();
+      $('hyperOverlay').hidden = true;
+      log('鹰角账号登录成功：' + phone, 'success');
+    } catch (e) { $('hyperStatus').textContent = '登录失败: ' + e; }
+  });
+
+  // ---------- 按钮绑定 ----------
+  $('btnAddAcct').addEventListener('click', () => {
+    if (filter === 'hypergryph') {
+      $('hyperPhone').value = '';
+      $('hyperCode').value = '';
+      $('hyperStatus').textContent = '';
+      $('hyperOverlay').hidden = false;
+      $('hyperPhone').focus();
+      return;
+    }
+    qrAutoRetry = 0;
+    pollFails = 0;
+    cancelQr();
+    $('addOverlay').hidden = false;
+    startQrLogin();
+  });
+  $('btnQrRefresh').addEventListener('click', () => {
+    qrAutoRetry = 0;
+    pollFails = 0;
+    cancelQr();
+    startQrLogin();
+  });
+  $('btnCredEntry') && $('btnCredEntry').addEventListener('click', openCredLogin);
+  $('btnRemarkSave').addEventListener('click', saveRemarkDialog);
+  $('remarkAlias').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('remarkText').focus(); });
+  $('remarkText').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveRemarkDialog(); });
+  $('btnGame').addEventListener('click', (e) => {
+    e.stopPropagation();
+    vendorTab = vendorOf(config ? (config.current_game || 'bh3') : 'bh3');
+    renderGameList();
+    $('gameOverlay').hidden = false;
+  });
+  // 渠道筛选切换（官服 / B 服）。
+  document.querySelectorAll('#filterSeg button').forEach((b) => {
+    b.addEventListener('click', () => {
+      filter = b.dataset.f;
+      renderFilter();
+      renderAccounts();
+    });
+  });
+
+  // ---------- 扫描 ----------
+  let stopping = false;
+  $('btnStart').addEventListener('click', () => {
+    if (scanning) {
+      if (stopping) return;
+      stopping = true;
+      renderScan();
+      invoke('stop_scan').then(() => log('已请求停止…', 'info')).catch((e) => log(e, 'error'));
+    } else {
+      invoke('start_scan').catch((e) => log(e, 'error'));
+    }
+  });
+
+  // ---------- 扫描区域（实时监视器） ----------
+  let srcCanvas = null;
+  let prevRegionStr = null;
+  let previewTimer = null;
+  let previewErrShown = false;
+  const canvas = $('previewCanvas');
+
+  function sizeCanvasToDisplay() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    let w = Math.round(Math.min(Math.max((rect.width || 258) * dpr, 200), 4096));
+    w -= w % 4;
+    const h = (w / 4) * 3;
+    if (w !== canvas.width || h !== canvas.height) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+  }
+  sizeCanvasToDisplay();
+  const canvasWrap = canvas.parentElement;
+  let settleTimer = null;
+  function forceFullRaster() {
+    const w = canvas.width, h = canvas.height;
+    if (w === 0 || h === 0) return;
+    canvas.width = 0; canvas.height = 0;
+    canvas.width = w; canvas.height = h;
+    drawView();
+  }
+  const canvasRO = new ResizeObserver(() => {
+    sizeCanvasToDisplay();
+    drawView();
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(forceFullRaster, 120);
+  });
+  canvasRO.observe(canvasWrap);
+  let dprQuery = null;
+  function onDprChange() {
+    const oldW = canvas.width;
+    sizeCanvasToDisplay();
+    if (canvas.width !== oldW) drawView();
+    watchDpr();
+  }
+  function watchDpr() {
+    if (dprQuery) dprQuery.removeEventListener('change', onDprChange);
+    dprQuery = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
+    dprQuery.addEventListener('change', onDprChange);
+  }
+  watchDpr();
+
+  function viewportFrac(vv) {
+    const v = vv || view;
+    const z = Math.max(v.scale, 1);
+    const ma = preview.mon.w / preview.mon.h;
+    const ca = canvas.width / canvas.height;
+    let baseFw, baseFh;
+    if (ma >= ca) { baseFh = 1; baseFw = ca / ma; }
+    else { baseFw = 1; baseFh = ma / ca; }
+    const fw = baseFw / z;
+    const fh = baseFh / z;
+    let x0 = v.fx - fw / 2;
+    let y0 = v.fy - fh / 2;
+    x0 = Math.min(Math.max(x0, 0), 1 - fw);
+    y0 = Math.min(Math.max(y0, 0), 1 - fh);
+    return { x0, y0, fw, fh };
+  }
+
+  function viewportMonRect() {
+    if (!preview) return null;
+    const v = viewportFrac();
+    const m = preview.mon;
+    const X0 = m.x + Math.round(v.x0 * m.w);
+    const Y0 = m.y + Math.round(v.y0 * m.h);
+    const X1 = m.x + Math.round((v.x0 + v.fw) * m.w);
+    const Y1 = m.y + Math.round((v.y0 + v.fh) * m.h);
+    return { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
+  }
+
+  let previewBusy = false;
+  async function refreshPreview() {
+    if (previewBusy) return false;
+    previewBusy = true;
+    try {
+      const region = viewportMonRect() || { x: 0, y: 0, w: 0, h: 0 };
+      const buf = await invoke('capture_preview', {
+        x: region.x, y: region.y, w: region.w, h: region.h,
+        maxWidth: canvas.width,
+      });
+      if (!(buf instanceof ArrayBuffer)) throw new Error('预览数据异常');
+      if (buf.byteLength === 24) {
+        clearPendingRealtime();
+        viewDirty = false;
+        return false;
+      }
+      const dv = new DataView(buf);
+      const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
+      const mon = {
+        x: dv.getInt32(8, true), y: dv.getInt32(12, true),
+        w: dv.getInt32(16, true), h: dv.getInt32(20, true),
+      };
+      if (!pw || !ph || 24 + pw * ph * 4 > buf.byteLength) throw new Error('预览数据异常');
+      const monChanged = !!preview && (preview.mon.x !== mon.x || preview.mon.y !== mon.y
+        || preview.mon.w !== mon.w || preview.mon.h !== mon.h);
+      if (monChanged) {
+        view = { scale: 1, fx: 0.5, fy: 0.5 };
+        viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+      }
+      if (!preview || monChanged) {
+        preview = { mon };
+      }
+      if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
+        srcCanvas = document.createElement('canvas');
+        srcCanvas.width = pw;
+        srcCanvas.height = ph;
+      }
+      const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
+      srcCanvas.getContext('2d').putImageData(img, 0, 0);
+      clearPendingRealtime();
+      viewDirty = false;
+      drawView();
+      updateRegion();
+      previewErrShown = false;
+      return true;
+    } catch (e) {
+      if (!previewErrShown) {
+        previewErrShown = true;
+        log('预览失败: ' + e, 'error');
+      }
+      return false;
+    } finally {
+      previewBusy = false;
+    }
+  }
+
+  const PREVIEW_INTERVAL = 33;
+  const PREVIEW_IDLE_INTERVAL = 140;
+  let idleFrames = 0;
+  let previewActive = false;
+  let fpsFrames = 0, fpsLast = performance.now();
+  function tickFps() {
+    fpsFrames++;
+    const now = performance.now();
+    if (now - fpsLast >= 1000) {
+      const el = $('fpsMeter');
+      if (el) el.textContent = fpsFrames;
+      fpsFrames = 0;
+      fpsLast = now;
+    }
+  }
+  async function previewLoop() {
+    if (!previewActive) return;
+    const t0 = performance.now();
+    const changed = await refreshPreview();
+    tickFps();
+    if (!previewActive) return;
+    if (changed) idleFrames = 0; else idleFrames++;
+    const interval = idleFrames > 2 ? PREVIEW_IDLE_INTERVAL : PREVIEW_INTERVAL;
+    const elapsed = performance.now() - t0;
+    previewTimer = setTimeout(previewLoop, Math.max(0, interval - elapsed));
+  }
+  function startPreview() {
+    if (previewActive || paused || dragging || baseMapActive) return;
+    previewActive = true;
+    previewLoop();
+  }
+  function stopPreview() {
+    previewActive = false;
+    if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopPreview();
+    else startPreview();
+  });
+
+  function contentRect() {
+    return { cw: canvas.width, ch: canvas.height, ox: 0, oy: 0 };
+  }
+
+  // ---------- 视图平滑 ----------
+  const VIEW_SMOOTH = 0.5;
+  let pendingRealtime = false;
+  function clearPendingRealtime() { pendingRealtime = false; }
+  function stepView() {
+    const scaleChanged = view.scale !== viewT.scale;
+    view.scale = viewT.scale;
+    const dx = viewT.fx - view.fx;
+    const dy = viewT.fy - view.fy;
+    if (Math.abs(dx) < 0.0003 && Math.abs(dy) < 0.0003) {
+      view.fx = viewT.fx; view.fy = viewT.fy;
+      return scaleChanged;
+    }
+    view.fx += dx * VIEW_SMOOTH;
+    view.fy += dy * VIEW_SMOOTH;
+    return true;
+  }
+  function clampViewT() {
+    if (!preview) return;
+    const z = Math.max(viewT.scale, 1);
+    const ma = preview.mon.w / preview.mon.h;
+    const ca = canvas.width / canvas.height;
+    let baseFw, baseFh;
+    if (ma >= ca) { baseFh = 1; baseFw = ca / ma; }
+    else { baseFw = 1; baseFh = ma / ca; }
+    const fw = baseFw / z, fh = baseFh / z;
+    viewT.fx = Math.min(Math.max(viewT.fx, fw / 2), 1 - fw / 2);
+    viewT.fy = Math.min(Math.max(viewT.fy, fh / 2), 1 - fh / 2);
+  }
+  let viewRaf = null;
+  function ensureViewAnim() {
+    if (viewRaf) return;
+    if (!paused && !baseMapActive) { stopPreview(); startBaseMap(); }
+    const loop = () => {
+      const moving = stepView();
+      dragDirty = true;
+      drawView();
+      if (moving || dragging) {
+        viewRaf = requestAnimationFrame(loop);
+      } else {
+        viewRaf = null;
+        stopBaseMap();
+        viewDirty = false;
+        // 恢复实时预览；显示源仍用底图，直到新实时帧到达（refreshPreview 清 pendingRealtime）。
+        // 不设超时强制切回——那会在实时帧未到时切到旧 srcCanvas，造成闪烁。
+        if (!paused) { pendingRealtime = true; startPreview(); }
+        updateRegion();
+        prevRegionStr = null;
+      }
+    };
+    viewRaf = requestAnimationFrame(loop);
+  }
+
+  // ---------- 瓦片底图 ----------
+  let baseMap = null;
+  let baseMapReady = false;
+  let pauseShot = null;
+  let dragging = false;
+  let paused = false;
+
+  async function capturePauseShot(maxWidth) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      try {
+        const buf = await invoke('capture_preview', { x: 0, y: 0, w: 0, h: 0, maxWidth });
+        if (buf instanceof ArrayBuffer && buf.byteLength > 24) {
+          const dv = new DataView(buf);
+          const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
+          const mon = {
+            x: dv.getInt32(8, true), y: dv.getInt32(12, true),
+            w: dv.getInt32(16, true), h: dv.getInt32(20, true),
+          };
+          if (pw && ph && 24 + pw * ph * 4 <= buf.byteLength) {
+            const c = document.createElement('canvas');
+            c.width = pw; c.height = ph;
+            c.getContext('2d').putImageData(
+              new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph), 0, 0);
+            pauseShot = { canvas: c };
+            if (!preview) preview = { mon };
+            if (paused) drawView();
+            return true;
+          }
+        }
+      } catch (e) { /* 截图失败，重试 */ }
+      if (!paused) return false;
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    return false;
+  }
+
+  const BASE_MAP_TARGET = 1280;
+  const TILE_PX = 64;
+  let baseMapTimer = null;
+  let baseMapActive = false;
+  let tileMode = false;
+
+  function patchTiles(buf) {
+    if (!(buf instanceof ArrayBuffer) || buf.byteLength < 8) return false;
+    const dv = new DataView(buf);
+    const tw = dv.getUint32(0, true), th = dv.getUint32(4, true);
+    if (!tw || !th) return false;
+    if (!baseMap || baseMap.canvas.width !== tw || baseMap.canvas.height !== th) {
+      const c = document.createElement('canvas');
+      c.width = tw; c.height = th;
+      baseMap = { canvas: c };
+      baseMapReady = false;
+    }
+    const ctx = baseMap.canvas.getContext('2d');
+    let off = 8, dirty = false;
+    while (off + 16 <= buf.byteLength) {
+      const col = dv.getUint32(off, true), row = dv.getUint32(off + 4, true);
+      const w = dv.getUint32(off + 8, true), h = dv.getUint32(off + 12, true);
+      off += 16;
+      const n = w * h * 4;
+      if (off + n > buf.byteLength) break;
+      const img = new ImageData(new Uint8ClampedArray(buf, off, n), w, h);
+      ctx.putImageData(img, col * TILE_PX, row * TILE_PX);
+      off += n;
+      dirty = true;
+    }
+    return dirty;
+  }
+
+  const BASE_MAP_INTERVAL = 33;
+  async function tileLoop() {
+    if (!baseMapActive) return;
+    const t0 = performance.now();
+    try {
+      const buf = await invoke('capture_tiles', {
+        x: 0, y: 0, w: 0, h: 0, maxWidth: BASE_MAP_TARGET,
+      });
+      if (patchTiles(buf)) { baseMapReady = true; dragDirty = true; }
+    } catch (e) { /* 瓦片失败不影响主流程 */ }
+    if (!baseMapActive) return;
+    const elapsed = performance.now() - t0;
+    baseMapTimer = setTimeout(tileLoop, Math.max(0, BASE_MAP_INTERVAL - elapsed));
+  }
+  function startBaseMap() {
+    if (baseMapActive) return;
+    baseMapActive = true;
+    if (preview) {
+      const m = preview.mon;
+      invoke('set_tile_mode', { x: m.x, y: m.y, w: m.w, h: m.h, on: true }).catch(() => {});
+      tileMode = true;
+    }
+    tileLoop();
+  }
+  function stopBaseMap() {
+    baseMapActive = false;
+    if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
+    if (tileMode && preview) {
+      const m = preview.mon;
+      invoke('set_tile_mode', { x: m.x, y: m.y, w: m.w, h: m.h, on: false }).catch(() => {});
+      tileMode = false;
+    }
+  }
+
+  function drawView() {
+    if (!preview) return;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#101010';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const v = viewportFrac();
+    const r = contentRect();
+    const useBase = (viewDirty || pendingRealtime) && baseMapReady;
+    const shot = paused ? pauseShot : (useBase ? baseMap : null);
+    if (shot) {
+      const sc = shot.canvas;
+      const sx = v.x0 * sc.width, sy = v.y0 * sc.height;
+      const sw = Math.max(1, v.fw * sc.width), sh = Math.max(1, v.fh * sc.height);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(sc, sx, sy, sw, sh, r.ox, r.oy, r.cw, r.ch);
+    } else if (srcCanvas) {
+      ctx.imageSmoothingEnabled = r.cw <= srcCanvas.width + 0.5;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(srcCanvas, r.ox, r.oy, r.cw, r.ch);
+    }
+  }
+
+  function updateRegion() {
+    if (!preview) return;
+    const r = viewportMonRect();
+    const str = r.x + ',' + r.y + ',' + r.w + ',' + r.h;
+    if (str !== prevRegionStr) {
+      prevRegionStr = str;
+      invoke('set_scan_region', { x: r.x, y: r.y, w: r.w, h: r.h }).catch(() => {});
+    }
+  }
+
+  // ---------- 拖拽 / 缩放 ----------
+  let panStart = null;
+  let dragDirty = true;
+  let viewDirty = false;
+  function enterDrag() {
+    if (dragging) return;
+    dragging = true;
+    viewDirty = false;
+    ensureViewAnim();
+  }
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    panStart = { x: e.clientX, y: e.clientY };
+    canvas.classList.add('dragging');
+    if (preview) enterDrag();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!panStart) return;
+    const dxCss = e.clientX - panStart.x;
+    const dyCss = e.clientY - panStart.y;
+    panStart = { x: e.clientX, y: e.clientY };
+    if (!preview || !dragging) return;
+    const rect = canvas.getBoundingClientRect();
+    const k = canvas.width / rect.width;
+    const r = contentRect();
+    const v = viewportFrac();
+    viewT.fx -= (dxCss * k * v.fw) / r.cw;
+    viewT.fy -= (dyCss * k * v.fh) / r.ch;
+    viewDirty = true;
+    clampViewT();
+    ensureViewAnim();
+  });
+  window.addEventListener('mouseup', () => {
+    if (!panStart) return;
+    panStart = null;
+    canvas.classList.remove('dragging');
+    dragging = false;
+    ensureViewAnim();
+  });
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (!preview) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = ((e.clientX - rect.left) * canvas.width) / rect.width;
+    const sy = ((e.clientY - rect.top) * canvas.height) / rect.height;
+    const r = contentRect();
+    const ufx = (sx - r.ox) / r.cw;
+    const ufy = (sy - r.oy) / r.ch;
+    const v = viewportFrac();
+    const mfx = v.x0 + ufx * v.fw;
+    const mfy = v.y0 + ufy * v.fh;
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    viewT.scale = Math.min(Math.max(viewT.scale * factor, 1), 8);
+    const nv = viewportFrac(viewT);
+    viewT.fx = mfx + nv.fw * (0.5 - ufx);
+    viewT.fy = mfy + nv.fh * (0.5 - ufy);
+    viewDirty = true;
+    clampViewT();
+    ensureViewAnim();
+  }, { passive: false });
+
+  $('btnRegionReset').addEventListener('click', () => {
+    if (!preview) return;
+    viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+    ensureViewAnim();
+  });
+
+  // ---------- FPS 徽标：暂停/恢复预览 ----------
+  const PAUSE_ICON = '<svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>';
+  $('fpsMeter').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const el = $('fpsMeter');
+    if (!paused) {
+      paused = true;
+      stopPreview();
+      el.classList.add('paused');
+      el.innerHTML = PAUSE_ICON;
+      const origW = preview ? preview.mon.w : 1920;
+      capturePauseShot(origW).then(() => {
+        if (paused) drawView();
+        invoke('set_preview_active', { active: false }).catch(() => {});
+      });
+    } else {
+      paused = false;
+      pauseShot = null;
+      el.classList.remove('paused');
+      el.textContent = '--';
+      invoke('set_preview_active', { active: true }).catch(() => {});
+      startPreview();
+    }
+  });
+
+  // ---------- 渲染 ----------
+  function renderScan() {
+    const btn = $('btnStart');
+    btn.classList.toggle('running', scanning);
+    btn.innerHTML = scanning
+      ? '<span>' + (stopping ? '停止中…' : '停止扫描') + '</span>'
+      : '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg><span>开始扫码</span>';
+  }
+
+  function renderOptions() {
+    if (!config) return;
+    $('autoLoginLast').checked = !!config.auto_login_last;
+    $('alwaysOnTop').checked = !!config.always_on_top;
+    $('autoClose').checked = !!config.auto_close;
+    $('clearClip').checked = !!config.clear_clipboard;
+    $('displayName').value = config.display_name || '';
+  }
+
+  function renderAll() {
+    renderGame();
+    renderFilter();
+    renderAccounts();
+    renderScan();
+    renderOptions();
+  }
+
+  function bindOptions() {
+    $('autoLoginLast').addEventListener('change', (e) => saveCfg({ auto_login_last: e.target.checked }));
+    $('alwaysOnTop').addEventListener('change', (e) => saveCfg({ always_on_top: e.target.checked }));
+    $('autoClose').addEventListener('change', (e) => saveCfg({ auto_close: e.target.checked }));
+    $('clearClip').addEventListener('change', (e) => saveCfg({ clear_clipboard: e.target.checked }));
+    const dn = $('displayName');
+    dn.addEventListener('change', () => saveCfg({ display_name: dn.value.trim() }));
+    dn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dn.blur(); } });
+  }
+
+  async function init() {
+    bindOptions();
+    if (listen) {
+      await listen('accounts-updated', async () => {
+        try { config = await invoke('get_config'); renderAll(); } catch (e) {}
+      });
+      await listen('scan-status', (ev) => {
+        const p = ev.payload || {};
+        if (p.type === 'started') { scanning = true; stopping = false; renderScan(); }
+        else if (p.type === 'stopped' || p.type === 'success') { scanning = false; stopping = false; renderScan(); }
+        log(p.message || '', p.type === 'started' ? 'info' : (p.type || 'info'));
+      });
+    }
+    try { config = await invoke('get_config'); } catch (e) { config = null; log('加载配置失败: ' + e, 'error'); }
+    if (config) {
+      const gid = config.current_game || 'bh3';
+      const g = gameMeta(gid);
+      const saved = (config.game_channel || {})[gid];
+      if (g.hyper) filter = 'hypergryph';
+      else if (saved) filter = saved;
+    }
+    renderAll();
+    invoke('refresh_official_unames').catch(() => {});
+    log('应用就绪。添加账号后点击「开始扫码」即可自动识别并登录', 'info');
+    startPreview();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

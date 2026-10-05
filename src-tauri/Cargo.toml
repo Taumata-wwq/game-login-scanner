@@ -1,0 +1,74 @@
+[package]
+name = "bh3-scanner"
+version = "0.1.0"
+description = "崩坏3 扫码器"
+edition = "2021"
+
+[lib]
+name = "bh3_scanner_lib"
+crate-type = ["rlib"]
+# 内联测试 harness 链接 tauri 后因缺 manifest 在 Windows 启动即崩（见 build.rs），
+# 统一改为 tests/ 集成测试，故禁用 lib/bin 的默认测试目标。
+test = false
+
+[[bin]]
+name = "bh3-scanner"
+path = "src/main.rs"
+test = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+embed-resource = "3"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+# 关闭 env_filter（其 regex 栈约 700KB，本工具只用固定级别过滤）
+env_logger = { version = "0.11", default-features = false }
+
+# 桌面预览图（base64）
+base64 = "0.22"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+
+# 二维码：关闭默认特性（image/image_formats 引入全套图片解码器，本工具仅从内存
+# RGB 解码、用 MultiFormatWriter 生成 SVG，不需要读图片文件）
+rxing = { version = "0.5", default-features = false }
+arboard = "3"
+screenshots = "0.8"
+
+# 加密与编码
+sha2 = "0.10"
+hmac = "0.12"
+md-5 = "0.10"
+hex = "0.4"
+rand = "0.8"
+url = "2"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+# release：性能优先（opt-level=3）+ strip 符号 + abort 展开。
+# 注：曾试 thin LTO + codegen-units=1，体积仅减 ~0.3MB，但单次构建增至 ~12 分钟，
+# 严重拖慢迭代，收益不成比例，故不启用。
+[profile.release]
+opt-level = 3
+panic = "abort"
+strip = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Dwm",
+    "Win32_Security_Cryptography",
+] }

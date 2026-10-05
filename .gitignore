@@ -1,0 +1,36 @@
+# Rust / Tauri
+/src-tauri/target/
+/src-tauri/gen/schemas/
+/src-tauri/check.out
+/src-tauri/check.err
+/src-tauri/rel.out
+/src-tauri/rel.err
+/b.err
+/b.out
+/.tmp_check.js
+**/*.rs.bk
+
+# 构建产物
+/dist/
+*.exe
+*.pdb
+*.msi
+*.nsis.zip
+
+# 依赖
+node_modules/
+
+# 临时文件
+*.tmp
+*.json.tmp
+*.json.corrupt.*
+
+# 参考项目（只读，不纳入版本控制）
+/reference/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
