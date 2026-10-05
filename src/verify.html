@@ -29,6 +29,7 @@
     const params = new URLSearchParams(location.search);
     const captchaId = params.get('captcha_id') || '';
     const sessionId = params.get('session_id') || '';
+    const riskType = params.get('risk_type') || '';
     const hint = document.getElementById('hint');
     if (!captchaId) { hint.textContent = '缺少验证参数'; return; }
     function fail(msg) {
@@ -36,17 +37,31 @@
       if (invoke) invoke('captcha_result', { aigis: '' }).catch(() => {});
     }
     // popup 模式：点击后弹出居中验证面板（与普通网站一致）。
-    // userInfo 绑定 aigis 会话：GT4 需携带 session_id，否则米哈游服务端二次校验极验
-    // 结果时会判定「图片验证码失效」（-302）。
+    // 关键参数（参照 genshin.py 的国服实现）：
+    // - userInfo: 国服 App 用 {mmt_key: session_id}（海外新 OS 才用 session_id），
+    //   极验据此把本次验证与米哈游 aigis 会话绑定；缺它会「图片验证码失效」(-302)。
+    // - riskType: 米哈游下发的验证形式（icon/slide），不传可能导致验证方式不符。
+    const initParams = { captchaId, product: 'popup', language: 'zho' };
+    if (sessionId) initParams.userInfo = JSON.stringify({ mmt_key: sessionId });
+    if (riskType) initParams.riskType = riskType;
     window.initGeetest4(
-      { captchaId, product: 'popup', language: 'zho', userInfo: JSON.stringify({ session_id: sessionId }) },
+      initParams,
       (captcha) => {
       captcha.appendTo(document.getElementById('box'));
       captcha.onReady(() => { hint.textContent = '请完成验证'; });
       captcha.onSuccess(() => {
         const v = captcha.getValidate();
         if (!v) { fail('验证结果为空'); return; }
-        const payload = btoa(unescape(encodeURIComponent(JSON.stringify(v))));
+        // 只保留极验 GT4 的 5 个标准字段：userInfo 等额外字段会被并入 getValidate()
+        // 结果，污染 aigis，导致米哈游服务端校验失败（-302）。
+        const clean = {
+          captcha_id: v.captcha_id,
+          lot_number: v.lot_number,
+          pass_token: v.pass_token,
+          gen_time: v.gen_time,
+          captcha_output: v.captcha_output,
+        };
+        const payload = btoa(unescape(encodeURIComponent(JSON.stringify(clean))));
         const aigis = sessionId + ';' + payload;
         hint.textContent = '验证成功，正在返回…';
         if (invoke) invoke('captcha_result', { aigis }).catch(() => {});

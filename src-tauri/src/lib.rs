@@ -1288,10 +1288,15 @@ async fn open_captcha_window(
     app: tauri::AppHandle,
     captcha_id: String,
     session_id: String,
+    risk_type: Option<String>,
 ) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
+    let risk = risk_type.unwrap_or_default();
     let url = WebviewUrl::App(
-        format!("verify.html?captcha_id={captcha_id}&session_id={session_id}").into(),
+        format!(
+            "verify.html?captcha_id={captcha_id}&session_id={session_id}&risk_type={risk}"
+        )
+        .into(),
     );
     // 已存在则先关闭，避免重复。
     if let Some(w) = app.get_webview_window("captcha") {

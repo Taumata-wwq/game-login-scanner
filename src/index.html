@@ -1235,6 +1235,7 @@
     const sid = aigis && aigis.session_id ? aigis.session_id : '';
     const gt = data.gt || '';
     const captchaId = data.captcha_id || data.captchaId || gt;
+    const riskType = data.risk_type || data.riskType || '';
     if (!captchaId) {
       if (retryFn) retryFn(''); else setCredStatus('验证参数缺失');
       return;
@@ -1242,7 +1243,7 @@
     captchaRetry = retryFn;
     setCredStatus('请在弹出的验证窗口中完成验证…');
     try {
-      await invoke('open_captcha_window', { captchaId, sessionId: sid });
+      await invoke('open_captcha_window', { captchaId, sessionId: sid, riskType });
     } catch (e) {
       setCredStatus('打开验证窗口失败: ' + e);
       return;
