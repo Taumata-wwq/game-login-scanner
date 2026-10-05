@@ -63,16 +63,8 @@
   .ibtn:active { background: var(--active); }
   .ibtn.open { color: var(--text-strong); background: var(--panel-3); }
   .ibtn svg { display: block; }
-  .wbtn {
-    width: 22px; height: 22px; flex: none;
-    display: inline-grid; place-items: center;
-    background: transparent; color: var(--muted);
-    border: none; border-radius: var(--radius); cursor: pointer; padding: 0;
-    transition: background 0.1s, color 0.1s;
-  }
-  .wbtn:hover { background: var(--hover); color: var(--text-strong); }
-  .wbtn.close:hover { background: var(--danger); color: #fff; }
-  .wbtn svg { display: block; }
+  /* 窗口控制按钮复用 .ibtn 尺寸；关闭键悬停变红。 */
+  .ibtn.close:hover { background: var(--danger); color: #fff; }
 
   main { flex: 1; overflow: hidden; padding: 10px; display: flex; flex-direction: column; gap: 9px; }
 
@@ -199,6 +191,10 @@
   .btn:hover { background: var(--hover); border-color: #4a4a4a; }
   .btn.ghost { background: transparent; }
   .btn.ghost:hover { background: var(--panel-2); }
+  /* 块级主按钮：整行、稍高（弹窗底部操作用）。 */
+  .btn.block { width: 100%; height: 28px; }
+  /* 迷你按钮：选项区「清空」等（贴近节标题）。 */
+  .btn.tiny { height: 18px; font-size: 10px; padding: 0 7px; }
 
   /* ===== 居中弹窗 ===== */
   .overlay {
@@ -275,40 +271,28 @@
   .game-item.on { border-color: #8a8a8a; }
   .game-item .gname { font-weight: 600; font-size: 11.5px; }
   .game-item .gdesc { font-size: 9.5px; color: var(--faint); margin-left: auto; }
-  .txtin {
-    width: 130px; height: 22px; padding: 0 8px;
+  /* 文本输入框统一样式（.txtin 与弹窗内 field-row input 共用）。 */
+  .txtin, .field-row input {
+    width: 130px; height: 24px; padding: 0 8px;
     background: var(--panel-2); color: var(--text);
     border: 1px solid var(--border); border-radius: var(--radius);
     outline: none; font: inherit;
   }
-  .txtin:focus { border-color: #8a8a8a; }
-  .txtin.full { width: 100%; height: 24px; }
-  /* 添加账号弹窗 */
-  .seg2 { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+  .txtin:focus, .field-row input:focus { border-color: #8a8a8a; }
+  .txtin.full { width: 100%; }
+  /* 分段控件（登录方式页签）。 */
   .seg3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
   .seg3 button {
-    background: transparent; border: 0; color: var(--muted); font: inherit; font-size: 11px;
-    padding: 5px 0; border-radius: calc(var(--radius) - 1px); cursor: pointer; transition: all .12s;
-  }
-  .seg3 button:hover { color: var(--text); background: var(--hover); }
-  .seg3 button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
-  .seg3 button[hidden] { display: none; }
-  .seg2 button {
     height: 22px; border: none; border-radius: 2px;
     background: transparent; color: var(--muted);
     font: 500 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
     cursor: pointer; transition: background 0.1s, color 0.1s;
   }
-  .seg2 button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  .seg3 button:hover { color: var(--text); background: var(--hover); }
+  .seg3 button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  .seg3 button[hidden] { display: none; }
   .field-row { display: flex; flex-direction: column; gap: 4px; }
   .field-row .flbl { font-size: 10px; color: var(--faint); }
-  .field-row input {
-    height: 24px; padding: 0 8px;
-    background: var(--panel-2); color: var(--text);
-    border: 1px solid var(--border); border-radius: var(--radius);
-    outline: none; font: inherit;
-  }
-  .field-row input:focus { border-color: #8a8a8a; }
   /* 验证码行：输入框占满剩余宽度，按钮等宽；两者等高对齐。 */
   .code-row { display: flex; gap: 6px; align-items: stretch; }
   .code-row input { flex: 1 1 auto; min-width: 0; height: 24px; }
@@ -327,9 +311,6 @@
   .qr-status.scanned { color: var(--warn); }
   .qr-status.expired { color: var(--danger); }
   .qr-status.confirmed { color: var(--ok); }
-  .add-actions { display: flex; gap: 6px; }
-  .add-actions button { flex: 1 1 auto; }
-
   /* 日志 */
   #log {
     min-height: 100px; max-height: 170px; overflow-y: auto; margin: 0;
@@ -369,10 +350,10 @@
           <path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="3"/>
         </svg>
       </button>
-      <button class="wbtn" id="btnMin" title="最小化">
+      <button class="ibtn" id="btnMin" title="最小化">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 12h14"/></svg>
       </button>
-      <button class="wbtn close" id="btnClose" title="关闭">
+      <button class="ibtn close" id="btnClose" title="关闭">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </div>
@@ -427,7 +408,7 @@
           <div class="flbl">备注信息</div>
           <input type="text" id="remarkText" placeholder="留空则不显示" maxlength="64" autocomplete="off" />
         </div>
-        <button class="btn" id="btnRemarkSave" style="height:28px;width:100%">保存</button>
+        <button class="btn block" id="btnRemarkSave">保存</button>
       </div>
     </div>
   </div>
@@ -454,7 +435,7 @@
             <button class="btn ghost" id="btnHyperSend">发送验证码</button>
           </div>
           </div>
-        <button class="btn" id="btnHyperLogin" style="height:28px;width:100%">登录</button>
+        <button class="btn block" id="btnHyperLogin">登录</button>
         <div class="qr-status" id="hyperStatus"></div>
       </div>
     </div>
@@ -505,8 +486,8 @@
             <input type="password" id="credPassword" placeholder="密码" maxlength="64" autocomplete="off" />
           </div>
         </div>
-        <button class="btn ghost" id="btnQrRefresh" style="height:28px;width:100%;margin-top:8px;display:none">重新生成二维码</button>
-        <button class="btn" id="btnCredLogin" style="height:28px;width:100%;margin-top:8px;display:none">登录</button>
+        <button class="btn ghost block" id="btnQrRefresh" style="display:none">重新生成二维码</button>
+        <button class="btn block" id="btnCredLogin" style="display:none">登录</button>
         <div class="qr-status" id="credStatus"></div>
       </div>
     </div>
@@ -564,7 +545,7 @@
         </div>
 
         <div class="dsec">日志
-          <button class="btn ghost" id="btnClearLog" style="height:18px;font-size:10px;padding:0 7px">清空</button>
+          <button class="btn ghost tiny" id="btnClearLog">清空</button>
         </div>
         <div id="log"></div>
       </div>
