@@ -96,14 +96,6 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  .badge {
-    display: inline-flex; align-items: center; gap: 5px;
-    font-size: 9.5px; padding: 1px 7px; border-radius: 999px; font-weight: 500; flex: none;
-    color: #cfcfcf; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--line);
-  }
-  .badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #7a7a7a; }
-  .badge.run::before { background: var(--warn); }
-
   .sectitle {
     display: flex; align-items: center; gap: 7px;
     font-size: 9.5px; font-weight: 600; color: var(--faint);
@@ -1221,12 +1213,11 @@
   }
 
   // ---------- 人机验证（极验 GT3，独立弹窗） ----------
-  // 米哈游用极验第三代：aigis = { session_id, data: { gt, challenge, ... } }；
-  // 完成验证后组装 "session_id;base64(getValidate())" 回传。
+  // 米哈游极验：aigis = { session_id, data: { gt, risk_type, ... } }。
+  // 打开独立验证窗口（verify.html），窗口完成后经 captcha_result 命令写回，
+  // 前端轮询 take_captcha_result 取回 "session_id;base64(getValidate())" 并重试。
   let captchaRetry = null;   // 验证完成后重试的回调
-  // 打开独立验证窗口；窗口完成后经 captcha-done 事件通知，前端取回 aigis。
   async function showCaptcha(aigis, retryFn) {
-    log('人机验证数据: ' + JSON.stringify(aigis), 'info');
     let data = aigis && aigis.data !== undefined ? aigis.data : aigis;
     if (typeof data === 'string') {
       try { data = JSON.parse(data); } catch (e) { data = {}; }
@@ -1257,7 +1248,6 @@
       const fn = captchaRetry;
       captchaRetry = null;
       if (res) {
-        log('收到验证结果 aigis: ' + res, 'info');
         setCredStatus('验证通过，正在继续…');
         if (fn) fn(res);
       } else {

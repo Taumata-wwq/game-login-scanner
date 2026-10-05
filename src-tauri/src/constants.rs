@@ -110,10 +110,6 @@ pub const MIYOUSHE_RSA_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMIGfMA0GC
 
 /// B站：发送短信验证码。
 pub const BILI_SMS_SEND_URL: &str = "https://passport.bilibili.com/x/passport-login/sms/send";
-/// B站：短信验证码登录。
-pub const BILI_LOGIN_SMS_URL: &str = "https://passport.bilibili.com/x/passport-login/login/sms";
-/// B站：Web 登录页（获取 RSA 公钥/盐）。
-pub const BILI_WEB_LOGIN_URL: &str = "https://passport.bilibili.com/x/passport-login/web/login";
 /// B站：Web 登录 RSA 公钥接口。
 pub const BILI_WEB_KEY_URL: &str = "https://passport.bilibili.com/x/passport-login/web/key";
 

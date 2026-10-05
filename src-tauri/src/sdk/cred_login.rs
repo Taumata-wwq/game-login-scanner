@@ -23,13 +23,6 @@ pub enum CredOutcome {
     NeedCaptcha(Value),
 }
 
-fn now_sec() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// 米哈游 DSPROD 头（passport 登录接口用）。
 /// 必须与 official.rs 的 dsprod_headers 完全一致（含 device_name/model/sys_version），
 /// 否则服务端判定「请求频繁」(-1001) 风控。
@@ -219,7 +212,6 @@ pub async fn mihoyo_send_sms(
     let resp_headers = resp.headers().clone();
     let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
     let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    log::info!("[发送验证码] body: {}", &text[..text.len().min(800)]);
     if json.get("retcode").and_then(|v| v.as_i64()) == Some(0) {
         return Ok(None);
     }
@@ -263,14 +255,6 @@ pub async fn mihoyo_login_sms(
         .map_err(|e| format!("请求失败: {e}"))?;
     let resp_headers = resp.headers().clone();
     let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
-    // web 版登录：凭证在 Set-Cookie 中（非 body）。输出全部 Set-Cookie 供诊断。
-    let all_cookies: Vec<String> = resp_headers
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
-        .collect();
-    log::info!("[短信登录] Set-Cookie: {}", all_cookies.join(" | "));
-    log::info!("[短信登录] body: {}", &text[..text.len().min(1500)]);
     let json: Value = serde_json::from_str(&text)
         .map_err(|_| format!("响应非 JSON: {}", &text[..text.len().min(200)]))?;
     // 极验触发。
@@ -317,10 +301,7 @@ pub async fn mihoyo_login_sms(
             .unwrap_or_default()
     };
     if stoken.is_empty() {
-        return Err(format!(
-            "短信登录成功但未取得 stoken（Cookie: {}）",
-            all_cookies.join(" | ")
-        ));
+        return Err("短信登录成功但未取得 stoken".to_string());
     }
     Ok(CredOutcome::MiyousheOk {
         uid: if uid.is_empty() { mid.clone() } else { uid },
@@ -419,9 +400,4 @@ pub async fn bili_login_pwd(
 ) -> Result<CredOutcome, String> {
     let _ = (account, password, captcha_key);
     Err("B站密码登录待接入（需先完成极验）".to_string())
-}
-
-/// 供上层记录使用时间（保留接口）。
-pub fn touch_now() -> i64 {
-    now_sec()
 }
