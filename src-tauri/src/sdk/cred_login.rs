@@ -33,7 +33,7 @@ fn now_sec() -> i64 {
 /// 米哈游 DSPROD 头（passport 登录接口用）。
 /// 必须与 official.rs 的 dsprod_headers 完全一致（含 device_name/model/sys_version），
 /// 否则服务端判定「请求频繁」(-1001) 风控。
-fn dsprod_headers(device_id: &str) -> reqwest::header::HeaderMap {
+fn dsprod_headers(device_id: &str, device_fp: &str) -> reqwest::header::HeaderMap {
     use reqwest::header::{HeaderMap, HeaderValue};
     let mut h = HeaderMap::new();
     let mut set = |k: &'static str, v: &str| {
@@ -44,7 +44,7 @@ fn dsprod_headers(device_id: &str) -> reqwest::header::HeaderMap {
     set("x-rpc-app_id", constants::DSPROD_APP_ID);
     set("x-rpc-client_type", constants::DSPROD_CLIENT_TYPE);
     set("x-rpc-device_id", device_id);
-    set("x-rpc-device_fp", constants::DSPROD_DEVICE_FP_DEFAULT);
+    set("x-rpc-device_fp", device_fp);
     set("x-rpc-device_name", "崩坏3扫码器-PC");
     set("x-rpc-device_model", "Windows");
     set("x-rpc-sys_version", "Windows 10");
@@ -92,6 +92,41 @@ fn parse_mihoyo_login(json: &Value, headers: &reqwest::header::HeaderMap) -> Res
     })
 }
 
+/// 米哈游设备指纹接口。
+const DEVICE_FP_URL: &str = "https://public-data-api.mihoyo.com/device-fp/api/getFp";
+
+/// 获取真实设备指纹（风控必需）。
+/// 用 device_id + 随机 seed 请求 getFp，成功则返回 device_fp（32 位 hex）。
+/// 需在登录前调用并持久化，否则 x-rpc-device_fp 用假值会触发「请求频繁」(-1001)。
+pub async fn fetch_device_fp(device_id: &str, seed_id: &str, seed_time: &str) -> Result<String, String> {
+    let body = json!({
+        "device_id": device_id,
+        "seed_id": seed_id,
+        "seed_time": seed_time,
+        "platform": "2",
+        "device_fp": "38d7ed153506e",  // 初始占位（参考项目实测可用）
+        "app_name": "bh3_cn",
+        "ext_fields": "{}",
+    })
+    .to_string();
+    let resp = crate::http::client()
+        .post(DEVICE_FP_URL)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("getFp 请求失败: {e}"))?;
+    let json: Value = resp.json().await.map_err(|e| format!("getFp 响应解析失败: {e}"))?;
+    if json.get("retcode").and_then(|v| v.as_i64()) != Some(0) {
+        let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+        return Err(format!("getFp 失败: {msg}"));
+    }
+    json["data"]["device_fp"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "getFp 响应缺少 device_fp".to_string())
+}
+
 /// 从响应头解析极验数据（x-rpc-aigis）。
 fn extract_aigis(headers: &reqwest::header::HeaderMap) -> Option<Value> {
     let aigis = headers.get("x-rpc-aigis")?;
@@ -106,13 +141,14 @@ fn extract_aigis(headers: &reqwest::header::HeaderMap) -> Option<Value> {
 /// 返回 Some(aigis) 表示触发人机验证（前端渲染极验后带 aigis 重试）；None 表示已发送。
 pub async fn mihoyo_send_sms(
     device_id: &str,
+    device_fp: &str,
     phone: &str,
     aigis: &str,
 ) -> Result<Option<Value>, String> {
     let enc_mobile = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, phone)?;
     let enc_area = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, "+86")?;
     let body = json!({ "mobile": enc_mobile, "area_code": enc_area }).to_string();
-    let mut headers = dsprod_headers(device_id);
+    let mut headers = dsprod_headers(device_id, device_fp);
     if !aigis.is_empty() {
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);
@@ -143,6 +179,7 @@ pub async fn mihoyo_send_sms(
 /// 米哈游：验证码登录。
 pub async fn mihoyo_login_sms(
     device_id: &str,
+    device_fp: &str,
     phone: &str,
     code: &str,
     aigis: &str,
@@ -156,7 +193,7 @@ pub async fn mihoyo_login_sms(
         "captcha": code,
     })
     .to_string();
-    let mut headers = dsprod_headers(device_id);
+    let mut headers = dsprod_headers(device_id, device_fp);
     if !aigis.is_empty() {
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);
@@ -180,6 +217,7 @@ pub async fn mihoyo_login_sms(
 /// 米哈游：密码登录。
 pub async fn mihoyo_login_pwd(
     device_id: &str,
+    device_fp: &str,
     account: &str,
     password: &str,
     aigis: &str,
@@ -187,7 +225,7 @@ pub async fn mihoyo_login_pwd(
     let enc_account = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, account)?;
     let enc_pwd = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, password)?;
     let body = json!({ "account": enc_account, "password": enc_pwd }).to_string();
-    let mut headers = dsprod_headers(device_id);
+    let mut headers = dsprod_headers(device_id, device_fp);
     if !aigis.is_empty() {
         if let Ok(v) = reqwest::header::HeaderValue::from_str(aigis) {
             headers.insert("x-rpc-aigis", v);

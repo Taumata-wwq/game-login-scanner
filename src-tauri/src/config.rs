@@ -163,6 +163,14 @@ pub struct AppConfig {
     pub win_x: Option<i32>,
     pub win_y: Option<i32>,
     pub device_id: String,
+    /// 真实设备指纹（米哈游登录风控必需；空则由 getFp 接口获取后写入）。
+    #[serde(default)]
+    pub device_fp: String,
+    /// 设备指纹随机种子（getFp 用）。
+    #[serde(default)]
+    pub fp_seed_id: String,
+    #[serde(default)]
+    pub fp_seed_time: String,
     /// 旧版「启动自动扫描」设置（迁移到 auto_login_last 后不再写出）。
     #[serde(skip_serializing)]
     pub auto_start_scan: bool,
@@ -193,6 +201,9 @@ impl Default for AppConfig {
             win_x: None,
             win_y: None,
             device_id: String::new(),
+            device_fp: String::new(),
+            fp_seed_id: String::new(),
+            fp_seed_time: String::new(),
             auto_start_scan: false,
             bili: None,
             official: None,

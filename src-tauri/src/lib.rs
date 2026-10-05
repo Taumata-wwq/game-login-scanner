@@ -420,6 +420,56 @@ fn cfg_device_id(state: &tauri::State<'_, AppState>) -> String {
     }
 }
 
+/// 获取真实设备指纹（优先用配置缓存；无则请求 getFp 并持久化）。
+/// 这是米哈游登录风控的核心——假指纹会触发「请求频繁」(-1001)。
+async fn ensure_device_fp(state: &tauri::State<'_, AppState>) -> Result<String, String> {
+    let (device_id, cached, seed_id, seed_time) = {
+        let cfg = state
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            cfg.device_id.clone(),
+            cfg.device_fp.clone(),
+            cfg.fp_seed_id.clone(),
+            cfg.fp_seed_time.clone(),
+        )
+    };
+    if !cached.is_empty() {
+        return Ok(cached);
+    }
+    let device_id = if device_id.is_empty() {
+        constants::DSPROD_DEVICE_FP_DEFAULT.to_string()
+    } else {
+        device_id
+    };
+    // 生成 seed（UUID + 时间戳）。
+    let (seed_id, seed_time) = if seed_id.is_empty() {
+        (
+            uuid::Uuid::new_v4().to_string(),
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0))
+            .to_string(),
+        )
+    } else {
+        (seed_id, seed_time)
+    };
+    let fp = sdk::cred_login::fetch_device_fp(&device_id, &seed_id, &seed_time).await?;
+    {
+        let mut cfg = state
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cfg.device_fp = fp.clone();
+        cfg.fp_seed_id = seed_id;
+        cfg.fp_seed_time = seed_time;
+        let _ = cfg.save();
+    }
+    Ok(fp)
+}
+
 /// 发送短信验证码（channel: official | bilibili）。
 #[tauri::command]
 async fn cred_send_code(
@@ -430,13 +480,16 @@ async fn cred_send_code(
     aigis: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let _ = game;
-    let device_id = cfg_device_id(&state);
     let aigis = aigis.unwrap_or_default();
     match channel.as_str() {
-        "official" => match sdk::cred_login::mihoyo_send_sms(&device_id, &phone, &aigis).await? {
-            Some(a) => Ok(serde_json::json!({ "status": "captcha", "aigis": a })),
-            None => Ok(serde_json::json!({ "status": "ok" })),
-        },
+        "official" => {
+            let device_id = cfg_device_id(&state);
+            let device_fp = ensure_device_fp(&state).await?;
+            match sdk::cred_login::mihoyo_send_sms(&device_id, &device_fp, &phone, &aigis).await? {
+                Some(a) => Ok(serde_json::json!({ "status": "captcha", "aigis": a })),
+                None => Ok(serde_json::json!({ "status": "ok" })),
+            }
+        }
         "bilibili" => {
             sdk::cred_login::bili_send_sms(&phone).await?;
             Ok(serde_json::json!({ "status": "ok" }))
@@ -456,9 +509,12 @@ async fn cred_login_sms(
     aigis: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let aigis = aigis.unwrap_or_default();
-    let device_id = cfg_device_id(&state);
     let outcome = match channel.as_str() {
-        "official" => sdk::cred_login::mihoyo_login_sms(&device_id, &phone, &code, &aigis).await?,
+        "official" => {
+            let device_id = cfg_device_id(&state);
+            let device_fp = ensure_device_fp(&state).await?;
+            sdk::cred_login::mihoyo_login_sms(&device_id, &device_fp, &phone, &code, &aigis).await?
+        }
         "bilibili" => sdk::cred_login::bili_login_sms(&phone, &code, &aigis).await?,
         _ => return Err("未知渠道".to_string()),
     };
@@ -476,9 +532,12 @@ async fn cred_login_pwd(
     aigis: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let aigis = aigis.unwrap_or_default();
-    let device_id = cfg_device_id(&state);
     let outcome = match channel.as_str() {
-        "official" => sdk::cred_login::mihoyo_login_pwd(&device_id, &account, &password, &aigis).await?,
+        "official" => {
+            let device_id = cfg_device_id(&state);
+            let device_fp = ensure_device_fp(&state).await?;
+            sdk::cred_login::mihoyo_login_pwd(&device_id, &device_fp, &account, &password, &aigis).await?
+        }
         "bilibili" => sdk::cred_login::bili_login_pwd(&account, &password, &aigis).await?,
         _ => return Err("未知渠道".to_string()),
     };
