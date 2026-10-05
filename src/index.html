@@ -285,6 +285,14 @@
   .txtin.full { width: 100%; height: 24px; }
   /* 添加账号弹窗 */
   .seg2 { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+  .seg3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+  .seg3 button {
+    background: transparent; border: 0; color: var(--muted); font: inherit; font-size: 11px;
+    padding: 5px 0; border-radius: calc(var(--radius) - 1px); cursor: pointer; transition: all .12s;
+  }
+  .seg3 button:hover { color: var(--text); background: var(--hover); }
+  .seg3 button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  .seg3 button[hidden] { display: none; }
   .seg2 button {
     height: 22px; border: none; border-radius: 2px;
     background: transparent; color: var(--muted);
@@ -444,56 +452,29 @@
           <div class="code-row">
             <input type="text" id="hyperCode" placeholder="6 位验证码" maxlength="6" autocomplete="off" inputmode="numeric" />
             <button class="btn ghost" id="btnHyperSend">发送验证码</button>
-          </div>
-        </div>
-        <button class="btn" id="btnHyperLogin" style="height:28px;width:100%">登录</button>
-        <div class="qr-status" id="hyperStatus"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 添加账号弹窗 -->
-  <div class="overlay" id="addOverlay" hidden>
+  <!-- 统一账号登录弹窗（二维码 / 验证码 / 密码） -->
+  <div class="overlay" id="loginOverlay" hidden>
     <div class="dialog">
       <div class="dhead">
-        添加账号
+        <span id="loginTitle">账号登录</span>
         <span class="spacer"></span>
-        <button class="ibtn" data-close="addOverlay" title="关闭">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
-      </div>
-      <div class="dbody">
-        <div class="qr-page">
-          <div class="qr-label" id="addQrLabel">生成中…</div>
-          <div class="qr-img" id="addQrImg"></div>
-          <div class="qr-status" id="addQrStatus">生成中…</div>
-        </div>
-        <div class="add-actions">
-          <button class="btn ghost" id="btnQrRefresh" style="display:none">重新生成</button>
-          <button class="btn ghost" id="btnCredEntry">验证码/密码登录</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 渠道账号登录弹窗（米哈游/B站：验证码 / 密码） -->
-  <div class="overlay" id="credOverlay" hidden>
-    <div class="dialog">
-      <div class="dhead">
-        <span id="credTitle">账号登录</span>
-        <span class="spacer"></span>
-        <button class="ibtn" data-close="credOverlay" title="关闭">
+        <button class="ibtn" data-close="loginOverlay" title="关闭">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </div>
       <div class="dbody">
         <div class="field-row">
-          <div class="seg2" id="credModeSeg">
-            <button data-mode="sms" class="on">验证码登录</button>
-            <button data-mode="pwd">密码登录</button>
+          <div class="seg3" id="loginModeSeg">
+            <button data-mode="qr" class="on">二维码</button>
+            <button data-mode="sms">验证码</button>
+            <button data-mode="pwd">密码</button>
           </div>
         </div>
-        <div id="credSmsPage">
+        <div id="loginQrPage" class="qr-page">
+          <div class="qr-label" id="addQrLabel">生成中…</div>
+          <div class="qr-img" id="addQrImg"></div>
+        </div>
+        <div id="loginSmsPage" hidden>
           <div class="field-row">
             <div class="flbl">手机号</div>
             <input type="text" id="credPhone" placeholder="手机号" maxlength="20" autocomplete="off" inputmode="numeric" />
@@ -506,13 +487,22 @@
             </div>
           </div>
         </div>
-        <div id="credPwdPage" hidden>
+        <div id="loginPwdPage" hidden>
           <div class="field-row">
             <div class="flbl">账号</div>
             <input type="text" id="credAccount" placeholder="手机号 / 邮箱" maxlength="64" autocomplete="off" />
           </div>
           <div class="field-row">
             <div class="flbl">密码</div>
+            <input type="password" id="credPassword" placeholder="密码" maxlength="64" autocomplete="off" />
+          </div>
+        </div>
+        <button class="btn ghost" id="btnQrRefresh" style="height:28px;width:100%;margin-top:8px;display:none">重新生成二维码</button>
+        <button class="btn" id="btnCredLogin" style="height:28px;width:100%;margin-top:8px;display:none">登录</button>
+        <div class="qr-status" id="credStatus"></div>
+      </div>
+    </div>
+  </div>
             <input type="password" id="credPassword" placeholder="密码" maxlength="64" autocomplete="off" />
           </div>
         </div>
@@ -673,14 +663,14 @@
   document.querySelectorAll('[data-close]').forEach((b) => {
     b.addEventListener('click', () => {
       $(b.dataset.close).hidden = true;
-      if (b.dataset.close === 'addOverlay') cancelQr();
+      if (b.dataset.close === 'loginOverlay') cancelQr();
     });
   });
   document.querySelectorAll('.overlay').forEach((o) => {
     o.addEventListener('mousedown', (e) => {
       if (e.target === o) {
         o.hidden = true;
-        if (o.id === 'addOverlay') cancelQr();
+        if (o.id === 'loginOverlay') cancelQr();
       }
     });
   });
@@ -688,7 +678,7 @@
     if (e.key === 'Escape') {
       document.querySelectorAll('.overlay').forEach((o) => {
         o.hidden = true;
-        if (o.id === 'addOverlay') cancelQr();
+        if (o.id === 'loginOverlay') cancelQr();
       });
     }
   });
@@ -999,9 +989,8 @@
     }
   }
 
-  // ---------- 添加账号弹窗（跟随主界面渠道，单渠道二维码） ----------
+  // ---------- 统一登录弹窗（二维码 / 验证码 / 密码） ----------
   const $qrImg = $('addQrImg');
-  const $qrStatus = $('addQrStatus');
   const $qrLabel = $('addQrLabel');
   let qrActive = false;
   let pollTimer = null;
@@ -1013,8 +1002,9 @@
     return ch === 'official' ? '官服 · 米游社 App 扫码' : 'B 服 · B 站 App 扫码';
   }
   function setQrStatus(text, cls) {
-    $qrStatus.textContent = text;
-    $qrStatus.className = 'qr-status' + (cls ? ' ' + cls : '');
+    const el = $('credStatus');
+    el.textContent = text;
+    el.className = 'qr-status' + (cls ? ' ' + cls : '');
   }
   function stopPolling() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
 
@@ -1090,7 +1080,7 @@
         invoke('login_qr_cancel').catch(() => {});
         renderAll();
         log(channelLabel(channel) + '扫码登录成功' + (name ? '：' + name : ''), 'success');
-        setTimeout(() => { $('addOverlay').hidden = true; }, 800);
+        setTimeout(() => { $('loginOverlay').hidden = true; }, 800);
       }
     }, 1500);
   }
@@ -1104,36 +1094,48 @@
     }
   }
 
-  // ---------- 渠道账号登录（米哈游 / B站：验证码 / 密码） ----------
-  let credMode = 'sms';
+  // ---------- 统一登录弹窗（二维码 / 验证码 / 密码） ----------
+  let loginMode = 'qr';   // qr | sms | pwd
   let credCodeTimer = null;
   function setCredStatus(t) { $('credStatus').textContent = t; }
-  function openCredLogin() {
-    cancelQr();
-    $('addOverlay').hidden = true;
-    $('credTitle').textContent = (filter === 'official' ? '官服' : 'B 服') + '账号登录';
+
+  /// 切换登录方式页签。
+  function switchLoginMode(mode) {
+    loginMode = mode;
+    document.querySelectorAll('#loginModeSeg button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.mode === mode);
+    });
+    $('loginQrPage').hidden = mode !== 'qr';
+    $('loginSmsPage').hidden = mode !== 'sms';
+    $('loginPwdPage').hidden = mode !== 'pwd';
+    $('btnQrRefresh').style.display = mode === 'qr' ? '' : 'none';
+    $('btnCredLogin').style.display = mode === 'qr' ? 'none' : '';
+    setCredStatus('');
+    if (mode === 'qr') {
+      qrAutoRetry = 0;
+      pollFails = 0;
+      startQrLogin();
+    } else {
+      cancelQr();
+    }
+  }
+
+  /// 打开统一登录弹窗（默认二维码）。
+  function openLogin() {
+    $('loginTitle').textContent = (filter === 'official' ? '官服' : 'B 服') + '账号登录';
     $('credPhone').value = ''; $('credCode').value = '';
     $('credAccount').value = ''; $('credPassword').value = '';
-    $('credStatus').textContent = '';
-    // B站不支持短信登录（风控限制），隐藏验证码标签，仅保留密码登录；
-    // 米哈游默认验证码登录。
+    $('loginOverlay').hidden = false;
+    // B站不支持短信登录（风控限制），隐藏验证码页签；仅保留二维码与密码。
     const isBili = filter === 'bilibili';
-    credMode = isBili ? 'pwd' : 'sms';
-    document.querySelectorAll('#credModeSeg button').forEach((b) => {
+    document.querySelectorAll('#loginModeSeg button').forEach((b) => {
       if (b.dataset.mode === 'sms') b.hidden = isBili;
-      b.classList.toggle('on', b.dataset.mode === credMode);
     });
-    $('credSmsPage').hidden = credMode !== 'sms';
-    $('credPwdPage').hidden = credMode !== 'pwd';
-    $('credOverlay').hidden = false;
+    switchLoginMode('qr');
   }
-  document.querySelectorAll('#credModeSeg button').forEach((b) => {
-    b.addEventListener('click', () => {
-      credMode = b.dataset.mode;
-      document.querySelectorAll('#credModeSeg button').forEach((x) => x.classList.toggle('on', x === b));
-      $('credSmsPage').hidden = credMode !== 'sms';
-      $('credPwdPage').hidden = credMode !== 'pwd';
-    });
+
+  document.querySelectorAll('#loginModeSeg button').forEach((b) => {
+    b.addEventListener('click', () => switchLoginMode(b.dataset.mode));
   });
   function credCountdown() {
     const btn = $('btnCredSend');
@@ -1175,7 +1177,7 @@
   });
   async function doCredLogin(aigis) {
     const game = curGameId();
-    if (credMode === 'sms') {
+    if (loginMode === 'sms') {
       const phone = $('credPhone').value.trim();
       const code = $('credCode').value.trim();
       return invoke('cred_login_sms', { channel: filter, game, phone, code, aigis: aigis || '' });
@@ -1188,7 +1190,7 @@
   $('btnCredLogin').addEventListener('click', async () => {
     setCredStatus('登录中…');
     try {
-      if (credMode === 'sms') {
+      if (loginMode === 'sms') {
         if (!$('credPhone').value.trim() || !$('credCode').value.trim()) { setCredStatus('请填写手机号和验证码'); return; }
       } else {
         if (!$('credAccount').value.trim() || !$('credPassword').value) { setCredStatus('请填写账号和密码'); return; }
@@ -1213,7 +1215,7 @@
     invoke('get_config').then((c) => {
       config = c;
       renderAll();
-      $('credOverlay').hidden = true;
+      $('loginOverlay').hidden = true;
       log((filter === 'official' ? '官服' : 'B 服') + '账号登录成功', 'success');
     });
   }
@@ -1333,11 +1335,7 @@
       $('hyperPhone').focus();
       return;
     }
-    qrAutoRetry = 0;
-    pollFails = 0;
-    cancelQr();
-    $('addOverlay').hidden = false;
-    startQrLogin();
+    openLogin();
   });
   $('btnQrRefresh').addEventListener('click', () => {
     qrAutoRetry = 0;
@@ -1345,7 +1343,6 @@
     cancelQr();
     startQrLogin();
   });
-  $('btnCredEntry') && $('btnCredEntry').addEventListener('click', openCredLogin);
   $('btnRemarkSave').addEventListener('click', saveRemarkDialog);
   $('remarkAlias').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('remarkText').focus(); });
   $('remarkText').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveRemarkDialog(); });
