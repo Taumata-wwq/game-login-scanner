@@ -1256,6 +1256,7 @@
       const fn = captchaRetry;
       captchaRetry = null;
       if (res) {
+        log('收到验证结果 aigis: ' + res, 'info');
         setCredStatus('验证通过，正在继续…');
         if (fn) fn(res);
       } else {

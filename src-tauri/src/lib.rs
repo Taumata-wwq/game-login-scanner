@@ -1299,7 +1299,7 @@ async fn open_captcha_window(
     }
     WebviewWindowBuilder::new(&app, "captcha", url)
         .title("人机验证")
-        .inner_size(380.0, 500.0)
+        .inner_size(600.0, 640.0)
         .resizable(true)
         .center()
         .build()
