@@ -1232,11 +1232,19 @@
   // 完成验证后组装 "session_id;base64(getValidate())" 回传。
   let captchaRetry = null;   // 验证完成后重试的回调
   function showCaptcha(aigis, retryFn) {
-    const data = aigis && aigis.data ? aigis.data : aigis;
+    log('人机验证数据: ' + JSON.stringify(aigis), 'info');
+    // aigis.data 可能是对象，也可能是 JSON 字符串（米哈游两种都出现）——统一解析为对象。
+    let data = aigis && aigis.data !== undefined ? aigis.data : aigis;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch (e) { data = {}; }
+    }
+    if (!data || typeof data !== 'object') data = {};
     const sid = aigis && aigis.session_id ? aigis.session_id : '';
-    const gt = data ? (data.gt || '') : '';
-    const challenge = data ? (data.challenge || '') : '';
-    if (!gt || !challenge) {
+    // GT4：含 captcha_id；GT3：含 gt + challenge。
+    const captchaId = data.captcha_id || data.captchaId || '';
+    const gt = data.gt || '';
+    const challenge = data.challenge || '';
+    if (!captchaId && (!gt || !challenge)) {
       if (retryFn) retryFn(''); else setCredStatus('验证参数缺失');
       return;
     }
@@ -1245,32 +1253,46 @@
     const box = $('captchaBox');
     box.textContent = '';
     $('captchaOverlay').hidden = false;
-    loadGt3(() => {
-      try {
-        window.initGeetest({ gt, challenge, offline: false, new_captcha: true }, (captcha) => {
-          captcha.appendTo(box);
-          captcha.onSuccess(() => {
-            const v = captcha.getValidate();
-            $('captchaOverlay').hidden = true;
-            if (!v) { if (captchaRetry) captchaRetry(''); captchaRetry = null; return; }
-            const payload = btoa(unescape(encodeURIComponent(JSON.stringify(v))));
-            const aigisStr = sid + ';' + payload;
-            const fn = captchaRetry;
-            captchaRetry = null;
-            if (fn) fn(aigisStr);
+    // 统一回调：把验证结果组装成 "session_id;base64(结果JSON)" 并重试。
+    const onValidated = (result) => {
+      $('captchaOverlay').hidden = true;
+      if (!result) { if (captchaRetry) captchaRetry(''); captchaRetry = null; return; }
+      const payload = btoa(unescape(encodeURIComponent(JSON.stringify(result))));
+      const aigisStr = sid + ';' + payload;
+      const fn = captchaRetry;
+      captchaRetry = null;
+      if (fn) fn(aigisStr);
+    };
+    if (captchaId) {
+      // GT4
+      loadScript('https://static.geetest.com/v4/gt4.js', 'gt4', () => {
+        try {
+          window.initGeetest4({ captchaId, product: 'bind' }, (captcha) => {
+            captcha.appendTo(box);
+            captcha.onSuccess(() => onValidated(captcha.getValidate()));
+            captcha.onError(() => { $('captchaHint').textContent = '验证出错，请关闭重试'; });
+            captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭重试'; });
           });
-          captcha.onError(() => { $('captchaHint').textContent = '验证出错，请关闭重试'; });
-          captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭本窗口重试'; });
-        });
-      } catch (e) {
-        box.textContent = '极验初始化失败: ' + e;
-      }
-    });
+        } catch (e) { box.textContent = '极验初始化失败: ' + e; }
+      });
+    } else {
+      // GT3
+      loadScript('https://static.geetest.com/static/js/gt.0.4.9.js', 'gt3', () => {
+        try {
+          window.initGeetest({ gt, challenge, offline: false, new_captcha: true }, (captcha) => {
+            captcha.appendTo(box);
+            captcha.onSuccess(() => onValidated(captcha.getValidate()));
+            captcha.onError(() => { $('captchaHint').textContent = '验证出错，请关闭重试'; });
+            captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭重试'; });
+          });
+        } catch (e) { box.textContent = '极验初始化失败: ' + e; }
+      });
+    }
   }
-  function loadGt3(cb) {
-    if (window.initGeetest) { cb(); return; }
+  function loadScript(src, key, cb) {
+    if ((key === 'gt4' && window.initGeetest4) || (key === 'gt3' && window.initGeetest)) { cb(); return; }
     const s = document.createElement('script');
-    s.src = 'https://static.geetest.com/static/js/gt.0.4.9.js';
+    s.src = src;
     s.onerror = () => { $('captchaBox').textContent = '极验 SDK 加载失败（网络或 CSP）'; };
     s.onload = cb;
     document.head.appendChild(s);
