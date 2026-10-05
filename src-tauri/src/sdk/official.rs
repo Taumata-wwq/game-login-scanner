@@ -55,7 +55,7 @@ fn dsprod_headers(body: &str, device_id: &str, device_fp: &str) -> HeaderMap {
     insert_header(&mut h, "x-rpc-client_type", constants::DSPROD_CLIENT_TYPE);
     insert_header(&mut h, "x-rpc-device_id", device_id);
     insert_header(&mut h, "x-rpc-device_fp", device_fp);
-    insert_header(&mut h, "x-rpc-device_name", "崩坏3扫码器-PC");
+    insert_header(&mut h, "x-rpc-device_name", "游戏扫码器-PC");
     insert_header(&mut h, "x-rpc-device_model", "Windows");
     insert_header(&mut h, "x-rpc-sys_version", "Windows 10");
     insert_header(&mut h, "x-rpc-game_biz", constants::DSPROD_GAME_BIZ);
@@ -264,7 +264,7 @@ fn official_full_headers(device_id: &str) -> HeaderMap {
     insert_header(&mut h, "x-rpc-client_type", constants::DSPROD_CLIENT_TYPE);
     insert_header(&mut h, "x-rpc-device_id", device_id);
     insert_header(&mut h, "x-rpc-device_fp", constants::DSPROD_DEVICE_FP_DEFAULT);
-    insert_header(&mut h, "x-rpc-device_name", "崩坏3扫码器-PC");
+    insert_header(&mut h, "x-rpc-device_name", "游戏扫码器-PC");
     insert_header(&mut h, "x-rpc-device_model", "Windows");
     insert_header(&mut h, "x-rpc-sys_version", "Windows 10");
     insert_header(&mut h, "x-rpc-game_biz", constants::DSPROD_GAME_BIZ);

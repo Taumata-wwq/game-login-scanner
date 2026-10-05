@@ -38,7 +38,7 @@ fn dsprod_headers(device_id: &str, device_fp: &str) -> reqwest::header::HeaderMa
     set("x-rpc-client_type", constants::DSPROD_CLIENT_TYPE);
     set("x-rpc-device_id", device_id);
     set("x-rpc-device_fp", device_fp);
-    set("x-rpc-device_name", "崩坏3扫码器-PC");
+    set("x-rpc-device_name", "游戏扫码器-PC");
     set("x-rpc-device_model", "Windows");
     set("x-rpc-sys_version", "Windows 10");
     set("x-rpc-game_biz", constants::DSPROD_GAME_BIZ);

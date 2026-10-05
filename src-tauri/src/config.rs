@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::crypto;
 
-/// 游戏。当前支持崩坏3（米哈游系）；架构预留多游戏扩展。
+/// 游戏。支持米哈游系（崩坏3/星穹铁道/原神/绝区零）与鹰角系（终末地/明日方舟）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Game {
@@ -38,6 +38,18 @@ impl Game {
     /// 是否为鹰角系游戏（用鹰角账号确认，而非米哈游/B站账号）。
     pub fn is_hypergryph(self) -> bool {
         matches!(self, Game::Endfield | Game::Arknights)
+    }
+
+    /// 游戏中文显示名（日志与提示文案用）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Game::Bh3 => "崩坏3",
+            Game::Hsr => "崩坏：星穹铁道",
+            Game::Genshin => "原神",
+            Game::Zzz => "绝区零",
+            Game::Endfield => "明日方舟：终末地",
+            Game::Arknights => "明日方舟",
+        }
     }
 
     /// 该游戏的米哈游 app_id（B 服 combo/panda 与官服确认用）。
@@ -151,7 +163,7 @@ pub struct AppConfig {
     pub game_channel: std::collections::HashMap<String, Option<Channel>>,
     pub interval_ms: u64,
     /// 游戏内显示的账号名（B 服 combo/panda confirm 的 asterisk_name 字段）。
-    /// 空则用默认「崩坏3桌面扫码器用户」。
+    /// 空则用默认「游戏扫码器用户」。
     #[serde(default)]
     pub display_name: String,
     /// 启动后自动使用上次使用的账号并登录（即自动开始扫描）。
@@ -394,7 +406,7 @@ impl AppConfig {
     pub fn effective_display_name(&self) -> String {
         let n = self.display_name.trim();
         if n.is_empty() {
-            "崩坏3桌面扫码器用户".to_string()
+            "游戏扫码器用户".to_string()
         } else {
             n.to_string()
         }

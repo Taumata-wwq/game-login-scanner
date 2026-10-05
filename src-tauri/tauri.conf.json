@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "崩坏3扫码器",
-  "version": "0.1.0",
-  "identifier": "com.bh3.scanner",
+  "productName": "游戏扫码器",
+  "version": "0.2.0",
+  "identifier": "com.taumata.game-scanner",
   "build": {
     "frontendDist": "../src"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "崩坏3 扫码器",
+        "title": "游戏扫码器",
         "width": 300,
         "height": 500,
         "resizable": false,

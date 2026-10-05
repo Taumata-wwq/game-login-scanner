@@ -1,8 +1,9 @@
 //! 扫码主流程编排：剪贴板优先，未命中则全屏高频截图找码。
 //!
-//! 「目标二维码」判定：解码结果能提取出登录票据（`qr_code_in_game.html?ticket=`
-//! 的游戏登录码）即为目标码。崩坏3 PC 端 B 服与官服的登录码形态相同、平台无法
-//! 从 URL 区分，确认阶段按已登录账号自动路由（优先上次成功的渠道）；
+//! 「目标二维码」判定：解码结果能提取出登录票据即为目标码：
+//! - `qr_code_in_game.html?ticket=`（米哈游系游戏码，B 服与官服形态相同、平台无法
+//!   从 URL 区分，确认阶段用当前渠道账号路由）；
+//! - `hypergryph://scan_login?scanId=`（鹰角游戏码，用鹰角账号确认）。
 //! 未登录任何账号时提示并忽略；`mobile.html?tk=` 为米游社通行证码，忽略。
 //! 对同一张已失败的二维码做退避与日志去重，避免向服务器高频轰炸同一失效码。
 //!
@@ -209,7 +210,11 @@ impl ScanContext {
                 }
                 let info = self.bh_info.as_ref().expect("bh_info 已就绪");
                 if verbose {
-                    emit(app, "info", "识别到崩坏3登录码，正在用 B 服账号确认…");
+                    emit(
+                        app,
+                        "info",
+                        format!("识别到{}登录码，正在用 B 服账号确认…", self.game.label()),
+                    );
                 }
                 mihoyo::scan_confirm(
                     info,
@@ -222,7 +227,11 @@ impl ScanContext {
             }
             Channel::Official => {
                 if verbose {
-                    emit(app, "info", "识别到崩坏3登录码，正在用官服账号确认…");
+                    emit(
+                        app,
+                        "info",
+                        format!("识别到{}登录码，正在用官服账号确认…", self.game.label()),
+                    );
                 }
                 official::scan(
                     ticket,
@@ -423,7 +432,10 @@ async fn try_confirm(
                 emit(
                     app,
                     "warn",
-                    "识别到崩坏3登录码，但尚未登录任何渠道账号，请先在「账号」中登录",
+                    format!(
+                        "识别到{}登录码，但尚未登录任何渠道账号，请先在「账号」中登录",
+                        ctx.game.label()
+                    ),
                 );
             }
             false
@@ -488,10 +500,15 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         display_name,
     } = args;
     let interval = Duration::from_millis(interval_ms.max(50));
+    let ch_desc = if current_game.is_hypergryph() {
+        "鹰角".to_string()
+    } else {
+        current_channel.label().to_string()
+    };
     emit(
         &app,
         "started",
-        format!("已开始扫描（使用{}账号确认）", current_channel.label()),
+        format!("已开始扫描（使用{ch_desc}账号确认）"),
     );
 
     let mut ctx = ScanContext {
@@ -700,7 +717,7 @@ async fn process_screen(
             emit(
                 app,
                 "info",
-                format!("发现二维码但不是崩坏3登录码：{preview}…"),
+                format!("发现二维码但不是{}登录码：{preview}…", ctx.game.label()),
             );
         }
         return false;

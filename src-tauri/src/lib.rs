@@ -101,7 +101,7 @@ fn save_config(
     Ok(())
 }
 
-/// 前端日志落盘：窗口操作失败等前端异常写入 bh3-scanner.log，便于远程排查。
+/// 前端日志落盘：窗口操作失败等前端异常写入日志文件，便于远程排查。
 #[tauri::command]
 fn frontend_log(level: String, msg: String) {
     match level.as_str() {
@@ -1540,5 +1540,5 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("崩坏3扫码器启动失败");
+        .expect("游戏扫码器启动失败");
 }
