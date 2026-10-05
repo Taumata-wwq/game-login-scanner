@@ -451,51 +451,10 @@ pub async fn bili_captcha() -> Result<Value, String> {
 /// B站：发送短信验证码。
 /// captcha_key 非空时携带极验结果（validate/seccode），触发风控时返回 NeedCaptcha。
 pub async fn bili_send_sms(phone: &str, captcha_key: &str) -> Result<Option<Value>, String> {
-    // 首次调用（captcha_key 空）：先申请极验任务返回给前端（B站短信必须先过极验）。
-    if captcha_key.is_empty() {
-        return bili_captcha().await.map(Some);
-    }
-    // captcha_key 为 JSON：{"token","challenge","validate","seccode"}。
-    let (token, challenge, validate, seccode) = bili_parse_captcha(captcha_key)?;
-    // 文档：tel 为明文手机号，cid=1（大陆），source=main_web，参数名无 geetest_ 前缀。
-    let form = vec![
-        ("tel".to_string(), phone.to_string()),
-        ("cid".to_string(), "1".to_string()),
-        ("source".to_string(), "main_web".to_string()),
-        ("token".to_string(), token),
-        ("challenge".to_string(), challenge),
-        ("validate".to_string(), validate),
-        ("seccode".to_string(), seccode),
-    ];
-    let body = url_encode(&form);
-    log::info!("[B站发短信] 请求参数: {body}");
-    let resp = crate::http::client()
-        .post(constants::BILI_SMS_SEND_URL)
-        .headers(bili_headers_with_buvid().await)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
-    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
-    log::info!("[B站发短信] body: {}", &text[..text.len().min(800)]);
-    let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    let code = json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
-    if code == 0 {
-        return Ok(None);
-    }
-    // 触发极验（-105 等）：返回 gt/challenge 让前端渲染。
-    if let Some(gt) = json["data"]["geetest"]["gt"].as_str() {
-        if !gt.is_empty() {
-            let mut aigis = json["data"]["geetest"].clone();
-            if let Some(t) = json["data"]["token"].as_str() {
-                aigis["token"] = Value::String(t.to_string());
-            }
-            return Ok(Some(aigis));
-        }
-    }
-    let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("发送失败");
-    Err(format!("B站发送验证码失败: {msg}"))
+    // B站通行证 Web 短信登录风控极严（恒定返回 86103「请下载最新版本哔哩哔哩App」），
+    // 无浏览器设备指纹（buvid_fp/bili_ticket）无法通过。B站登录请改用「密码登录」。
+    let _ = (phone, captcha_key);
+    Err("B站短信登录受风控限制暂不可用，请改用「密码登录」".to_string())
 }
 
 /// 从 B站登录响应提取凭证（cookie 优先，body 兜底）。

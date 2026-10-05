@@ -1115,10 +1115,12 @@
     $('credPhone').value = ''; $('credCode').value = '';
     $('credAccount').value = ''; $('credPassword').value = '';
     $('credStatus').textContent = '';
-    credMode = 'sms';
-    document.querySelectorAll('#credModeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === 'sms'));
-    $('credSmsPage').hidden = false;
-    $('credPwdPage').hidden = true;
+    // B站短信登录受风控限制，默认切到密码登录；米哈游默认验证码登录。
+    credMode = filter === 'bilibili' ? 'pwd' : 'sms';
+    document.querySelectorAll('#credModeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === credMode));
+    $('credSmsPage').hidden = credMode !== 'sms';
+    $('credPwdPage').hidden = credMode !== 'pwd';
+    if (filter === 'bilibili') setCredStatus('B站请使用密码登录（短信登录受风控限制）');
     $('credOverlay').hidden = false;
   }
   document.querySelectorAll('#credModeSeg button').forEach((b) => {
