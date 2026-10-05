@@ -1278,22 +1278,28 @@
       // GT4：captchaId 即 gt。验证结果为 {captcha_id, lot_number, pass_token, ...}。
       log('GT4 初始化 captchaId=' + captchaId, 'info');
       loadScript('https://static.geetest.com/v4/gt4.js', 'gt4', () => {
+        let fired = false;
         try {
-          window.initGeetest4(
-            { captchaId, product: 'float', language: 'zho', riskType: data.risk_type || 'slide' },
-            (captcha) => {
-              log('GT4 captcha 对象已就绪，appendTo', 'info');
-              box.style.minHeight = '300px';
-              captcha.appendTo(box);
-              captcha.onSuccess(() => onValidated(captcha.getValidate()));
-              captcha.onError((e) => { log('GT4 onError: ' + JSON.stringify(e), 'error'); $('captchaHint').textContent = '验证出错，请关闭重试'; });
-              captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭重试'; });
-            }
-          );
+          box.style.minHeight = '320px';
+          window.initGeetest4({ captchaId, language: 'zho' }, (captcha) => {
+            fired = true;
+            log('GT4 回调触发，appendTo', 'info');
+            captcha.appendTo(box);
+            captcha.onReady(() => log('GT4 onReady', 'info'));
+            captcha.onSuccess(() => { log('GT4 onSuccess', 'info'); onValidated(captcha.getValidate()); });
+            captcha.onError((e) => { log('GT4 onError: ' + JSON.stringify(e), 'error'); $('captchaHint').textContent = '验证出错，请关闭重试'; });
+            captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭重试'; });
+          });
         } catch (e) {
           log('GT4 初始化异常: ' + e, 'error');
           box.textContent = '极验初始化失败: ' + e;
         }
+        setTimeout(() => {
+          if (!fired) {
+            log('GT4 回调 5 秒未触发（initGeetest4 存在=' + (typeof window.initGeetest4) + '）', 'error');
+            box.textContent = '人机验证初始化超时，请关闭重试';
+          }
+        }, 5000);
       });
     } else {
       // GT3
