@@ -452,6 +452,14 @@
           <div class="code-row">
             <input type="text" id="hyperCode" placeholder="6 位验证码" maxlength="6" autocomplete="off" inputmode="numeric" />
             <button class="btn ghost" id="btnHyperSend">发送验证码</button>
+          </div>
+          </div>
+        <button class="btn" id="btnHyperLogin" style="height:28px;width:100%">登录</button>
+        <div class="qr-status" id="hyperStatus"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- 统一账号登录弹窗（二维码 / 验证码 / 密码） -->
   <div class="overlay" id="loginOverlay" hidden>
     <div class="dialog">
@@ -499,14 +507,6 @@
         </div>
         <button class="btn ghost" id="btnQrRefresh" style="height:28px;width:100%;margin-top:8px;display:none">重新生成二维码</button>
         <button class="btn" id="btnCredLogin" style="height:28px;width:100%;margin-top:8px;display:none">登录</button>
-        <div class="qr-status" id="credStatus"></div>
-      </div>
-    </div>
-  </div>
-            <input type="password" id="credPassword" placeholder="密码" maxlength="64" autocomplete="off" />
-          </div>
-        </div>
-        <button class="btn" id="btnCredLogin" style="height:28px;width:100%;margin-top:8px">登录</button>
         <div class="qr-status" id="credStatus"></div>
       </div>
     </div>
