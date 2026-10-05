@@ -14,14 +14,13 @@
     position: fixed; top: 12px; left: 0; right: 0;
     text-align: center; font-size: 12px; color: #9a9a9a;
   }
-  /* 官方 demo 方式：容器 inline-block 居中，极验自行布局。 */
+  /* 容器居中，极验自行布局。 */
   #box { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); }
 </style>
 </head>
 <body>
   <div id="hint">请完成下方人机验证…</div>
   <div id="box"></div>
-  <script src="https://static.geetest.com/v4/gt4.js"></script>
   <script>
   (function () {
     const T = window.__TAURI__;
@@ -30,50 +29,82 @@
     const captchaId = params.get('captcha_id') || '';
     const sessionId = params.get('session_id') || '';
     const riskType = params.get('risk_type') || '';
+    const challenge = params.get('challenge') || '';
+    // gt3=1 表示第三代（B站）；否则第四代（米哈游）。
+    const isGt3 = params.get('gt3') === '1';
     const hint = document.getElementById('hint');
-    if (!captchaId) { hint.textContent = '缺少验证参数'; return; }
     function fail(msg) {
       hint.textContent = msg;
       if (invoke) invoke('captcha_result', { aigis: '' }).catch(() => {});
     }
-    // 参数完全对齐米哈游通行证登录页的真实初始化（浏览器抓包）：
-    // product: 'bind' + hideSuccess: true，userInfo: {session_id}（不是 mmt_key）。
-    const initParams = {
-      captchaId,
-      product: 'bind',
-      language: 'zho',
-      hideSuccess: true,
-    };
-    if (sessionId) initParams.userInfo = JSON.stringify({ session_id: sessionId });
-    if (riskType) initParams.riskType = riskType;
-    window.initGeetest4(
-      initParams,
-      (captcha) => {
-      captcha.appendTo(document.getElementById('box'));
-      captcha.onReady(() => {
-        hint.textContent = '请完成验证';
-        // bind 模式不自动弹出，需手动调用 showCaptcha。
-        captcha.showCaptcha();
+    function loadScript(src, ready, cb) {
+      if (ready()) { cb(); return; }
+      const s = document.createElement('script');
+      s.src = src;
+      s.onerror = () => fail('极验 SDK 加载失败（网络或 CSP）');
+      s.onload = cb;
+      document.head.appendChild(s);
+    }
+    const box = document.getElementById('box');
+
+    if (isGt3) {
+      // ---------- 极验第三代（B站）：gt + challenge ----------
+      if (!captchaId || !challenge) { hint.textContent = '缺少验证参数'; return; }
+      loadScript('https://static.geetest.com/static/js/gt.0.4.9.js', () => !!window.initGeetest, () => {
+        try {
+          window.initGeetest(
+            { gt: captchaId, challenge, offline: false, new_captcha: true, lang: 'zh-cn' },
+            (captcha) => {
+              captcha.appendTo(box);
+              captcha.onReady(() => { hint.textContent = '请完成验证'; });
+              captcha.onSuccess(() => {
+                const v = captcha.getValidate();
+                if (!v) { fail('验证结果为空'); return; }
+                // B站需要 geetest_challenge/validate/seccode 三字段，用逗号拼接回传。
+                const res = [v.geetest_challenge, v.geetest_validate, v.geetest_seccode].join(',');
+                hint.textContent = '验证成功，正在返回…';
+                if (invoke) invoke('captcha_result', { aigis: res }).catch(() => {});
+              });
+              captcha.onError(() => fail('验证出错，请关闭重试'));
+              captcha.onClose(() => fail(''));
+            }
+          );
+        } catch (e) { fail('极验初始化失败: ' + e); }
       });
-      captcha.onSuccess(() => {
-        const v = captcha.getValidate();
-        if (!v) { fail('验证结果为空'); return; }
-        // 只保留极验 GT4 的 5 个标准字段：userInfo 等额外字段会被并入 getValidate()
-        // 结果，污染 aigis，导致米哈游服务端校验失败（-302）。
-        const clean = {
-          captcha_id: v.captcha_id,
-          lot_number: v.lot_number,
-          pass_token: v.pass_token,
-          gen_time: v.gen_time,
-          captcha_output: v.captcha_output,
-        };
-        const payload = btoa(unescape(encodeURIComponent(JSON.stringify(clean))));
-        const aigis = sessionId + ';' + payload;
-        hint.textContent = '验证成功，正在返回…';
-        if (invoke) invoke('captcha_result', { aigis }).catch(() => {});
-      });
-      captcha.onError(() => fail('验证出错，请关闭重试'));
-      captcha.onClose(() => fail(''));
+      return;
+    }
+
+    // ---------- 极验第四代（米哈游）：captchaId ----------
+    if (!captchaId) { hint.textContent = '缺少验证参数'; return; }
+    loadScript('https://static.geetest.com/v4/gt4.js', () => !!window.initGeetest4, () => {
+      // 参数对齐米哈游通行证登录页真实初始化：product bind + hideSuccess + userInfo。
+      const initParams = { captchaId, product: 'bind', language: 'zho', hideSuccess: true };
+      if (sessionId) initParams.userInfo = JSON.stringify({ session_id: sessionId });
+      if (riskType) initParams.riskType = riskType;
+      try {
+        window.initGeetest4(initParams, (captcha) => {
+          captcha.appendTo(box);
+          captcha.onReady(() => { hint.textContent = '请完成验证'; captcha.showCaptcha(); });
+          captcha.onSuccess(() => {
+            const v = captcha.getValidate();
+            if (!v) { fail('验证结果为空'); return; }
+            // 只保留 GT4 的 5 个标准字段（userInfo 会污染 aigis）。
+            const clean = {
+              captcha_id: v.captcha_id,
+              lot_number: v.lot_number,
+              pass_token: v.pass_token,
+              gen_time: v.gen_time,
+              captcha_output: v.captcha_output,
+            };
+            const payload = btoa(unescape(encodeURIComponent(JSON.stringify(clean))));
+            const aigis = sessionId + ';' + payload;
+            hint.textContent = '验证成功，正在返回…';
+            if (invoke) invoke('captcha_result', { aigis }).catch(() => {});
+          });
+          captcha.onError(() => fail('验证出错，请关闭重试'));
+          captcha.onClose(() => fail(''));
+        });
+      } catch (e) { fail('极验初始化失败: ' + e); }
     });
   })();
   </script>

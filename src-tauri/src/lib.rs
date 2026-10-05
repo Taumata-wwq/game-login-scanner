@@ -492,10 +492,10 @@ async fn cred_send_code(
                 None => Ok(serde_json::json!({ "status": "ok" })),
             }
         }
-        "bilibili" => {
-            sdk::cred_login::bili_send_sms(&phone).await?;
-            Ok(serde_json::json!({ "status": "ok" }))
-        }
+        "bilibili" => match sdk::cred_login::bili_send_sms(&phone, &aigis).await? {
+            Some(a) => Ok(serde_json::json!({ "status": "captcha", "aigis": a })),
+            None => Ok(serde_json::json!({ "status": "ok" })),
+        },
         _ => Err("未知渠道".to_string()),
     }
 }
@@ -1289,12 +1289,16 @@ async fn open_captcha_window(
     captcha_id: String,
     session_id: String,
     risk_type: Option<String>,
+    challenge: Option<String>,
+    gt3: Option<bool>,
 ) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     let risk = risk_type.unwrap_or_default();
+    let ch = challenge.unwrap_or_default();
+    let g3 = if gt3.unwrap_or(false) { "1" } else { "0" };
     let url = WebviewUrl::App(
         format!(
-            "verify.html?captcha_id={captcha_id}&session_id={session_id}&risk_type={risk}"
+            "verify.html?captcha_id={captcha_id}&session_id={session_id}&risk_type={risk}&challenge={ch}&gt3={g3}"
         )
         .into(),
     );

@@ -1,4 +1,4 @@
-//! 渠道账号登录（米哈游通行证 / B站）：短信验证码 + 密码。
+﻿//! 渠道账号登录（米哈游通行证 / B站）：短信验证码 + 密码。
 //!
 //! 极验（geetest）：米哈游/B站的验证码/密码登录可能触发人机验证——响应头返回
 //! `x-rpc-aigis`（米哈游）或 code=...（B站）。此时返回 `NeedCaptcha`，前端渲染
@@ -360,26 +360,114 @@ async fn bili_web_key() -> Result<(String, String), String> {
     Ok((key, salt))
 }
 
+/// 把键值对编码为 application/x-www-form-urlencoded 字符串。
+fn url_encode(pairs: &[(String, String)]) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .finish()
+}
+
+/// B站短信/登录通用请求头。
+fn bili_headers() -> reqwest::header::HeaderMap {
+    use reqwest::header::{HeaderMap, HeaderValue};
+    let mut h = HeaderMap::new();
+    let mut set = |k: &'static str, v: &str| {
+        if let Ok(v) = HeaderValue::from_str(v) {
+            h.insert(k, v);
+        }
+    };
+    set(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    );
+    set("Referer", "https://passport.bilibili.com/login");
+    set("Origin", "https://passport.bilibili.com");
+    h
+}
+
+/// B站：申请极验验证任务（返回 gt/challenge/token）。
+/// 短信与密码登录触发风控时都需要先完成极验（GT3）。
+pub async fn bili_captcha() -> Result<Value, String> {
+    let resp = crate::http::client()
+        .get(constants::BILI_CAPTCHA_URL)
+        .headers(bili_headers())
+        .send()
+        .await
+        .map_err(|e| format!("B站极验申请失败: {e}"))?;
+    let json: Value = resp.json().await.map_err(|e| format!("B站极验响应解析失败: {e}"))?;
+    if json.get("code").and_then(|v| v.as_i64()) != Some(0) {
+        let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("极验申请失败");
+        return Err(format!("B站极验申请失败: {msg}"));
+    }
+    // 结构：{ data: { geetest: { gt, challenge }, token } }
+    let mut out = json["data"]["geetest"].clone();
+    if let Some(token) = json["data"]["token"].as_str() {
+        out["token"] = Value::String(token.to_string());
+    }
+    Ok(out)
+}
+
 /// B站：发送短信验证码。
-pub async fn bili_send_sms(phone: &str) -> Result<(), String> {
-    // B站短信发送走 geeTest 流程，需先完成验证码；此处直连会触发风控。
+/// captcha_key 非空时携带极验结果（validate/seccode），触发风控时返回 NeedCaptcha。
+pub async fn bili_send_sms(phone: &str, captcha_key: &str) -> Result<Option<Value>, String> {
     let (key, salt) = bili_web_key().await?;
     let enc = crypto::rsa_encrypt_b64(&key, &format!("{salt}{phone}"))?;
-    let body = format!("tel={enc}&cid=86&source=main-fe-header");
+    let mut form = vec![
+        ("tel".to_string(), enc),
+        ("cid".to_string(), "86".to_string()),
+        ("source".to_string(), "main-fe-header".to_string()),
+    ];
+    // 极验结果：captcha_key 形如 "challenge,validate,seccode"（由前端极验回传）。
+    if !captcha_key.is_empty() {
+        let parts: Vec<&str> = captcha_key.split(',').collect();
+        if parts.len() == 3 {
+            form.push(("geetest_challenge".to_string(), parts[0].to_string()));
+            form.push(("geetest_validate".to_string(), parts[1].to_string()));
+            form.push(("geetest_seccode".to_string(), parts[2].to_string()));
+        }
+    }
+    let body = url_encode(&form);
     let resp = crate::http::client()
         .post(constants::BILI_SMS_SEND_URL)
+        .headers(bili_headers())
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BiliLogin/1.0")
         .body(body)
         .send()
         .await
         .map_err(|e| format!("请求失败: {e}"))?;
     let json: Value = resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
-    if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
-        return Ok(());
+    let code = json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code == 0 {
+        return Ok(None);
+    }
+    // 触发极验（-105 等）：返回 gt/challenge 让前端渲染。
+    if let Some(gt) = json["data"]["geetest"]["gt"].as_str() {
+        if !gt.is_empty() {
+            let mut aigis = json["data"]["geetest"].clone();
+            if let Some(t) = json["data"]["token"].as_str() {
+                aigis["token"] = Value::String(t.to_string());
+            }
+            return Ok(Some(aigis));
+        }
     }
     let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("发送失败");
     Err(format!("B站发送验证码失败: {msg}"))
+}
+
+/// 从 B站登录响应提取凭证（cookie 优先，body 兜底）。
+fn bili_extract_cookies(headers: &reqwest::header::HeaderMap, json: &Value) -> CredOutcome {
+    // B站登录成功后 cookie_token/DedeUserID/access_token 在 Set-Cookie。
+    let uid = cookie_value(headers, "DedeUserID")
+        .or_else(|| json["data"]["mid"].as_i64().map(|n| n.to_string()))
+        .or_else(|| json["data"]["uid"].as_i64().map(|n| n.to_string()))
+        .unwrap_or_default();
+    // 游戏侧用 access_token（body 的 token_info.access_token 或 cookies 的 bili_jct）。
+    let access_key = json["data"]["token_info"]["access_token"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| cookie_value(headers, "bili_jct"))
+        .unwrap_or_default();
+    CredOutcome::BiliOk { uid, access_key }
 }
 
 /// B站：验证码登录。
@@ -388,8 +476,41 @@ pub async fn bili_login_sms(
     code: &str,
     captcha_key: &str,
 ) -> Result<CredOutcome, String> {
-    let _ = (phone, code, captcha_key);
-    Err("B站验证码登录待接入（需先完成极验）".to_string())
+    let (key, salt) = bili_web_key().await?;
+    let enc = crypto::rsa_encrypt_b64(&key, &format!("{salt}{phone}"))?;
+    let mut form = vec![
+        ("tel".to_string(), enc),
+        ("cid".to_string(), "86".to_string()),
+        ("code".to_string(), code.to_string()),
+        ("source".to_string(), "main-fe-header".to_string()),
+    ];
+    if !captcha_key.is_empty() {
+        let parts: Vec<&str> = captcha_key.split(',').collect();
+        if parts.len() == 3 {
+            form.push(("geetest_challenge".to_string(), parts[0].to_string()));
+            form.push(("geetest_validate".to_string(), parts[1].to_string()));
+            form.push(("geetest_seccode".to_string(), parts[2].to_string()));
+        }
+    }
+    let body = url_encode(&form);
+    let resp = crate::http::client()
+        .post(constants::BILI_SMS_LOGIN_URL)
+        .headers(bili_headers())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let headers = resp.headers().clone();
+    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    let json: Value = serde_json::from_str(&text)
+        .map_err(|_| format!("响应非 JSON: {}", &text[..text.len().min(200)]))?;
+    let code_num = json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code_num != 0 {
+        let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("登录失败");
+        return Err(format!("B站验证码登录失败: {msg}"));
+    }
+    Ok(bili_extract_cookies(&headers, &json))
 }
 
 /// B站：密码登录。
@@ -398,6 +519,38 @@ pub async fn bili_login_pwd(
     password: &str,
     captcha_key: &str,
 ) -> Result<CredOutcome, String> {
-    let _ = (account, password, captcha_key);
-    Err("B站密码登录待接入（需先完成极验）".to_string())
+    let (key, salt) = bili_web_key().await?;
+    let enc_pwd = crypto::rsa_encrypt_b64(&key, &format!("{salt}{password}"))?;
+    let mut form = vec![
+        ("username".to_string(), account.to_string()),
+        ("password".to_string(), enc_pwd),
+        ("source".to_string(), "main-fe-header".to_string()),
+    ];
+    if !captcha_key.is_empty() {
+        let parts: Vec<&str> = captcha_key.split(',').collect();
+        if parts.len() == 3 {
+            form.push(("geetest_challenge".to_string(), parts[0].to_string()));
+            form.push(("geetest_validate".to_string(), parts[1].to_string()));
+            form.push(("geetest_seccode".to_string(), parts[2].to_string()));
+        }
+    }
+    let body = url_encode(&form);
+    let resp = crate::http::client()
+        .post(constants::BILI_WEB_LOGIN_URL)
+        .headers(bili_headers())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let headers = resp.headers().clone();
+    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    let json: Value = serde_json::from_str(&text)
+        .map_err(|_| format!("响应非 JSON: {}", &text[..text.len().min(200)]))?;
+    let code_num = json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code_num != 0 {
+        let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("登录失败");
+        return Err(format!("B站密码登录失败: {msg}"));
+    }
+    Ok(bili_extract_cookies(&headers, &json))
 }

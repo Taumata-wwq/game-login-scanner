@@ -1225,6 +1225,9 @@
     if (!data || typeof data !== 'object') data = {};
     const sid = aigis && aigis.session_id ? aigis.session_id : '';
     const gt = data.gt || '';
+    const challenge = data.challenge || '';
+    // B站为极验第三代（gt + challenge，无 session_id）；米哈游为第四代（captchaId）。
+    const isGt3 = !!(gt && challenge && !sid);
     const captchaId = data.captcha_id || data.captchaId || gt;
     const riskType = data.risk_type || data.riskType || '';
     if (!captchaId) {
@@ -1234,7 +1237,13 @@
     captchaRetry = retryFn;
     setCredStatus('请在弹出的验证窗口中完成验证…');
     try {
-      await invoke('open_captcha_window', { captchaId, sessionId: sid, riskType });
+      await invoke('open_captcha_window', {
+        captchaId,
+        sessionId: sid,
+        riskType,
+        challenge: isGt3 ? challenge : '',
+        gt3: isGt3,
+      });
     } catch (e) {
       setCredStatus('打开验证窗口失败: ' + e);
       return;
