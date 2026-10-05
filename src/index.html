@@ -1226,8 +1226,10 @@
     const sid = aigis && aigis.session_id ? aigis.session_id : '';
     const gt = data.gt || '';
     const challenge = data.challenge || '';
-    // B站为极验第三代（gt + challenge，无 session_id）；米哈游为第四代（captchaId）。
+    // B站为极验第三代（gt + challenge）；米哈游为第四代（captchaId/session_id）。
+    // B站的 token 放在 session_id 通道传给窗口，GT3 完成后回传 token|challenge|validate|seccode。
     const isGt3 = !!(gt && challenge && !sid);
+    const biliToken = data.token || '';
     const captchaId = data.captcha_id || data.captchaId || gt;
     const riskType = data.risk_type || data.riskType || '';
     if (!captchaId) {
@@ -1239,7 +1241,7 @@
     try {
       await invoke('open_captcha_window', {
         captchaId,
-        sessionId: sid,
+        sessionId: isGt3 ? biliToken : sid,
         riskType,
         challenge: isGt3 ? challenge : '',
         gt3: isGt3,

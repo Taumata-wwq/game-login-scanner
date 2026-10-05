@@ -394,7 +394,9 @@ pub async fn bili_captcha() -> Result<Value, String> {
         .send()
         .await
         .map_err(|e| format!("B站极验申请失败: {e}"))?;
-    let json: Value = resp.json().await.map_err(|e| format!("B站极验响应解析失败: {e}"))?;
+    let text = resp.text().await.map_err(|e| format!("B站极验响应读取失败: {e}"))?;
+    log::info!("[B站极验申请] body: {}", &text[..text.len().min(800)]);
+    let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     if json.get("code").and_then(|v| v.as_i64()) != Some(0) {
         let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("极验申请失败");
         return Err(format!("B站极验申请失败: {msg}"));
@@ -410,22 +412,27 @@ pub async fn bili_captcha() -> Result<Value, String> {
 /// B站：发送短信验证码。
 /// captcha_key 非空时携带极验结果（validate/seccode），触发风控时返回 NeedCaptcha。
 pub async fn bili_send_sms(phone: &str, captcha_key: &str) -> Result<Option<Value>, String> {
+    // 首次调用（captcha_key 空）：先申请极验任务返回给前端（B站短信必须先过极验）。
+    if captcha_key.is_empty() {
+        return bili_captcha().await.map(Some);
+    }
+    // captcha_key 格式：token|challenge|validate|seccode（4 段，由前端极验回传）。
+    let parts: Vec<&str> = captcha_key.split('|').collect();
+    if parts.len() != 4 {
+        return Err("B站极验结果格式错误".to_string());
+    }
+    let token = parts[0];
     let (key, salt) = bili_web_key().await?;
     let enc = crypto::rsa_encrypt_b64(&key, &format!("{salt}{phone}"))?;
-    let mut form = vec![
+    let form = vec![
         ("tel".to_string(), enc),
         ("cid".to_string(), "86".to_string()),
         ("source".to_string(), "main-fe-header".to_string()),
+        ("token".to_string(), token.to_string()),
+        ("geetest_challenge".to_string(), parts[1].to_string()),
+        ("geetest_validate".to_string(), parts[2].to_string()),
+        ("geetest_seccode".to_string(), parts[3].to_string()),
     ];
-    // 极验结果：captcha_key 形如 "challenge,validate,seccode"（由前端极验回传）。
-    if !captcha_key.is_empty() {
-        let parts: Vec<&str> = captcha_key.split(',').collect();
-        if parts.len() == 3 {
-            form.push(("geetest_challenge".to_string(), parts[0].to_string()));
-            form.push(("geetest_validate".to_string(), parts[1].to_string()));
-            form.push(("geetest_seccode".to_string(), parts[2].to_string()));
-        }
-    }
     let body = url_encode(&form);
     let resp = crate::http::client()
         .post(constants::BILI_SMS_SEND_URL)
@@ -435,7 +442,9 @@ pub async fn bili_send_sms(phone: &str, captcha_key: &str) -> Result<Option<Valu
         .send()
         .await
         .map_err(|e| format!("请求失败: {e}"))?;
-    let json: Value = resp.json().await.map_err(|e| format!("响应解析失败: {e}"))?;
+    let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    log::info!("[B站发短信] body: {}", &text[..text.len().min(800)]);
+    let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     let code = json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
     if code == 0 {
         return Ok(None);
@@ -484,12 +493,14 @@ pub async fn bili_login_sms(
         ("code".to_string(), code.to_string()),
         ("source".to_string(), "main-fe-header".to_string()),
     ];
+    // captcha_key 格式：token|challenge|validate|seccode。
     if !captcha_key.is_empty() {
-        let parts: Vec<&str> = captcha_key.split(',').collect();
-        if parts.len() == 3 {
-            form.push(("geetest_challenge".to_string(), parts[0].to_string()));
-            form.push(("geetest_validate".to_string(), parts[1].to_string()));
-            form.push(("geetest_seccode".to_string(), parts[2].to_string()));
+        let parts: Vec<&str> = captcha_key.split('|').collect();
+        if parts.len() == 4 {
+            form.push(("token".to_string(), parts[0].to_string()));
+            form.push(("geetest_challenge".to_string(), parts[1].to_string()));
+            form.push(("geetest_validate".to_string(), parts[2].to_string()));
+            form.push(("geetest_seccode".to_string(), parts[3].to_string()));
         }
     }
     let body = url_encode(&form);
@@ -526,12 +537,14 @@ pub async fn bili_login_pwd(
         ("password".to_string(), enc_pwd),
         ("source".to_string(), "main-fe-header".to_string()),
     ];
+    // captcha_key 格式：token|challenge|validate|seccode。
     if !captcha_key.is_empty() {
-        let parts: Vec<&str> = captcha_key.split(',').collect();
-        if parts.len() == 3 {
-            form.push(("geetest_challenge".to_string(), parts[0].to_string()));
-            form.push(("geetest_validate".to_string(), parts[1].to_string()));
-            form.push(("geetest_seccode".to_string(), parts[2].to_string()));
+        let parts: Vec<&str> = captcha_key.split('|').collect();
+        if parts.len() == 4 {
+            form.push(("token".to_string(), parts[0].to_string()));
+            form.push(("geetest_challenge".to_string(), parts[1].to_string()));
+            form.push(("geetest_validate".to_string(), parts[2].to_string()));
+            form.push(("geetest_seccode".to_string(), parts[3].to_string()));
         }
     }
     let body = url_encode(&form);

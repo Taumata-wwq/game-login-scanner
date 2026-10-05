@@ -60,8 +60,8 @@
               captcha.onSuccess(() => {
                 const v = captcha.getValidate();
                 if (!v) { fail('验证结果为空'); return; }
-                // B站需要 geetest_challenge/validate/seccode 三字段，用逗号拼接回传。
-                const res = [v.geetest_challenge, v.geetest_validate, v.geetest_seccode].join(',');
+                // B站格式：token|challenge|validate|seccode（token 经 sessionId 传入）。
+                const res = [sessionId, v.geetest_challenge, v.geetest_validate, v.geetest_seccode].join('|');
                 hint.textContent = '验证成功，正在返回…';
                 if (invoke) invoke('captcha_result', { aigis: res }).catch(() => {});
               });
