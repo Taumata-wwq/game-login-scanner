@@ -530,9 +530,9 @@
     </div>
   </div>
 
-  <!-- 人机验证弹窗（独立叠加） -->
+  <!-- 人机验证弹窗（独立叠加；窗口仅 300px 宽，弹窗限制在窗口内） -->
   <div class="overlay" id="captchaOverlay" hidden>
-    <div class="dialog">
+    <div class="dialog" style="max-width:262px">
       <div class="dhead">
         人机验证
         <span class="spacer"></span>
@@ -540,9 +540,9 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </div>
-      <div class="dbody">
-        <div class="qr-status" id="captchaHint">请完成下方验证</div>
-        <div id="captchaBox" style="min-height:44px"></div>
+      <div class="dbody" style="padding:0;overflow:hidden">
+        <div class="qr-status" id="captchaHint" style="padding:6px">请完成下方验证</div>
+        <div id="captchaBox" style="min-height:44px;overflow:hidden;zoom:0.8"></div>
       </div>
     </div>
   </div>
@@ -1280,13 +1280,16 @@
       loadScript('https://static.geetest.com/v4/gt4.js', 'gt4', () => {
         let fired = false;
         try {
-          box.style.minHeight = '320px';
-          window.initGeetest4({ captchaId, language: 'zho' }, (captcha) => {
+          window.initGeetest4({ captchaId, product: 'bind', language: 'zho' }, (captcha) => {
             fired = true;
             log('GT4 回调触发，appendTo', 'info');
             captcha.appendTo(box);
             captcha.onReady(() => log('GT4 onReady', 'info'));
-            captcha.onSuccess(() => { log('GT4 onSuccess', 'info'); onValidated(captcha.getValidate()); });
+            captcha.onSuccess(() => {
+              const v = captcha.getValidate();
+              log('GT4 getValidate: ' + JSON.stringify(v), 'info');
+              onValidated(v);
+            });
             captcha.onError((e) => { log('GT4 onError: ' + JSON.stringify(e), 'error'); $('captchaHint').textContent = '验证出错，请关闭重试'; });
             captcha.onClose(() => { $('captchaHint').textContent = '验证已关闭，可关闭重试'; });
           });
