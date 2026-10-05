@@ -281,20 +281,41 @@ pub async fn mihoyo_login_sms(
         let msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("登录失败");
         return Err(msg.to_string());
     }
-    // web 版成功：从 Cookie 提取 stoken/mid/uid。
-    let stoken = cookie_value(&resp_headers, "stoken")
-        .or_else(|| cookie_value(&resp_headers, "stoken_v2"))
+    // app 版成功：stoken 在 body 的 data.token.token；web 版在 Set-Cookie。
+    // 两者都尝试，body 优先。
+    let data = &json["data"];
+    let body_stoken = data["token"]["token"].as_str().unwrap_or_default().to_string();
+    let body_mid = data["user_info"]["mid"].as_str().unwrap_or_default().to_string();
+    let body_uid = data["user_info"]["aid"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| data["user_info"]["aid"].as_i64().map(|n| n.to_string()))
         .unwrap_or_default();
-    let mid = cookie_value(&resp_headers, "ltmid")
-        .or_else(|| cookie_value(&resp_headers, "ltmid_v2"))
-        .or_else(|| cookie_value(&resp_headers, "mid"))
-        .or_else(|| cookie_value(&resp_headers, "ltuid"))
-        .or_else(|| cookie_value(&resp_headers, "account_id"))
-        .unwrap_or_default();
-    let uid = cookie_value(&resp_headers, "ltuid")
-        .or_else(|| cookie_value(&resp_headers, "ltuid_v2"))
-        .or_else(|| cookie_value(&resp_headers, "account_id"))
-        .unwrap_or_default();
+    let stoken = if !body_stoken.is_empty() {
+        body_stoken
+    } else {
+        cookie_value(&resp_headers, "stoken")
+            .or_else(|| cookie_value(&resp_headers, "stoken_v2"))
+            .unwrap_or_default()
+    };
+    let mid = if !body_mid.is_empty() {
+        body_mid
+    } else {
+        cookie_value(&resp_headers, "ltmid")
+            .or_else(|| cookie_value(&resp_headers, "ltmid_v2"))
+            .or_else(|| cookie_value(&resp_headers, "mid"))
+            .or_else(|| cookie_value(&resp_headers, "ltuid"))
+            .or_else(|| cookie_value(&resp_headers, "account_id"))
+            .unwrap_or_default()
+    };
+    let uid = if !body_uid.is_empty() {
+        body_uid
+    } else {
+        cookie_value(&resp_headers, "ltuid")
+            .or_else(|| cookie_value(&resp_headers, "ltuid_v2"))
+            .or_else(|| cookie_value(&resp_headers, "account_id"))
+            .unwrap_or_default()
+    };
     if stoken.is_empty() {
         return Err(format!(
             "短信登录成功但未取得 stoken（Cookie: {}）",
