@@ -593,3 +593,85 @@ fn tv_sign_sorts_params_and_appends_sec() {
     let expect = crypto::md5_hex(&format!("{raw}{}", constants::BILI_TV_APPSEC));
     assert_eq!(sign, expect);
 }
+
+// ---------- config::Game（多游戏）----------
+
+#[test]
+fn game_parse_all_variants() {
+    use bh3_scanner_lib::config::Game;
+    assert_eq!(Game::parse("bh3"), Some(Game::Bh3));
+    assert_eq!(Game::parse("hsr"), Some(Game::Hsr));
+    assert_eq!(Game::parse("genshin"), Some(Game::Genshin));
+    assert_eq!(Game::parse("zzz"), Some(Game::Zzz));
+    assert_eq!(Game::parse("endfield"), Some(Game::Endfield));
+    assert_eq!(Game::parse("arknights"), Some(Game::Arknights));
+    assert_eq!(Game::parse("unknown"), None);
+}
+
+#[test]
+fn game_app_id_mihoyo_vs_hypergryph() {
+    use bh3_scanner_lib::config::Game;
+    assert_eq!(Game::Bh3.app_id(), 1);
+    assert_eq!(Game::Hsr.app_id(), 8);
+    assert_eq!(Game::Genshin.app_id(), 4);
+    assert_eq!(Game::Zzz.app_id(), 12);
+    // 鹰角系无米哈游 app_id。
+    assert_eq!(Game::Endfield.app_id(), 0);
+    assert_eq!(Game::Arknights.app_id(), 0);
+}
+
+#[test]
+fn game_is_hypergryph() {
+    use bh3_scanner_lib::config::Game;
+    assert!(!Game::Bh3.is_hypergryph());
+    assert!(Game::Endfield.is_hypergryph());
+    assert!(Game::Arknights.is_hypergryph());
+}
+
+#[test]
+fn game_label_non_empty() {
+    use bh3_scanner_lib::config::Game;
+    for g in [
+        Game::Bh3,
+        Game::Hsr,
+        Game::Genshin,
+        Game::Zzz,
+        Game::Endfield,
+        Game::Arknights,
+    ] {
+        assert!(!g.label().is_empty());
+    }
+}
+
+// ---------- qr::extract 鹰角码 ----------
+
+#[test]
+fn extract_hypergryph_scan_login() {
+    let url = "hypergryph://scan_login?scanId=SCAN123";
+    let qr = qr::extract(url).unwrap();
+    assert_eq!(qr.kind, QrKind::Hypergryph);
+    assert_eq!(qr.ticket, "SCAN123");
+}
+
+// ---------- B站极验结果解析 ----------
+
+#[test]
+fn bili_parse_captcha_valid_json() {
+    use bh3_scanner_lib::sdk::cred_login::bili_parse_captcha;
+    // seccode 本身含 "|jordan"，JSON 传递不应受影响。
+    let json = r#"{"token":"TK","challenge":"CH","validate":"VA","seccode":"VA|jordan"}"#;
+    let (t, c, v, s) = bili_parse_captcha(json).unwrap();
+    assert_eq!(t, "TK");
+    assert_eq!(c, "CH");
+    assert_eq!(v, "VA");
+    assert_eq!(s, "VA|jordan");
+}
+
+#[test]
+fn bili_parse_captcha_rejects_missing() {
+    use bh3_scanner_lib::sdk::cred_login::bili_parse_captcha;
+    // 缺字段。
+    assert!(bili_parse_captcha(r#"{"token":"TK"}"#).is_err());
+    // 非 JSON。
+    assert!(bili_parse_captcha("TK|CH|VA|VA|jordan").is_err());
+}

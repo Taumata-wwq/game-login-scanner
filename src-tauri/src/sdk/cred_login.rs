@@ -368,7 +368,7 @@ fn url_encode(pairs: &[(String, String)]) -> String {
 }
 
 /// 解析 B站极验结果 JSON：{"token","challenge","validate","seccode"}。
-fn bili_parse_captcha(captcha_key: &str) -> Result<(String, String, String, String), String> {
+pub fn bili_parse_captcha(captcha_key: &str) -> Result<(String, String, String, String), String> {
     let v: Value = serde_json::from_str(captcha_key)
         .map_err(|_| "B站极验结果格式错误（应为 JSON）".to_string())?;
     let g = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
