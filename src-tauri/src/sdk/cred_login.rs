@@ -271,7 +271,7 @@ pub async fn mihoyo_login_sms(
         .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
         .collect();
     log::info!("[短信登录] Set-Cookie: {}", all_cookies.join(" | "));
-    log::info!("[短信登录] body: {}", &text[..text.len().min(300)]);
+    log::info!("[短信登录] body: {}", &text[..text.len().min(1500)]);
     let json: Value = serde_json::from_str(&text)
         .map_err(|_| format!("响应非 JSON: {}", &text[..text.len().min(200)]))?;
     // 极验触发。

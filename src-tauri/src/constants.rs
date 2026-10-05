@@ -97,9 +97,10 @@ pub const PASSPORT_WEB_APP_ID: &str = "dw9y09jqjpxc";
 /// 米哈游通行证：申请短信验证码（需 x-rpc-aigis）。
 pub const MIYOUSHE_SEND_SMS_URL: &str =
     "https://passport-api.mihoyo.com/account/ma-cn-verifier/verifier/createLoginCaptcha";
-/// 米哈游通行证：验证码登录（通行证 Web 版；与 App 版 app_id 不同）。
+/// 米哈游通行证：验证码登录。用 App 版路径（返回 body 中的 stoken），
+/// 但请求头沿用通行证 Web 协议（app_id 一致，极验 aigis 仍有效）。
 pub const MIYOUSHE_LOGIN_SMS_URL: &str =
-    "https://passport-api.mihoyo.com/account/ma-cn-passport/web/loginByMobileCaptcha";
+    "https://passport-api.mihoyo.com/account/ma-cn-passport/app/loginByMobileCaptcha";
 /// 米哈游通行证：密码登录。
 pub const MIYOUSHE_LOGIN_PWD_URL: &str =
     "https://passport-api.mihoyo.com/account/ma-cn-passport/app/loginByPassword";
