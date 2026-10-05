@@ -58,11 +58,24 @@
       loadScript('https://static.geetest.com/static/js/gt.0.4.9.js', () => !!window.initGeetest, () => {
         try {
           window.initGeetest(
-            { gt: captchaId, challenge, offline: false, new_captcha: true, lang: 'zh-cn' },
+            {
+              gt: captchaId,
+              challenge,
+              offline: false,
+              new_captcha: true,
+              product: 'popup',
+              lang: 'zh-cn',
+              api_server: 'api.geetest.com',
+            },
             (captcha) => {
               logx('GT3 captcha 就绪，gt=' + captchaId);
               captcha.appendTo(box);
-              captcha.onReady(() => { logx('GT3 onReady'); hint.textContent = '请完成验证'; });
+              captcha.onReady(() => {
+                logx('GT3 onReady');
+                hint.textContent = '请完成验证';
+                // onReady 后主动唤起验证面板（参考 BBH3ScanLaunch）。
+                try { captcha.verify(); } catch (e) { logx('verify 异常: ' + e); }
+              });
               captcha.onSuccess(() => {
                 if (done) return;
                 done = true;
