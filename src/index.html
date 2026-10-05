@@ -337,6 +337,7 @@
   .qr-status.expired { color: var(--danger); }
   .qr-status.confirmed { color: var(--ok); }
   .add-actions { display: flex; gap: 6px; }
+  .add-actions button { flex: 1 1 auto; }
 
   /* 日志 */
   #log {
@@ -945,7 +946,9 @@
   function openRemarkDialog(ch, uid) {
     const arr = ch === 'bilibili' ? config.bili_accounts
               : (ch === 'hypergryph' ? config.hypergryph_accounts : config.official_accounts);
-    const t = (arr || []).find((a) => (ch === 'hypergryph' ? a.phone : a.uid) === uid);
+    const g = curGameId();
+    const t = (arr || []).find((a) =>
+      (ch === 'hypergryph' ? a.phone : a.uid) === uid && acctGame(a) === g);
     if (!t) return;
     remarkTarget = { ch, uid };
     $('remarkAlias').value = t.alias || '';
