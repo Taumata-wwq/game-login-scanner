@@ -653,25 +653,3 @@ fn extract_hypergryph_scan_login() {
     assert_eq!(qr.ticket, "SCAN123");
 }
 
-// ---------- B站极验结果解析 ----------
-
-#[test]
-fn bili_parse_captcha_valid_json() {
-    use bh3_scanner_lib::sdk::cred_login::bili_parse_captcha;
-    // seccode 本身含 "|jordan"，JSON 传递不应受影响。
-    let json = r#"{"token":"TK","challenge":"CH","validate":"VA","seccode":"VA|jordan"}"#;
-    let (t, c, v, s) = bili_parse_captcha(json).unwrap();
-    assert_eq!(t, "TK");
-    assert_eq!(c, "CH");
-    assert_eq!(v, "VA");
-    assert_eq!(s, "VA|jordan");
-}
-
-#[test]
-fn bili_parse_captcha_rejects_missing() {
-    use bh3_scanner_lib::sdk::cred_login::bili_parse_captcha;
-    // 缺字段。
-    assert!(bili_parse_captcha(r#"{"token":"TK"}"#).is_err());
-    // 非 JSON。
-    assert!(bili_parse_captcha("TK|CH|VA|VA|jordan").is_err());
-}

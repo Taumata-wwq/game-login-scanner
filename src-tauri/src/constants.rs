@@ -108,15 +108,6 @@ pub const MIYOUSHE_LOGIN_PWD_URL: &str =
 /// 来源：社区公开实现 caisxg/mhylogin（enrsapw.py）。如失效需更新。
 pub const MIYOUSHE_RSA_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDDvekdPMHN3AYhm/vktJT+YJr7\ncI5DcsNKqdsx5DZX0gDuWFuIjzdwButrIYPNmRJ1G8ybDIF7oDW2eEpm5sMbL9zs\n9ExXCdvqrn51qELbqj0XxtMTIpaCHFSI50PfPpTFV9Xt/hmyVwokoOXFlAEgCn+Q\nCgGs52bFoYMtyi+xEQIDAQAB\n-----END PUBLIC KEY-----";
 
-/// B站：发送短信验证码（Web 端）。
-pub const BILI_SMS_SEND_URL: &str = "https://passport.bilibili.com/x/passport-login/web/sms/send";
-/// B站：短信验证码登录。
-pub const BILI_SMS_LOGIN_URL: &str = "https://passport.bilibili.com/x/passport-login/login/sms";
-/// B站：Web 密码登录。
-pub const BILI_WEB_LOGIN_URL: &str = "https://passport.bilibili.com/x/passport-login/web/login";
-/// B站：Web 登录 RSA 公钥接口。
-pub const BILI_WEB_KEY_URL: &str = "https://passport.bilibili.com/x/passport-login/web/key";
-
 /// B站：游戏 SDK 登录域名（崩坏3 游戏 SDK，直接返回游戏 access_key）。
 pub const BILI_SDK_LOGIN: &str = "https://line1-sdk-center-login-sh.biligame.net/";
 /// B站游戏 SDK：RSA 公钥申请参数模板（app_id=180 崩坏3）。
@@ -125,9 +116,6 @@ pub const BILI_SDK_RSA_PARAM: &str = r#"{"operators":"5","merchant_id":"590","is
 pub const BILI_SDK_LOGIN_PARAM: &str = r#"{"operators":"5","merchant_id":"590","isRoot":"0","domain_switch_count":"0","sdk_type":"1","sdk_log_type":"1","timestamp":"1613035508188","support_abis":"x86,armeabi-v7a,armeabi","access_key":"","sdk_ver":"3.4.2","oaid":"","dp":"1280*720","original_domain":"","imei":"227656364311444","gt_user_id":"","seccode":"","version":"1","udid":"KREhESMUIhUjFnJKNko2TDQFYlZkB3cdeQ==","apk_sign":"4502a02a00395dec05a4134ad593224d","platform_type":"3","old_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","android_id":"84567e2dda72d1d4","fingerprint":"","validate":"","mac":"08:00:27:53:DD:12","server_id":"378","domain":"line1-sdk-center-login-sh.biligame.net","app_id":"180","pwd":"","version_code":"510","net":"4","pf_ver":"12","cur_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","c":"1","brand":"Android","client_timestamp":"1613035509437","channel_id":"1","uid":"","captcha_type":"1","game_id":"180","challenge":"","user_id":"","ver":"6.1.0","model":"MuMu"}"#;
 /// B站游戏 SDK：验证码申请参数模板。
 pub const BILI_SDK_CAPTCHA_PARAM: &str = r#"{"operators":"5","merchant_id":"590","isRoot":"0","domain_switch_count":"0","sdk_type":"1","sdk_log_type":"1","timestamp":"1613035486182","support_abis":"x86,armeabi-v7a,armeabi","access_key":"","sdk_ver":"3.4.2","oaid":"","dp":"1280*720","original_domain":"","imei":"227656364311444","version":"1","udid":"KREhESMUIhUjFnJKNko2TDQFYlZkB3cdeQ==","apk_sign":"4502a02a00395dec05a4134ad593224d","platform_type":"3","old_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","android_id":"84567e2dda72d1d4","fingerprint":"","mac":"08:00:27:53:DD:12","server_id":"378","domain":"line1-sdk-center-login-sh.biligame.net","app_id":"180","version_code":"510","net":"4","pf_ver":"12","cur_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","c":"1","brand":"Android","client_timestamp":"1613035487431","channel_id":"1","uid":"","game_id":"180","ver":"6.1.0","model":"MuMu"}"#;
-/// B站：极验注册接口（获取 gt/challenge 与 token）。
-pub const BILI_CAPTCHA_URL: &str = "https://passport.bilibili.com/x/passport-login/captcha";
-
 // ---------- B 站设备参数模板（user.info 查询用，原样保留） ----------------
 
 pub const BILI_USERINFO_PARAM: &str = r#"{"cur_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","client_timestamp":"1667057013442","sdk_type":"1","isRoot":"0","merchant_id":"590","dp":"1280*720","mac":"08:00:27:53:DD:12","uid":"437470182","support_abis":"x86,armeabi-v7a,armeabi","apk_sign":"4502a02a00395dec05a4134ad593224d","platform_type":"3","old_buvid":"XZA2FA4AC240F665E2F27F603ABF98C615C29","operators":"5","fingerprint":"","model":"MuMu","udid":"XXA31CBAB6CBA63E432E087B58411A213BFB7","net":"5","app_id":"180","brand":"Android","oaid":"","game_id":"180","timestamp":"1667057013275","ver":"6.1.0","c":"1","version_code":"510","server_id":"378","version":"1","domain_switch_count":"0","pf_ver":"12","access_key":"","domain":"line1-sdk-center-login-sh.biligame.net","original_domain":"","imei":"","sdk_log_type":"1","sdk_ver":"3.4.2","android_id":"84567e2dda72d1d4","channel_id":1}"#;

@@ -492,10 +492,8 @@ async fn cred_send_code(
                 None => Ok(serde_json::json!({ "status": "ok" })),
             }
         }
-        "bilibili" => match sdk::cred_login::bili_send_sms(&phone, &aigis).await? {
-            Some(a) => Ok(serde_json::json!({ "status": "captcha", "aigis": a })),
-            None => Ok(serde_json::json!({ "status": "ok" })),
-        },
+        // B站短信登录受风控限制（86103），不支持；登录请用密码登录。
+        "bilibili" => Err("B站不支持短信登录，请使用密码登录".to_string()),
         _ => Err("未知渠道".to_string()),
     }
 }
@@ -517,7 +515,7 @@ async fn cred_login_sms(
             let device_fp = ensure_device_fp(&state).await?;
             sdk::cred_login::mihoyo_login_sms(&device_id, &device_fp, &phone, &code, &aigis).await?
         }
-        "bilibili" => sdk::cred_login::bili_login_sms(&phone, &code, &aigis).await?,
+        "bilibili" => return Err("B站不支持短信登录，请使用密码登录".to_string()),
         _ => return Err("未知渠道".to_string()),
     };
     apply_cred_outcome(&state, &game, outcome).await
