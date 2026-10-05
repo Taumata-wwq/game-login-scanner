@@ -485,6 +485,10 @@ pub async fn bili_login_sms(
     code: &str,
     captcha_key: &str,
 ) -> Result<CredOutcome, String> {
+    // 首次调用（无极验结果）：先申请极验任务返回前端。
+    if captcha_key.is_empty() {
+        return Ok(CredOutcome::NeedCaptcha(bili_captcha().await?));
+    }
     let (key, salt) = bili_web_key().await?;
     let enc = crypto::rsa_encrypt_b64(&key, &format!("{salt}{phone}"))?;
     let mut form = vec![
@@ -530,6 +534,10 @@ pub async fn bili_login_pwd(
     password: &str,
     captcha_key: &str,
 ) -> Result<CredOutcome, String> {
+    // 首次调用（无极验结果）：先申请极验任务返回前端。
+    if captcha_key.is_empty() {
+        return Ok(CredOutcome::NeedCaptcha(bili_captcha().await?));
+    }
     let (key, salt) = bili_web_key().await?;
     let enc_pwd = crypto::rsa_encrypt_b64(&key, &format!("{salt}{password}"))?;
     let mut form = vec![

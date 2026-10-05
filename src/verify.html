@@ -50,6 +50,7 @@
     if (isGt3) {
       // ---------- 极验第三代（B站）：gt + challenge ----------
       if (!captchaId || !challenge) { hint.textContent = '缺少验证参数'; return; }
+      let done = false;
       loadScript('https://static.geetest.com/static/js/gt.0.4.9.js', () => !!window.initGeetest, () => {
         try {
           window.initGeetest(
@@ -58,6 +59,8 @@
               captcha.appendTo(box);
               captcha.onReady(() => { hint.textContent = '请完成验证'; });
               captcha.onSuccess(() => {
+                if (done) return;
+                done = true;
                 const v = captcha.getValidate();
                 if (!v) { fail('验证结果为空'); return; }
                 // B站格式：token|challenge|validate|seccode（token 经 sessionId 传入）。
@@ -65,8 +68,9 @@
                 hint.textContent = '验证成功，正在返回…';
                 if (invoke) invoke('captcha_result', { aigis: res }).catch(() => {});
               });
-              captcha.onError(() => fail('验证出错，请关闭重试'));
-              captcha.onClose(() => fail(''));
+              captcha.onError(() => { if (!done) fail('验证出错，请关闭重试'); });
+              // onClose 在验证成功后也会触发（面板关闭），用 done 标志避免覆盖成功结果。
+              captcha.onClose(() => { if (!done) fail(''); });
             }
           );
         } catch (e) { fail('极验初始化失败: ' + e); }
@@ -76,6 +80,7 @@
 
     // ---------- 极验第四代（米哈游）：captchaId ----------
     if (!captchaId) { hint.textContent = '缺少验证参数'; return; }
+    let done4 = false;
     loadScript('https://static.geetest.com/v4/gt4.js', () => !!window.initGeetest4, () => {
       // 参数对齐米哈游通行证登录页真实初始化：product bind + hideSuccess + userInfo。
       const initParams = { captchaId, product: 'bind', language: 'zho', hideSuccess: true };
@@ -86,6 +91,8 @@
           captcha.appendTo(box);
           captcha.onReady(() => { hint.textContent = '请完成验证'; captcha.showCaptcha(); });
           captcha.onSuccess(() => {
+            if (done4) return;
+            done4 = true;
             const v = captcha.getValidate();
             if (!v) { fail('验证结果为空'); return; }
             // 只保留 GT4 的 5 个标准字段（userInfo 会污染 aigis）。
@@ -101,8 +108,8 @@
             hint.textContent = '验证成功，正在返回…';
             if (invoke) invoke('captcha_result', { aigis }).catch(() => {});
           });
-          captcha.onError(() => fail('验证出错，请关闭重试'));
-          captcha.onClose(() => fail(''));
+          captcha.onError(() => { if (!done4) fail('验证出错，请关闭重试'); });
+          captcha.onClose(() => { if (!done4) fail(''); });
         });
       } catch (e) { fail('极验初始化失败: ' + e); }
     });
