@@ -1170,9 +1170,11 @@ fn capture_live_frame(
 ) -> Result<tauri::ipc::Response, String> {
     let mw = max_width.unwrap_or(384).clamp(80, 4096);
     match crate::live::crop_frame(x, y, w, h, mw) {
-        Some(payload) => Ok(tauri::ipc::Response::new(payload)),
-        // 无会话或尚无解码帧：24 字节零头 = 「暂无画面」。
-        None => Ok(tauri::ipc::Response::new(vec![0u8; 24])),
+        // 会话不存在（未启动/下播被移除）：0 字节 = 前端自动切回屏幕。
+        crate::live::FrameOut::NoSession => Ok(tauri::ipc::Response::new(Vec::new())),
+        // 欠载或帧未变：24 字节零头 = 沿用上一帧。
+        crate::live::FrameOut::Empty => Ok(tauri::ipc::Response::new(vec![0u8; 24])),
+        crate::live::FrameOut::Frame(payload) => Ok(tauri::ipc::Response::new(payload)),
     }
 }
 

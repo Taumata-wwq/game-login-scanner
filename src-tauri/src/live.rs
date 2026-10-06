@@ -396,17 +396,31 @@ fn downsample_rgb_half(rgb: &mut Vec<u8>, sw: u32, _sh: u32, ow: u32, oh: u32) {
 
 /// 预览消费者：按视口裁剪 + 面积降采样，组装 24 字节头 + RGBA 负载。
 /// 头部布局与屏幕预览一致（mon = 流原始尺寸），无会话/无帧返回 None。
-pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> Option<Vec<u8>> {
+/// 预览帧输出语义。
+/// - `NoSession`：会话不存在（未启动 / 已结束被移除）→ 前端自动切回屏幕；
+/// - `Empty`：会话存活但缓冲欠载（流帧率低于显示节拍属正常现象）或帧未变
+///   → 前端沿用上一帧；
+/// - `Frame`：完整 24 字节头 + RGBA。
+pub enum FrameOut {
+    NoSession,
+    Empty,
+    Frame(Vec<u8>),
+}
+
+pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
     *LAST_VIEW.lock().unwrap_or_else(PoisonError::into_inner) = if w > 0 && h > 0 {
         Some((x, y, w, h))
     } else {
         None
     };
     let live = lock_live();
-    let s = live.as_ref()?;
+    let s = match live.as_ref() {
+        Some(s) => s,
+        None => return FrameOut::NoSession,
+    };
     let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
     if f.queue.is_empty() {
-        return None;
+        return FrameOut::Empty;
     }
     // 弹出节拍 = 显示节拍（前端 30fps 轮询）：每轮询至多弹出一个最旧帧，
     // 队列空时复用队首帧。显示间隔完全由轮询时钟决定（均匀 30fps），到达抖动
@@ -417,7 +431,7 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> Option<Vec<
         None => f.queue.front().unwrap(),
     };
     if f.w == 0 || f.h == 0 {
-        return None;
+        return FrameOut::Empty;
     }
     let (fw, fh) = (f.w as i32, f.h as i32);
     let (cx, cy, cw, ch) = if w > 0 && h > 0 {
@@ -438,7 +452,7 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> Option<Vec<
     {
         let mut last = LAST_SENT.lock().unwrap_or_else(PoisonError::into_inner);
         if *last == Some(key) {
-            return Some(vec![0u8; 24]);
+            return FrameOut::Empty;
         }
         *last = Some(key);
     }
@@ -451,7 +465,7 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> Option<Vec<
     out.extend_from_slice(&f.w.to_le_bytes());
     out.extend_from_slice(&f.h.to_le_bytes());
     out.extend_from_slice(&rgba);
-    Some(out)
+    FrameOut::Frame(out)
 }
 
 /// 面积平均降采样（RGBA 源，裁剪区 → tw×th），步进采样控 CPU。

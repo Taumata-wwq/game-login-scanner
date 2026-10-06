@@ -1495,12 +1495,11 @@
 
   // 直播帧拉取：协议与屏幕预览一致（24 字节头 + RGBA），mon = 流原始尺寸，
   // 因此视口/拖拽/缩放交互完全复用；无需底图（每帧即当前视口裁剪）。
-  let liveEmptyStreak = 0;
-  // 下播/断流后后端会关闭会话，前端收到空帧响应即自动切回屏幕预览与扫码。
+  // 响应长度语义：0 字节 = 会话已关闭（下播/断流）→ 自动切回屏幕；
+  // 24 字节 = 缓冲欠载或帧未变 → 沿用上一帧（流帧率低于 30fps 属正常现象）。
   function revertLive(msg) {
     if (!liveOn) return;
     liveOn = false;
-    liveEmptyStreak = 0;
     invoke('live_stop').catch(() => {});
     invoke('set_preview_active', { active: true }).catch(() => {});
     log(msg, 'info');
@@ -1512,12 +1511,11 @@
       maxWidth: canvas.width,
     });
     if (!(buf instanceof ArrayBuffer)) throw new Error('直播数据异常');
-    if (buf.byteLength <= 24) {
-      // 会话已被后端关闭（下播/重连失败）：立即回退屏幕预览与扫码。
-      if (++liveEmptyStreak >= 2) revertLive('直播已结束，恢复屏幕预览与扫码');
+    if (buf.byteLength === 0) {
+      revertLive('直播已结束，恢复屏幕预览与扫码');
       return false;
     }
-    liveEmptyStreak = 0;
+    if (buf.byteLength <= 24) return false;   // 欠载/帧未变：沿用上一帧
     const dv = new DataView(buf);
     const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
     const mon = { x: 0, y: 0, w: dv.getInt32(16, true), h: dv.getInt32(20, true) };
