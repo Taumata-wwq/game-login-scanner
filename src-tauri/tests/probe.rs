@@ -205,6 +205,40 @@ fn probe_live() {
     });
 }
 
+/// 直播延迟漂移探针：长跑 ~35 秒，每 5 秒采样媒体时间戳滞后量，
+/// 验证追帧机制能否把延迟稳定压住（不单调增长）。
+/// 用法：LIVE_ROOM=6 cargo test --test probe probe_live_lag -- --ignored --nocapture
+#[test]
+#[ignore = "真实网络长跑探针，需手动运行"]
+fn probe_live_lag() {
+    use std::time::{Duration, Instant};
+    let _ = env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .try_init();
+    let room = std::env::var("LIVE_ROOM").unwrap_or_else(|_| "6".into());
+    let rt = tokio::runtime::Runtime::new().expect("运行时");
+    rt.block_on(async {
+        let tc = Instant::now();
+        match game_login_scanner_lib::live::start(room.clone()).await {
+            Ok((w, h)) => {
+                println!("[OK] {room} {w}x{h} 连接 {}ms", tc.elapsed().as_millis());
+                // 长跑：每 5 秒打印一次追帧统计（由 live 层日志输出「落后/恢复」）。
+                for i in 1..=7 {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    // 持续消费预览帧（模拟前端 30fps），触发解码线程运转。
+                    for _ in 0..150 {
+                        let _ = game_login_scanner_lib::live::crop_frame(0, 0, 0, 0, 320);
+                        tokio::time::sleep(Duration::from_millis(16)).await;
+                    }
+                    println!("[采样 {i}] 已运行 {}s", i * 5);
+                }
+                game_login_scanner_lib::live::stop();
+            }
+            Err(e) => println!("[FAIL] {room}: {e}"),
+        }
+    });
+}
+
 /// 批量直播探针：对多个真实直播间验证「连接 + 持续出帧 + 扫码帧供应」稳定性。
 /// 房间来源：LIVE_ROOMS 环境变量（逗号分隔）或 target/rooms.txt（每行一个）。
 /// 用法：cargo test --test probe probe_live_batch -- --ignored --nocapture

@@ -749,6 +749,16 @@ const QN_CHAIN: [u32; 4] = [10000, 800, 450, 150];
 /// 解码持续失败的容忍次数：超过则降级清晰度重试。
 const DECODE_FAIL_LIMIT: u32 = 40;
 
+/// 直播追帧阈值（毫秒）：媒体时间戳落后「应有值」超过此值即判积压，
+/// 丢弃至下一关键帧重建解码器，把延迟压回直播边缘。
+/// 权衡：过小会因解码偶发变慢频繁丢帧（顿挫），过大则延迟偏高；
+/// 1.2s 远低于浏览器端 2~4s，且给解码留缓冲余量。
+const CATCHUP_LAG_MS: i64 = 1200;
+
+/// 持续追帧上限：连续快速追帧（间隔 < 4s）达到此次数，判为解码吞吐持续不足，
+/// 降级清晰度换低码率流。仅「持续跟不上」才降级，偶发追帧不触发。
+const CATCHUP_LIMIT: u32 = 4;
+
 /// 解码线程向 start() 回报的致命失败原因（未开播 / 解码不支持 / 连续重连失败）。
 /// start() 轮询它以便快速返回明确错误，而非干等 15 秒首帧超时。
 type FailFlag = Arc<Mutex<Option<String>>>;
@@ -794,7 +804,8 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
         let (url, referer) = candidates[cand_used].clone();
         cand_used += 1;
         log::info!("连接直播流节点 {cand_used}/{} …", candidates.len());
-        match decode_session(&url, &referer, &stop, &frames) {
+        let allow_degrade = qn_idx + 1 < QN_CHAIN.len();
+        match decode_session(&url, &referer, &stop, &frames, allow_degrade) {
             Ok(()) => return, // 收到停止信号
             // 解码器持续失败（编码不兼容/解码跟不上）：降级清晰度换低码率流重试。
             Err(e) if e.starts_with("H.264 解码持续失败") => {
@@ -812,6 +823,15 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
                 );
                 remove_session_if(&frames);
                 return;
+            }
+            // 解码吞吐持续不足（追帧过频）：降级清晰度换低码率流。
+            // （decode_session 只在还能降级时返回此错误，故此处 qn_idx 必可前进。）
+            Err(e) if e.starts_with("直播追帧过于频繁") => {
+                qn_idx += 1;
+                fails = 0;
+                candidates.clear();
+                log::info!("解码吞吐不足，清晰度降级到 qn={} 重试", QN_CHAIN[qn_idx]);
+                continue;
             }
             Err(e) => log::warn!("直播流断开: {e}"),
         }
@@ -1107,6 +1127,7 @@ fn decode_session(
     referer: &str,
     stop: &AtomicBool,
     frames: &Arc<Mutex<Frames>>,
+    allow_degrade: bool,
 ) -> Result<(), String> {
     let mut reader = HttpFlvReader::connect(url, referer)?;
 
@@ -1135,6 +1156,17 @@ fn decode_session(
     // 而音频不断时 3 秒检测会被绕过，窗口法稳定覆盖。
     let mut window_frames = 0u32;
     let mut window_start = std::time::Instant::now();
+    // ---- 直播追帧状态 ----
+    // 锚点：(首个视频 tag 的媒体时间戳, 其到达墙钟)。直播媒体时间戳≈推流墙钟，
+    // 据此推算「此刻应有的媒体时间戳」，与实际 tag 时间戳之差即落后量。
+    let mut anchor: Option<(u32, std::time::Instant)> = None;
+    // 是否处于追帧丢弃态（排空积压，等下一个关键帧恢复）。
+    let mut skipping = false;
+    // 本会话累计追帧次数。健康流几乎不需要追帧；某会话追帧达 CATCHUP_LIMIT 即判
+    // 解码吞吐不足 → 降级清晰度（新会话计数从 0 起，自然沿 qn 链逐级下探）。
+    let mut catchup_count = 0u32;
+    // 缓存的 SPS/PPS（追帧重建解码器后需重喂）。
+    let mut param_sets: Vec<u8> = Vec::new();
     loop {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
@@ -1155,6 +1187,12 @@ fn decode_session(
         read_exact(&mut reader, &mut tag, 11)?;
         let tag_type = tag[0];
         let data_size = ((tag[1] as usize) << 16) | ((tag[2] as usize) << 8) | tag[3] as usize;
+        // FLV 时间戳（媒体时钟，ms）：低 24 位在 [4..7]，高 8 位在 [7]。
+        // 必须在读 body 前提取（read_exact 会覆盖 tag 缓冲）。
+        let media_ts = ((tag[7] as u32) << 24)
+            | ((tag[4] as u32) << 16)
+            | ((tag[5] as u32) << 8)
+            | tag[6] as u32;
         if data_size > 8 * 1024 * 1024 {
             return Err("FLV Tag 超过大小上限".to_string());
         }
@@ -1167,14 +1205,56 @@ fn decode_session(
         window_frames += 1;
         let body = &tag[..data_size];
         let first = body[0];
-        let _frame_type = first >> 4;
+        let frame_type = first >> 4;
         if first & 0x0F != 7 {
             continue; // 非 AVC
         }
+
+        // ---- 直播追帧 ----
+        // 落后量 = 应有媒体时间戳（锚点 + 已过墙钟）− 当前 tag 媒体时间戳。
+        // 超阈值说明解码吞吐跟不上码率、socket 缓冲持续积压（延迟单调增长）。
+        let now = std::time::Instant::now();
+        match anchor {
+            None => anchor = Some((media_ts, now)),
+            Some((a_ts, a_at)) => {
+                let expected = a_ts as i64 + a_at.elapsed().as_millis() as i64;
+                let lag = expected - media_ts as i64;
+                if !skipping && lag > CATCHUP_LAG_MS {
+                    skipping = true;
+                    catchup_count += 1;
+                    log::info!(
+                        "直播追帧：落后 {lag}ms（本会话第 {catchup_count} 次），丢弃至下一关键帧"
+                    );
+                }
+            }
+        }
+        if skipping {
+            // 只读不解码，快速排空 socket 缓冲；遇关键帧（IDR）重建解码器恢复。
+            if frame_type == 1 && body[1] == 1 && !param_sets.is_empty() {
+                decoder = openh264::decoder::Decoder::with_api_config(
+                    openh264::OpenH264API::from_source(),
+                    openh264::decoder::DecoderConfig::new()
+                        .flush_after_decode(openh264::decoder::Flush::NoFlush),
+                )
+                .map_err(|e| format!("解码器重建失败: {e}"))?;
+                let _ = decoder.decode(&param_sets);
+                skipping = false;
+                anchor = Some((media_ts, std::time::Instant::now()));
+                log::info!("直播追帧：已在关键帧恢复（ts={media_ts}ms）");
+                // 本会话追帧达上限：解码吞吐跟不上码率。仅在还能降级时返回错误；
+                // 已是最低清晰度则继续运行（追帧本身已能维持延迟，重连反而中断画面）。
+                if catchup_count >= CATCHUP_LIMIT && allow_degrade {
+                    return Err("直播追帧过于频繁（解码吞吐不足），降级清晰度重试".to_string());
+                }
+            } else {
+                continue;
+            }
+        }
+
         match body[1] {
             0 => {
                 // AVC sequence header：AVCDecoderConfigurationRecord → SPS/PPS。
-                let param_sets = avcc_config_to_annexb(&body[5..]);
+                param_sets = avcc_config_to_annexb(&body[5..]);
                 log::info!(
                     "AVC 序列参数集: {} 字节（体前 8 字节 {:02x?}）",
                     param_sets.len(),
