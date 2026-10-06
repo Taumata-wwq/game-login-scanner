@@ -87,6 +87,51 @@ async fn resolve_stream(room: &str) -> Result<(String, String), String> {
     }
 }
 
+/// 同步版 B站流地址解析：解码线程重连时调用（每次拿全新 expires 的地址，
+/// 自愈 CDN 临时 404 与地址过期——固定 URL 重连只会反复失败）。
+fn resolve_stream_sync(room: &str) -> Result<(String, String), String> {
+    let url = format!(
+        "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn=10000&platform=web&ptype=16"
+    );
+    let referer_owned = format!("https://live.bilibili.com/{room}");
+    let v: Value = stream_agent()
+        .get(&url)
+        .set("User-Agent", BROWSER_UA)
+        .set("Referer", &referer_owned)
+        .call()
+        .map_err(|e| format!("B站直播接口请求失败: {e}"))?
+        .into_string()
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .ok_or_else(|| "B站直播接口响应解析失败".to_string())?;
+    if let Some(u) = parse_bili_flv(&v) {
+        return Ok((u, referer_owned.clone()));
+    }
+    let real_room = v["data"]["room_id"]
+        .as_i64()
+        .map(|x| x.to_string())
+        .unwrap_or_else(|| room.to_string());
+    let url2 = format!(
+        "https://api.live.bilibili.com/room/v1/Room/playUrl?cid={real_room}&qn=10000&platform=web"
+    );
+    let v2: Value = stream_agent()
+        .get(&url2)
+        .set("User-Agent", BROWSER_UA)
+        .set("Referer", &referer_owned)
+        .call()
+        .map_err(|e| format!("B站直播接口请求失败: {e}"))?
+        .into_string()
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .ok_or_else(|| "B站直播接口响应解析失败".to_string())?;
+    if v2.get("code").and_then(|x| x.as_i64()) != Some(0) {
+        return Err(format!("B站直播间 {room} 未开播或获取失败"));
+    }
+    parse_bili_durl(&v2)
+        .ok_or_else(|| format!("B站直播间 {room} 未找到可用的 FLV 流（可能未开播）"))
+        .map(|u| (u, format!("https://live.bilibili.com/{room}")))
+}
+
 /// 从 getRoomPlayInfo 响应提取 http_stream / flv / avc 拉流地址（base_url + host）。
 pub fn parse_bili_flv(v: &Value) -> Option<String> {
     let streams = v["data"]["playurl_info"]["playurl"]["stream"].as_array()?;
@@ -253,16 +298,18 @@ fn lock_live() -> std::sync::MutexGuard<'static, Option<LiveSession>> {
 pub async fn start(room: String) -> Result<(u32, u32), String> {
     stop();
     *LAST_SENT.lock().unwrap_or_else(PoisonError::into_inner) = None;
-    let (url, referer) = resolve_stream(&room).await?;
+    // 初始校验：房间可解析、可开播（失败快速反馈给前端）；
+    // 实际拉流地址由解码线程每次连接/重连时重新获取（新 expires，自愈临时故障）。
+    resolve_stream(&room).await?;
     let stop = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(Mutex::new(Frames {
         queue: std::collections::VecDeque::new(),
         scan_seen: 0,
     }));
-    let (url2, stop2, frames2) = (url.clone(), stop.clone(), frames.clone());
+    let (room2, stop2, frames2) = (room.clone(), stop.clone(), frames.clone());
     std::thread::Builder::new()
         .name("live-decode".into())
-        .spawn(move || decode_loop(url2, referer, stop2, frames2))
+        .spawn(move || decode_loop(room2, stop2, frames2))
         .map_err(|e| format!("解码线程启动失败: {e}"))?;
     // 等首帧（流建立 + 关键帧到达，通常 1~4 秒）。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -513,9 +560,27 @@ fn downsample_rgba(
 
 // ---------- 解码线程 ----------
 
-fn decode_loop(url: String, referer: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>) {
+fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>) {
     let mut fails = 0u32;
     while !stop.load(Ordering::SeqCst) {
+        // 每次连接/重连都重新解析流地址：CDN 临时 404 或地址过期时拿到全新地址自愈。
+        let (url, referer) = match resolve_stream_sync(&room) {
+            Ok(u) => u,
+            Err(e) => {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                log::warn!("重连解析流地址失败: {e}");
+                fails += 1;
+                if fails > 4 {
+                    log::error!("直播流连续重连失败，会话关闭（约 2 秒）");
+                    remove_session_if(&frames);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(400));
+                continue;
+            }
+        };
         match decode_session(&url, &referer, &stop, &frames) {
             Ok(()) => return, // 收到停止信号
             Err(e) => log::warn!("直播流断开: {e}"),
