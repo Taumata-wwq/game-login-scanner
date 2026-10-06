@@ -1586,6 +1586,11 @@ pub fn run() {
                     });
                 }
             }
+            // 全部初始化就绪后再显示窗口：窗口创建时 visible=false（tauri.conf.json），
+            // 至此位置/尺寸/圆角均已设定，一次性在正确位置弹出，避免「居中闪现再跳位」。
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

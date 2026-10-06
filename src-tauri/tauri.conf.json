@@ -19,6 +19,7 @@
         "backgroundColor": "#1e1e1e",
         "shadow": false,
         "center": true,
+        "visible": false,
         "dragDropEnabled": false
       }
     ],
