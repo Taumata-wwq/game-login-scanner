@@ -173,6 +173,45 @@ fn host_of(url: &str) -> &str {
     rest.split('/').next().unwrap_or(rest)
 }
 
+/// 从 playinfo 响应解析该房间**实际提供**的清晰度档位（降序）。
+/// 关键：不同房间档位不同——有的仅原画 [10000]，有的多档 [10000,400,250,150]。
+/// 降级链必须据此构建，否则请求不存在的档位会被 B站回退到原画（降级静默失效）。
+pub fn parse_accept_qn(v: &Value) -> Vec<u32> {
+    let Some(streams) = v["data"]["playurl_info"]["playurl"]["stream"].as_array() else {
+        return Vec::new();
+    };
+    for stream in streams {
+        if stream["protocol_name"].as_str() != Some("http_stream") {
+            continue;
+        }
+        let Some(fmts) = stream["format"].as_array() else {
+            continue;
+        };
+        for fmt in fmts {
+            if fmt["format_name"].as_str() != Some("flv") {
+                continue;
+            }
+            let Some(codecs) = fmt["codec"].as_array() else {
+                continue;
+            };
+            for codec in codecs {
+                if codec["codec_name"].as_str() == Some("avc") {
+                    if let Some(arr) = codec["accept_qn"].as_array() {
+                        let mut qs: Vec<u32> = arr
+                            .iter()
+                            .filter_map(|x| x.as_u64().map(|n| n as u32))
+                            .collect();
+                        qs.sort_unstable_by(|a, b| b.cmp(a));
+                        qs.dedup();
+                        return qs;
+                    }
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// 从 getRoomPlayInfo 响应提取 http_stream / flv / avc 拉流地址（base_url + host）。
 pub fn parse_bili_flv(v: &Value) -> Option<String> {
     let streams = v["data"]["playurl_info"]["playurl"]["stream"].as_array()?;
@@ -743,12 +782,50 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
 
 // ---------- 解码线程 ----------
 
-/// 清晰度降级链：原画 → 高清 → 标清 → 流畅。
-/// B站 1080p60 原画多为高码率高 profile（openh264 可能解码失败或线程跟不上），
-/// 低清晰度档普遍是普通 AVC，解码轻松且扫码足够（直播抢码不需要高清）。
-const QN_CHAIN: [u32; 4] = [10000, 800, 450, 150];
+/// 构建房间的清晰度降级链：仅保留房间实际提供、且 ≤10000 的档位（不主动上 4K/杜比），
+/// 降序排列。房间仅原画时链长为 1（不降级，避免无效重连）。
+fn build_qn_chain(accept: &[u32]) -> Vec<u32> {
+    let mut chain: Vec<u32> = accept.iter().copied().filter(|q| *q <= 10000).collect();
+    chain.sort_unstable_by(|a, b| b.cmp(a));
+    chain.dedup();
+    if chain.is_empty() {
+        // accept_qn 解析失败/异常：退化为「仅原画」，不降级。
+        chain.push(10000);
+    }
+    chain
+}
+
+/// 获取房间实际提供的清晰度降级链（一次 API 查询）。失败退化为 [10000]。
+fn fetch_qn_chain(room: &str) -> Vec<u32> {
+    let url = format!(
+        "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn=10000&platform=web&ptype=16"
+    );
+    let referer = format!("https://live.bilibili.com/{room}");
+    let v: Option<Value> = api_agent()
+        .get(&url)
+        .set("User-Agent", BROWSER_UA)
+        .set("Referer", &referer)
+        .call()
+        .ok()
+        .and_then(|r| r.into_string().ok())
+        .and_then(|t| serde_json::from_str(&t).ok());
+    match v {
+        Some(v) => build_qn_chain(&parse_accept_qn(&v)),
+        None => vec![10000],
+    }
+}
 /// 解码持续失败的容忍次数：超过则降级清晰度重试。
 const DECODE_FAIL_LIMIT: u32 = 40;
+
+/// 解码器配置：NoFlush（保留参考帧链）。
+///
+/// **不可启用多线程**：openh264 的 num_threads 在 Windows 上实测必崩
+/// （STATUS_ACCESS_VIOLATION / 0xc0000005），库方文档亦明确警告 "will probably
+/// segfault"。1080p 单线程解码跟不上码率的房间，改用「追帧维持低延迟 + 自动降清晰度」
+/// 处理（见 decode_session / decode_loop）。
+fn decode_config() -> openh264::decoder::DecoderConfig {
+    openh264::decoder::DecoderConfig::new().flush_after_decode(openh264::decoder::Flush::NoFlush)
+}
 
 /// 直播追帧阈值（毫秒）：媒体时间戳落后「应有值」超过此值即判积压，
 /// 丢弃至下一关键帧重建解码器，把延迟压回直播边缘。
@@ -770,6 +847,9 @@ fn set_fail(fail: &FailFlag, reason: &str) {
 }
 
 fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, fail: FailFlag) {
+    // 按房间实际提供的档位构建降级链（不同房间档位不同）。
+    let qn_chain = fetch_qn_chain(&room);
+    log::info!("房间 {room} 清晰度档位链: {qn_chain:?}");
     let mut fails = 0u32;
     let mut qn_idx = 0usize;
     // 候选节点池（多 CDN 节点轮换：固定一个可能撞上慢/故障节点）。
@@ -780,7 +860,7 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
             return;
         }
         if candidates.is_empty() {
-            candidates = match resolve_stream_sync(&room, QN_CHAIN[qn_idx]) {
+            candidates = match resolve_stream_sync(&room, qn_chain[qn_idx]) {
                 Ok(c) => c,
                 Err(e) => {
                     log::warn!("解析流地址失败: {e}");
@@ -805,16 +885,16 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
         let (url, referer) = candidates[cand_used].clone();
         cand_used += 1;
         log::info!("连接直播流节点 {cand_used}/{} …", candidates.len());
-        let allow_degrade = qn_idx + 1 < QN_CHAIN.len();
+        let allow_degrade = qn_idx + 1 < qn_chain.len();
         match decode_session(&url, &referer, &stop, &frames, allow_degrade) {
             Ok(()) => return, // 收到停止信号
             // 解码器持续失败（编码不兼容/解码跟不上）：降级清晰度换低码率流重试。
             Err(e) if e.starts_with("H.264 解码持续失败") => {
-                if qn_idx + 1 < QN_CHAIN.len() {
+                if qn_idx + 1 < qn_chain.len() {
                     qn_idx += 1;
                     fails = 0;
                     candidates.clear();
-                    log::info!("清晰度降级到 qn={} 重试", QN_CHAIN[qn_idx]);
+                    log::info!("清晰度降级到 qn={} 重试", qn_chain[qn_idx]);
                     continue;
                 }
                 log::error!("最低清晰度仍无法解码，会话关闭");
@@ -831,7 +911,7 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
                 qn_idx += 1;
                 fails = 0;
                 candidates.clear();
-                log::info!("解码吞吐不足，清晰度降级到 qn={} 重试", QN_CHAIN[qn_idx]);
+                log::info!("解码吞吐不足，清晰度降级到 qn={} 重试", qn_chain[qn_idx]);
                 continue;
             }
             Err(e) => log::warn!("直播流断开: {e}"),
@@ -1144,8 +1224,7 @@ fn decode_session(
     // 参考链，配合每 FLUSH_FRAME_INTERVAL 帧 flush_remaining 批量取帧（实测 1259/1261）。
     let mut decoder = openh264::decoder::Decoder::with_api_config(
         openh264::OpenH264API::from_source(),
-        openh264::decoder::DecoderConfig::new()
-            .flush_after_decode(openh264::decoder::Flush::NoFlush),
+        decode_config(),
     )
     .map_err(|e| format!("解码器初始化失败: {e}"))?;
     let mut dec_fails = 0u32;
@@ -1241,8 +1320,7 @@ fn decode_session(
             if frame_type == 1 && body[1] == 1 && !param_sets.is_empty() {
                 decoder = openh264::decoder::Decoder::with_api_config(
                     openh264::OpenH264API::from_source(),
-                    openh264::decoder::DecoderConfig::new()
-                        .flush_after_decode(openh264::decoder::Flush::NoFlush),
+                    decode_config(),
                 )
                 .map_err(|e| format!("解码器重建失败: {e}"))?;
                 let _ = decoder.decode(&param_sets);

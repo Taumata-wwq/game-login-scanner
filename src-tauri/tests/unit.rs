@@ -574,6 +574,33 @@ fn parse_bili_flv_extracts_stream_url() {
 }
 
 #[test]
+fn parse_accept_qn_reads_codec_levels() {
+    // 混合 hls/http_stream、hevc/avc：只取 http_stream/flv/avc 的 accept_qn，
+    // 降序去重。
+    let v: serde_json::Value = serde_json::json!({
+        "data": { "playurl_info": { "playurl": { "stream": [
+            { "protocol_name": "http_hls", "format": [{ "format_name": "ts",
+                "codec": [{ "codec_name": "avc", "accept_qn": [80] }] }] },
+            { "protocol_name": "http_stream", "format": [{ "format_name": "flv", "codec": [
+                { "codec_name": "hevc", "accept_qn": [20000] },
+                { "codec_name": "avc", "accept_qn": [150, 10000, 400, 250] }
+            ] }] }
+        ] } } } });
+    let qs = game_login_scanner_lib::live::parse_accept_qn(&v);
+    assert_eq!(qs, vec![10000, 400, 250, 150]);
+    // 仅原画的房间（accept_qn=[10000]）→ 单元素链，不降级。
+    let only: serde_json::Value = serde_json::json!({
+        "data": { "playurl_info": { "playurl": { "stream": [
+            { "protocol_name": "http_stream", "format": [{ "format_name": "flv",
+                "codec": [{ "codec_name": "avc", "accept_qn": [10000] }] }] }
+        ] } } } });
+    assert_eq!(
+        game_login_scanner_lib::live::parse_accept_qn(&only),
+        vec![10000]
+    );
+}
+
+#[test]
 fn avcc_to_annexb_converts_length_prefixes() {
     let avcc = [0u8, 0, 0, 2, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC];
     let out = game_login_scanner_lib::live::avcc_to_annexb(&avcc);
