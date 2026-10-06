@@ -78,6 +78,11 @@ strip = true
 lto = true
 codegen-units = 1
 
+# openh264 的 C 代码单独用 opt-level=3（速度优先）：全局 "s"（体积优先）会让
+# 1080p 软解码显著变慢（实测单线程跟不上 60fps 流）。仅此依赖提速，本 crate 仍 "s"。
+[profile.release.package.openh264-sys2]
+opt-level = 3
+
 [target.'cfg(windows)'.dependencies]
 # 截屏（GDI 兜底）、剪贴板（读图/清空）替代 screenshots / arboard 两个重依赖
 # （二者各拖一份 image 全家桶 + 重复的 windows 绑定），全部走系统 API。

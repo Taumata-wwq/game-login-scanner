@@ -1229,6 +1229,7 @@ fn decode_session(
     .map_err(|e| format!("解码器初始化失败: {e}"))?;
     let mut dec_fails = 0u32;
     let (mut out_ok, mut out_none, mut out_err) = (0u32, 0u32, 0u32);
+
     let mut tag = Vec::new();
     // 慢流检测：某节点推流过慢（CDN 故障/限流）时返回错误，上层换节点。
     let mut last_data_at = std::time::Instant::now();
@@ -1336,6 +1337,13 @@ fn decode_session(
             } else {
                 continue;
             }
+        }
+
+        // 非参考帧（frame_type=3，disposable inter）不影响后续解码的参考链，
+        // 直接跳过解码：若 60fps 流用它做时间分层，可近乎减半解码负载（1080p60
+        // 单线程跟不上时尤为关键）。扫码/预览少这些帧无碍。
+        if frame_type == 3 && body[1] == 1 {
+            continue;
         }
 
         match body[1] {
