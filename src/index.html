@@ -1598,7 +1598,8 @@
     }
   }
 
-  const PREVIEW_INTERVAL = 16.7;   // 显示帧率硬上限 60fps
+  const PREVIEW_INTERVAL = 16.7;   // 屏幕预览帧率上限 60fps
+  const LIVE_PREVIEW_INTERVAL = 33; // 直播预览固定 30fps（后端按此节拍弹出缓冲帧）
   const PREVIEW_IDLE_INTERVAL = 140;
   let idleFrames = 0;
   let previewActive = false;
@@ -1624,7 +1625,11 @@
     tickFps();
     if (!previewActive || gen !== previewGen) return;
     if (changed) idleFrames = 0; else idleFrames++;
-    const interval = idleFrames > 2 ? PREVIEW_IDLE_INTERVAL : PREVIEW_INTERVAL;
+    const interval = liveOn
+      ? LIVE_PREVIEW_INTERVAL
+      : idleFrames > 2
+        ? PREVIEW_IDLE_INTERVAL
+        : PREVIEW_INTERVAL;
     const elapsed = performance.now() - t0;
     previewTimer = setTimeout(() => previewLoop(gen), Math.max(0, interval - elapsed));
   }

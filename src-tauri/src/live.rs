@@ -214,20 +214,28 @@ struct Frame {
 }
 
 /// 帧总线：小型回放缓冲（FIFO）。
-/// 网络突发会让解码帧成簇到达——只显示最新帧会产生「冻结后跳帧」的卡顿。
-/// 显示路径采用**目标深度弹出**：缓冲攒到 DISPLAY_BUFFER_TARGET 帧才按序弹出
-/// （60Hz 轮询不会把缓冲立刻排空），稳定吸收约 3 帧的网络抖动；不足目标深度时
-/// 复用队首帧。扫码路径始终取最新帧（抢码只关心当前画面）。
+/// 网络突发会让解码帧成簇到达——只显示最新帧会产生「冻结后跳帧」的卡顿，
+/// 且「到达即弹出」会把网络抖动直接透传给显示（缓冲再深也无效）。
+/// 显示路径采用**固定节拍弹出**：前端 30fps 轮询，每次轮询至多弹出一个最旧帧；
+/// 显示间隔完全由轮询时钟决定（均匀 30fps），到达抖动被队列吸收。
+/// 弹出速率(30) ≥ 到达速率(常见 24~30) 时延迟极小；到达更快时队列涨到
+/// FRAME_BUFFER_MAX（≈200ms 缓冲）后均匀丢帧，显示仍是平滑 30fps。
+/// 扫码路径始终取最新帧（抢码只关心当前画面）。
 struct Frames {
     queue: std::collections::VecDeque<Frame>,
     /// 扫码消费者已消费的帧序号。
     scan_seen: u64,
 }
 
-/// 显示回放的目标缓冲深度（约 4 帧 ≈ 130~200ms 额外延迟）。
-const DISPLAY_BUFFER_TARGET: usize = 5;
-/// 队列硬上限（防极端突发撑爆内存；超出丢弃最旧帧）。
+/// 队列硬上限（≈200ms 显示缓冲；防极端突发撑爆内存，超出丢弃最旧帧）。
 const FRAME_BUFFER_MAX: usize = 6;
+
+/// 上次发送的预览帧标识：(seq, 裁剪区, 输出宽)。相同则返回短响应。
+type SentKey = (u64, (u32, u32, u32, u32), u32);
+static LAST_SENT: Mutex<Option<SentKey>> = Mutex::new(None);
+/// 最近一次预览请求的视口（流坐标系）；扫码只分析该区域（与屏幕扫码
+/// 「可视视口即扫描范围」语义一致，也大幅降低解码成本）。
+static LAST_VIEW: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
 
 struct LiveSession {
     stop: Arc<AtomicBool>,
@@ -244,6 +252,7 @@ fn lock_live() -> std::sync::MutexGuard<'static, Option<LiveSession>> {
 /// 启动直播会话（解析流地址 + 启动解码线程，阻塞至拿到首帧或超时）。
 pub async fn start(room: String) -> Result<(u32, u32), String> {
     stop();
+    *LAST_SENT.lock().unwrap_or_else(PoisonError::into_inner) = None;
     let (url, referer) = resolve_stream(&room).await?;
     let stop = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(Mutex::new(Frames {
@@ -297,10 +306,39 @@ pub fn active() -> bool {
     lock_live().is_some()
 }
 
-/// 扫码消费者：自上次消费以来有新帧时返回最新帧（全分辨率 RGB）。
+/// RGBA 裁剪 + 2×2 面积平均 → RGB（供扫码：半尺寸即可承载游戏登录码，
+/// 拷贝与解码成本约为全分辨率的 1/4）。
+fn rgba_crop_half(rgba: &[u8], src_w: u32, crop: (u32, u32, u32, u32)) -> (Vec<u8>, u32, u32) {
+    let (cx, cy, cw, ch) = crop;
+    let (ow, oh) = (cw / 2, ch / 2);
+    let mut out = Vec::with_capacity((ow as usize) * (oh as usize) * 3);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let mut acc = [0u32; 3];
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let i = (((cy + oy * 2 + dy) as usize) * src_w as usize
+                        + (cx + ox * 2 + dx) as usize)
+                        * 4;
+                    acc[0] += rgba[i] as u32;
+                    acc[1] += rgba[i + 1] as u32;
+                    acc[2] += rgba[i + 2] as u32;
+                }
+            }
+            out.push((acc[0] / 4) as u8);
+            out.push((acc[1] / 4) as u8);
+            out.push((acc[2] / 4) as u8);
+        }
+    }
+    (out, ow, oh)
+}
+
+/// 扫码消费者：自上次消费以来有新帧时返回最新帧的**当前显示视口**区域
+/// （2×2 平均半尺寸 RGB）。视口未知时用全帧。
 pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
     let live = lock_live();
     let s = live.as_ref()?;
+    let view = *LAST_VIEW.lock().unwrap_or_else(PoisonError::into_inner);
     let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
     let (seq, w, h) = {
         let back = f.queue.back()?;
@@ -311,25 +349,69 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
     };
     f.scan_seen = seq;
     let back = f.queue.back().unwrap();
-    let rgb = crate::qr::rgba_to_rgb(&back.rgba);
+    let crop = view.and_then(|(x, y, w, h)| {
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        let x0 = x.clamp(0, w - 1);
+        let y0 = y.clamp(0, h - 1);
+        let cw0 = (w.min(w - x0)).max(2) as u32;
+        let ch0 = (h.min(h - y0)).max(2) as u32;
+        Some((x0 as u32, y0 as u32, cw0, ch0))
+    });
+    let (rgb, w, h) = match crop {
+        Some(c) => rgba_crop_half(&back.rgba, w, c),
+        None => {
+            let mut rgb = crate::qr::rgba_to_rgb(&back.rgba);
+            let (w, h) = (w / 2, h / 2);
+            // 全帧同样半尺寸，保持扫码成本恒定。
+            downsample_rgb_half(&mut rgb, w * 2, h * 2, w, h);
+            (rgb, w, h)
+        }
+    };
     Some((rgb, w, h))
+}
+
+/// RGB 2×2 面积平均（就地降采样到 ow×oh）。
+fn downsample_rgb_half(rgb: &mut Vec<u8>, sw: u32, _sh: u32, ow: u32, oh: u32) {
+    let src = std::mem::take(rgb);
+    let sw = sw as usize;
+    for oy in 0..oh as usize {
+        for ox in 0..ow as usize {
+            let mut acc = [0u32; 3];
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let i = ((oy * 2 + dy) * sw + ox * 2 + dx) * 3;
+                    acc[0] += src[i] as u32;
+                    acc[1] += src[i + 1] as u32;
+                    acc[2] += src[i + 2] as u32;
+                }
+            }
+            rgb.push((acc[0] / 4) as u8);
+            rgb.push((acc[1] / 4) as u8);
+            rgb.push((acc[2] / 4) as u8);
+        }
+    }
 }
 
 /// 预览消费者：按视口裁剪 + 面积降采样，组装 24 字节头 + RGBA 负载。
 /// 头部布局与屏幕预览一致（mon = 流原始尺寸），无会话/无帧返回 None。
 pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> Option<Vec<u8>> {
+    *LAST_VIEW.lock().unwrap_or_else(PoisonError::into_inner) = if w > 0 && h > 0 {
+        Some((x, y, w, h))
+    } else {
+        None
+    };
     let live = lock_live();
     let s = live.as_ref()?;
     let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
     if f.queue.is_empty() {
         return None;
     }
-    // 攒到目标深度才按序弹出（不足时复用队首帧，60Hz 轮询不会排空缓冲）。
-    let popped = if f.queue.len() >= DISPLAY_BUFFER_TARGET {
-        f.queue.pop_front()
-    } else {
-        None
-    };
+    // 弹出节拍 = 显示节拍（前端 30fps 轮询）：每轮询至多弹出一个最旧帧，
+    // 队列空时复用队首帧。显示间隔完全由轮询时钟决定（均匀 30fps），到达抖动
+    // 被缓冲吸收——「到达即弹出」会把抖动直接透传，缓冲再深也无济于事。
+    let popped = f.queue.pop_front();
     let f = match &popped {
         Some(fr) => fr,
         None => f.queue.front().unwrap(),
@@ -350,6 +432,16 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> Option<Vec<
     // 输出宽度不超过裁剪区实际像素数（禁上采样，避免黑网格）。
     let tw = max_width.min(cw).clamp(1, 4096);
     let th = (((ch as u64) * tw as u64) / cw as u64).max(1) as u32;
+    // 帧未变（seq 相同）且视口/宽度未变：24 字节短响应，前端沿用上一帧
+    // （复用屏幕预览协议），消除重复帧的降采样与 IPC。
+    let key = (f.seq, (cx, cy, cw, ch), tw);
+    {
+        let mut last = LAST_SENT.lock().unwrap_or_else(PoisonError::into_inner);
+        if *last == Some(key) {
+            return Some(vec![0u8; 24]);
+        }
+        *last = Some(key);
+    }
     let rgba = downsample_rgba(&f.rgba, f.w, (cx, cy, cw, ch), tw, th);
     let mut out = Vec::with_capacity(24 + rgba.len());
     out.extend_from_slice(&tw.to_le_bytes());
