@@ -138,10 +138,18 @@
   }
   .filter-seg button:hover { color: var(--text); background: var(--hover); }
   .filter-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
-  /* 直播源控件（平台页签 + 房间号）：占据筛选行右侧。 */
-  .live-ctl { margin-left: auto; display: flex; align-items: center; gap: 3px; }
-  .live-ctl .filter-seg button { padding: 0 6px; }
-  #liveRoom { width: 88px; height: 24px; }
+  /* 直播源控件（房间号输入框）：占据筛选行右侧。 */
+  .live-ctl { margin-left: auto; }
+  #liveRoom { width: 110px; height: 20px; }
+  /* 添加账号按钮：与账号行同规格（高度/边框/圆角/间距一致，仅文案居中）。 */
+  .acct-add {
+    width: 100%; height: 27px; flex: none; margin-top: 2px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    color: var(--muted); font: inherit; cursor: pointer;
+    transition: background 0.1s, border-color 0.1s, color 0.1s;
+  }
+  .acct-add:hover { background: var(--hover); border-color: #555555; color: var(--text); }
 
   /* 账号区自身滚动：占据剩余空间、行高不压缩；滚动条只出现在账号区内部，
      不影响上方扫描区域（overscroll-behavior 阻断滚动链，避免外层出现滚动条）。 */
@@ -375,16 +383,12 @@
         <button data-f="bilibili">B 服</button>
         <button data-f="hypergryph" hidden>鹰角</button>
       </div>
-      <div class="live-ctl" title="输入直播间号后，预览与扫码自动切换到直播画面">
-        <div class="filter-seg" id="livePlatSeg">
-          <button data-p="bilibili" class="on">B站</button>
-          <button data-p="douyin">抖音</button>
-        </div>
-        <input class="txtin" id="liveRoom" placeholder="直播间号" maxlength="24" autocomplete="off" spellcheck="false" />
+      <div class="live-ctl" title="输入B站直播间号后，预览与扫码自动切换到直播画面">
+        <input class="txtin" id="liveRoom" placeholder="b站直播间号" maxlength="24" autocomplete="off" spellcheck="false" inputmode="numeric" />
       </div>
     </div>
     <div class="acct-list" id="acctList"></div>
-    <button class="btn block" id="btnAddAcct" title="添加账号">＋ 添加账号</button>
+    <button class="acct-add" id="btnAddAcct" title="添加账号">＋ 添加账号</button>
     <div class="startbar">
       <button id="btnStart" title="开始 / 停止扫码">
         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
@@ -1440,7 +1444,6 @@
 
   // ---------- 直播源（B站/抖音低延迟画面） ----------
   let liveOn = false;
-  let livePlat = 'bilibili';
   let liveSeq = 0;
   let liveTimer = null;
 
@@ -1460,7 +1463,7 @@
       return;
     }
     try {
-      const [w, h] = await invoke('live_start', { platform: livePlat, room });
+      const [w, h] = await invoke('live_start', { room });
       if (seq !== liveSeq) {
         // 已被更新的请求取代；房间已清空则回收会话。
         if (!$('liveRoom').value.trim()) invoke('live_stop').catch(() => {});
@@ -1471,21 +1474,17 @@
       view = { scale: 1, fx: 0.5, fy: 0.5 };
       viewT = { scale: 1, fx: 0.5, fy: 0.5 };
       srcCanvas = null;
-      log('已连接' + (livePlat === 'bilibili' ? 'B站' : '抖音') + '直播间 ' + room + '（' + w + '×' + h + '），预览与扫码已切换', 'success');
+      // 作废屏幕底图/瓦片状态，防止拖拽缩放时把桌面画面当直播底图绘制。
+      baseMap = null; baseMapReady = false; baseMapActive = false;
+      if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
+      if (tileMode) { invoke('set_tile_mode', { x: 0, y: 0, w: 0, h: 0, on: false }).catch(() => {}); tileMode = false; }
+      log('已连接B站直播间 ' + room + '（' + w + '×' + h + '），预览与扫码已切换', 'success');
     } catch (e) {
       if (seq !== liveSeq) return;
       liveOn = false;
-      log('连接' + (livePlat === 'bilibili' ? 'B站' : '抖音') + '直播间 ' + room + ' 失败: ' + e, 'error');
+      log('连接B站直播间 ' + room + ' 失败: ' + e, 'error');
     }
   }
-  document.querySelectorAll('#livePlatSeg button').forEach((b) => {
-    b.addEventListener('click', () => {
-      if (livePlat === b.dataset.p) return;
-      livePlat = b.dataset.p;
-      document.querySelectorAll('#livePlatSeg button').forEach((x) => x.classList.toggle('on', x === b));
-      scheduleLive();
-    });
-  });
   $('liveRoom').addEventListener('input', scheduleLive);
   $('liveRoom').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { if (liveTimer) clearTimeout(liveTimer); connectLive(); }
@@ -1596,24 +1595,30 @@
       fpsLast = now;
     }
   }
-  async function previewLoop() {
-    if (!previewActive) return;
+  // 代际令牌：stop/start 快速交替（如缩放到极限时每次滚轮都触发）会残留
+  // 仍在 await 的旧循环实例，恢复后与新循环并行 → 帧率远超上限。代际不匹配
+  // 的实例在任何续行点直接退出。
+  let previewGen = 0;
+  async function previewLoop(gen) {
+    if (!previewActive || gen !== previewGen) return;
     const t0 = performance.now();
     const changed = await refreshPreview();
     tickFps();
-    if (!previewActive) return;
+    if (!previewActive || gen !== previewGen) return;
     if (changed) idleFrames = 0; else idleFrames++;
     const interval = idleFrames > 2 ? PREVIEW_IDLE_INTERVAL : PREVIEW_INTERVAL;
     const elapsed = performance.now() - t0;
-    previewTimer = setTimeout(previewLoop, Math.max(0, interval - elapsed));
+    previewTimer = setTimeout(() => previewLoop(gen), Math.max(0, interval - elapsed));
   }
   function startPreview() {
     if (previewActive || paused || dragging || baseMapActive) return;
     previewActive = true;
-    previewLoop();
+    const gen = ++previewGen;
+    previewLoop(gen);
   }
   function stopPreview() {
     previewActive = false;
+    previewGen++;
     if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
   }
   document.addEventListener('visibilitychange', () => {
@@ -1657,7 +1662,8 @@
   let viewRaf = null;
   function ensureViewAnim() {
     if (viewRaf) return;
-    if (!paused && !baseMapActive) { stopPreview(); startBaseMap(); }
+    // 直播模式：帧即当前视口裁剪，无需屏幕瓦片底图（否则拖拽会闪现桌面画面）。
+    if (!liveOn && !paused && !baseMapActive) { stopPreview(); startBaseMap(); }
     const loop = () => {
       const moving = stepView();
       drawView();
@@ -1800,7 +1806,7 @@
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     const v = viewportFrac();
     const r = contentRect();
-    const useBase = (viewDirty || pendingRealtime) && baseMapReady;
+    const useBase = !liveOn && (viewDirty || pendingRealtime) && baseMapReady;
     const shot = paused ? pauseShot : (useBase ? baseMap : null);
     if (shot) {
       const sc = shot.canvas;

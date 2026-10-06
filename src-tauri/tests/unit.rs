@@ -574,33 +574,6 @@ fn parse_bili_flv_extracts_stream_url() {
 }
 
 #[test]
-fn parse_douyin_flv_prefers_full_hd() {
-    let v: serde_json::Value = serde_json::json!({
-        "data": { "data": [{ "stream_url": {
-            "flv_pull_url": { "sd1": "http://a/sd.flv", "full_hd1": "http://a/fhd.flv" }
-        } }] }
-    });
-    let url = game_login_scanner_lib::live::parse_douyin_flv(&v).expect("应提取到 flv");
-    assert_eq!(url, "http://a/fhd.flv");
-}
-
-#[test]
-fn parse_douyin_flv_stream_data_fallback() {
-    let v: serde_json::Value = serde_json::json!({
-        "data": { "data": [{ "stream_url": {
-            "live_core_sdk_data": { "pull_data": {
-                "stream_data": serde_json::json!({
-                    "data": { "0": { "main": { "flv": "http://pull/main.flv", "hls": "http://pull/m.m3u8" } } }
-                })
-                .to_string()
-            } } }
-        } ] }
-    });
-    let url = game_login_scanner_lib::live::parse_douyin_flv(&v).expect("stream_data 回退应命中");
-    assert_eq!(url, "http://pull/main.flv");
-}
-
-#[test]
 fn avcc_to_annexb_converts_length_prefixes() {
     let avcc = [0u8, 0, 0, 2, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC];
     let out = game_login_scanner_lib::live::avcc_to_annexb(&avcc);

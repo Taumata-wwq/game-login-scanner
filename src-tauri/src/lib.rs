@@ -1148,9 +1148,8 @@ fn set_preview_active(active: bool) {
 /// 阻塞至拿到首帧（前端随后用 capture_live_frame 拉取视口画面）。
 /// 返回 (流宽, 流高)。
 #[tauri::command]
-async fn live_start(platform: String, room: String) -> Result<(u32, u32), String> {
-    let p = crate::live::parse_platform(&platform).ok_or_else(|| "未知直播平台".to_string())?;
-    crate::live::start(p, room).await
+async fn live_start(room: String) -> Result<(u32, u32), String> {
+    crate::live::start(room).await
 }
 
 /// 停止直播会话（预览恢复屏幕画面，扫码恢复屏幕扫描）。

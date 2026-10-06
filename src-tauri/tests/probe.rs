@@ -160,22 +160,19 @@ fn probe_decode_perf() {
 }
 
 /// 直播捕获探针（手动运行）：连接真实直播间，验证流解析 + FLV 解复用 + H.264 解码。
-/// 默认 B站房间 6（哔哩哔哩直播，通常常驻开播），可用环境变量 LIVE_PLATFORM / LIVE_ROOM 覆盖。
+/// 默认 B站房间 6（哔哩哔哩直播，通常常驻开播），可用环境变量 LIVE_ROOM 覆盖。
 #[test]
 #[ignore = "真实网络探针，需手动运行"]
 fn probe_live() {
     use std::time::Duration;
-    let platform = std::env::var("LIVE_PLATFORM").unwrap_or_else(|_| "bilibili".into());
     let room = std::env::var("LIVE_ROOM").unwrap_or_else(|_| "6".into());
-    let p = game_login_scanner_lib::live::parse_platform(&platform).expect("平台名");
     let rt = tokio::runtime::Runtime::new().expect("运行时");
     rt.block_on(async {
         let t0 = std::time::Instant::now();
-        match game_login_scanner_lib::live::start(p, room.clone()).await {
+        match game_login_scanner_lib::live::start(room.clone()).await {
             Ok((w, h)) => {
                 println!(
-                    "[OK] {}房间 {room} 已连接 {w}x{h}（耗时 {:?}）",
-                    p.label(),
+                    "[OK] B站房间 {room} 已连接 {w}x{h}（耗时 {:?}）",
                     t0.elapsed()
                 );
                 let mut new_frames = 0u32;
@@ -188,7 +185,7 @@ fn probe_live() {
                 println!("[OK] 2 秒内新帧数 {new_frames}（约 {}fps）", new_frames / 2);
                 game_login_scanner_lib::live::stop();
             }
-            Err(e) => println!("[FAIL] {}房间 {room}: {e}", p.label()),
+            Err(e) => println!("[FAIL] B站房间 {room}: {e}"),
         }
     });
 }

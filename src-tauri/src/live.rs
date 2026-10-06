@@ -7,7 +7,7 @@
 //! - 扫码：`take_scan_frame` 取新帧走既有二维码识别管线（seq 去重）。
 
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -17,41 +17,14 @@ use openh264::formats::YUVSource;
 
 use crate::http::header_utf8;
 
-/// 直播平台。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Platform {
-    Bilibili,
-    Douyin,
-}
-
-pub fn parse_platform(s: &str) -> Option<Platform> {
-    match s {
-        "bilibili" => Some(Platform::Bilibili),
-        "douyin" => Some(Platform::Douyin),
-        _ => None,
-    }
-}
-
-impl Platform {
-    pub fn label(self) -> &'static str {
-        match self {
-            Platform::Bilibili => "B站",
-            Platform::Douyin => "抖音",
-        }
-    }
-}
-
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 // ---------- 流地址解析 ----------
 
-/// 解析平台直播间为 http-flv 拉流地址，返回 (url, referer, cookie)。
-async fn resolve_stream(
-    platform: Platform,
-    room: &str,
-) -> Result<(String, String, Option<String>), String> {
-    match platform {
-        Platform::Bilibili => {
+/// 解析 B站直播间为 http-flv 拉流地址，返回 (url, referer)。
+async fn resolve_stream(room: &str) -> Result<(String, String), String> {
+    {
+        {
             let headers = vec![
                 ("User-Agent".to_string(), header_utf8(BROWSER_UA)),
                 (
@@ -80,7 +53,7 @@ async fn resolve_stream(
             }
             // 首选：v2 结构化流（url_list 非空时）。
             if let Some(u) = parse_bili_flv(&v) {
-                return Ok((u, format!("https://live.bilibili.com/{room}"), None));
+                return Ok((u, format!("https://live.bilibili.com/{room}")));
             }
             // 回退：旧版 playUrl 接口 durl 直出完整 FLV 地址（免登录场景下
             // v2 的 url_list 常被服务端置空，旧接口反而稳定可用）。
@@ -109,43 +82,7 @@ async fn resolve_stream(
             }
             parse_bili_durl(&v2)
                 .ok_or_else(|| format!("B站直播间 {room} 未找到可用的 FLV 流（可能未开播）"))
-                .map(|u| (u, format!("https://live.bilibili.com/{room}"), None))
-        }
-        Platform::Douyin => {
-            let ttwid = fetch_ttwid().await?;
-            let headers = vec![
-                ("User-Agent".to_string(), header_utf8(BROWSER_UA)),
-                (
-                    "Referer".to_string(),
-                    format!("https://live.douyin.com/{room}"),
-                ),
-                ("Cookie".to_string(), format!("ttwid={ttwid}")),
-            ];
-            let url = format!(
-                "https://live.douyin.com/webcast/room/web/enter/?aid=6383&device_platform=web&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=126.0.0.0&web_rid={room}"
-            );
-            let resp = crate::http::get(&url, headers)
-                .await
-                .map_err(|e| format!("抖音直播接口请求失败: {e}"))?;
-            let v: Value = serde_json::from_str(&resp.body).map_err(|_| {
-                format!(
-                    "抖音直播接口响应非 JSON: {}",
-                    &resp.body[..resp.body.len().min(120)]
-                )
-            })?;
-            parse_douyin_flv(&v)
-                .ok_or_else(|| {
-                    format!(
-                        "抖音直播间 {room} 未找到可用的 FLV 流（可能未开播、房间号有误或接口风控）"
-                    )
-                })
-                .map(|u| {
-                    (
-                        u,
-                        format!("https://live.douyin.com/{room}"),
-                        Some(format!("ttwid={ttwid}")),
-                    )
-                })
+                .map(|u| (u, format!("https://live.bilibili.com/{room}")))
         }
     }
 }
@@ -173,41 +110,6 @@ pub fn parse_bili_flv(v: &Value) -> Option<String> {
     None
 }
 
-/// ttwid 注册接口（抖音 Web API 的通行凭证，无需浏览器）。
-async fn fetch_ttwid() -> Result<String, String> {
-    let body = serde_json::json!({
-        "region": "cn",
-        "aid": 1768,
-        "needFid": false,
-        "service": "www.ixigua.com",
-        "migrate_info": { "ticket": "", "source": "node" },
-        "cbUrlProtocol": "https",
-        "union": true,
-    })
-    .to_string();
-    let resp = crate::http::post(
-        "https://ttwid.bytedance.com/ttwid/room/register/",
-        vec![("Content-Type".to_string(), "application/json".to_string())],
-        &body,
-    )
-    .await
-    .map_err(|e| format!("ttwid 获取失败: {e}"))?;
-    for s in resp
-        .headers
-        .iter()
-        .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
-        .map(|(_, v)| v.as_str())
-    {
-        if let Some(rest) = s.trim().strip_prefix("ttwid=") {
-            let val = rest.split(';').next().unwrap_or("").trim();
-            if !val.is_empty() {
-                return Ok(val.to_string());
-            }
-        }
-    }
-    Err("ttwid 获取失败（响应无 Cookie）".to_string())
-}
-
 /// 从旧版 playUrl 响应提取 durl 直出的 FLV 地址。
 pub fn parse_bili_durl(v: &Value) -> Option<String> {
     v["data"]["durl"]
@@ -216,42 +118,6 @@ pub fn parse_bili_durl(v: &Value) -> Option<String> {
         .find_map(|u| u["url"].as_str())
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty())
-}
-
-/// 从抖音 enter 响应提取 flv 拉流地址（多代接口结构兼容，优先最高清晰度）。
-pub fn parse_douyin_flv(v: &Value) -> Option<String> {
-    let d0 = v.get("data")?.get("data")?.get(0)?;
-    // 路径一：stream_url.flv_pull_url（清晰度名 → url）
-    if let Some(obj) = d0["stream_url"]["flv_pull_url"].as_object() {
-        for key in ["full_hd1", "hd1", "sd1", "sd2"] {
-            if let Some(u) = obj.get(key).and_then(|x| x.as_str()) {
-                if !u.is_empty() {
-                    return Some(u.to_string());
-                }
-            }
-        }
-        if let Some((_, u)) = obj
-            .iter()
-            .find(|(_, v)| v.as_str().is_some_and(|s| !s.is_empty()))
-        {
-            return Some(u.as_str().unwrap_or_default().to_string());
-        }
-    }
-    // 路径二：live_core_sdk_data.pull_data.stream_data（JSON 字符串）→ data.*.main.flv
-    if let Some(s) = d0["stream_url"]["live_core_sdk_data"]["pull_data"]["stream_data"].as_str() {
-        if let Ok(sd) = serde_json::from_str::<Value>(s) {
-            if let Some(routes) = sd.get("data").and_then(|d| d.as_object()) {
-                for route in routes.values() {
-                    if let Some(u) = route["main"]["flv"].as_str() {
-                        if !u.is_empty() {
-                            return Some(u.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
 }
 
 // ---------- FLV 解复用 / H.264 辅助（纯函数，可测） ----------
@@ -339,20 +205,29 @@ pub fn yuv420_to_rgba(
 
 // ---------- 会话与帧总线 ----------
 
-/// 解码线程产出的最新一帧。
-struct SharedFrame {
+/// 解码产出的一帧。
+struct Frame {
     seq: u64,
     w: u32,
     h: u32,
     rgba: Vec<u8>,
 }
 
+/// 帧总线：小型回放缓冲（FIFO）。
+/// 网络突发会让解码帧成簇到达——只显示最新帧会产生「冻结后跳帧」的卡顿，
+/// 故显示路径按序弹出（缓冲 ≥2 帧时）把突发摊平为均匀输出；缓冲仅 1 帧时
+/// 原地复用不弹出，回放延迟稳定在约 1 帧。扫码路径始终取最新帧（只关心当前画面）。
+struct Frames {
+    queue: std::collections::VecDeque<Frame>,
+    /// 扫码消费者已消费的帧序号。
+    scan_seen: u64,
+}
+
+const FRAME_BUFFER_MAX: usize = 3;
+
 struct LiveSession {
     stop: Arc<AtomicBool>,
-    frame: Arc<Mutex<SharedFrame>>,
-    /// 扫码消费者已消费的帧序号。
-    scan_seen: AtomicU64,
-    platform: Platform,
+    frames: Arc<Mutex<Frames>>,
     room: String,
 }
 
@@ -363,37 +238,35 @@ fn lock_live() -> std::sync::MutexGuard<'static, Option<LiveSession>> {
 }
 
 /// 启动直播会话（解析流地址 + 启动解码线程，阻塞至拿到首帧或超时）。
-pub async fn start(platform: Platform, room: String) -> Result<(u32, u32), String> {
+pub async fn start(room: String) -> Result<(u32, u32), String> {
     stop();
-    let (url, referer, cookie) = resolve_stream(platform, &room).await?;
+    let (url, referer) = resolve_stream(&room).await?;
     let stop = Arc::new(AtomicBool::new(false));
-    let frame = Arc::new(Mutex::new(SharedFrame {
-        seq: 0,
-        w: 0,
-        h: 0,
-        rgba: Vec::new(),
+    let frames = Arc::new(Mutex::new(Frames {
+        queue: std::collections::VecDeque::new(),
+        scan_seen: 0,
     }));
-    let (url2, stop2, frame2) = (url.clone(), stop.clone(), frame.clone());
+    let (url2, stop2, frames2) = (url.clone(), stop.clone(), frames.clone());
     std::thread::Builder::new()
         .name("live-decode".into())
-        .spawn(move || decode_loop(url2, referer, cookie, stop2, frame2))
+        .spawn(move || decode_loop(url2, referer, stop2, frames2))
         .map_err(|e| format!("解码线程启动失败: {e}"))?;
     // 等首帧（流建立 + 关键帧到达，通常 1~4 秒）。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         {
-            let f = frame.lock().unwrap_or_else(PoisonError::into_inner);
-            if f.seq > 0 && f.w > 0 {
-                let (w, h) = (f.w, f.h);
-                drop(f);
-                *lock_live() = Some(LiveSession {
-                    stop,
-                    frame,
-                    scan_seen: AtomicU64::new(0),
-                    platform,
-                    room: room.clone(),
-                });
-                return Ok((w, h));
+            let f = frames.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(back) = f.queue.back() {
+                if back.w > 0 {
+                    let (w, h) = (back.w, back.h);
+                    drop(f);
+                    *lock_live() = Some(LiveSession {
+                        stop,
+                        frames,
+                        room: room.clone(),
+                    });
+                    return Ok((w, h));
+                }
             }
         }
         if stop.load(Ordering::SeqCst) {
@@ -401,10 +274,7 @@ pub async fn start(platform: Platform, room: String) -> Result<(u32, u32), Strin
         }
         if tokio::time::Instant::now() >= deadline {
             stop.store(true, Ordering::SeqCst);
-            return Err(format!(
-                "{}直播间 {room} 连接超时（15 秒内未取到画面）",
-                platform.label()
-            ));
+            return Err(format!("B站直播间 {room} 连接超时（15 秒内未取到画面）"));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -414,15 +284,14 @@ pub async fn start(platform: Platform, room: String) -> Result<(u32, u32), Strin
 pub fn stop() {
     if let Some(s) = lock_live().take() {
         s.stop.store(true, Ordering::SeqCst);
-        log::info!("直播会话已断开（{} {}）", s.platform.label(), s.room);
+        log::info!("直播会话已断开（B站 {}）", s.room);
     }
 }
 
 /// 当前会话信息（前端日志用）。
 pub fn session_label() -> Option<String> {
     let live = lock_live();
-    live.as_ref()
-        .map(|s| format!("{} {}", s.platform.label(), s.room))
+    live.as_ref().map(|s| format!("B站 {}", s.room))
 }
 
 /// 是否存在活跃会话。
@@ -430,17 +299,22 @@ pub fn active() -> bool {
     lock_live().is_some()
 }
 
-/// 扫码消费者：取自上次消费以来的新帧（全分辨率 RGB）；无新帧返回 None。
+/// 扫码消费者：自上次消费以来有新帧时返回最新帧（全分辨率 RGB）。
 pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
     let live = lock_live();
     let s = live.as_ref()?;
-    let f = s.frame.lock().unwrap_or_else(PoisonError::into_inner);
-    if f.seq == 0 || s.scan_seen.load(Ordering::SeqCst) == f.seq {
-        return None;
-    }
-    s.scan_seen.store(f.seq, Ordering::SeqCst);
-    let rgb = crate::qr::rgba_to_rgb(&f.rgba);
-    Some((rgb, f.w, f.h))
+    let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
+    let (seq, w, h) = {
+        let back = f.queue.back()?;
+        if back.seq == 0 || f.scan_seen == back.seq {
+            return None;
+        }
+        (back.seq, back.w, back.h)
+    };
+    f.scan_seen = seq;
+    let back = f.queue.back().unwrap();
+    let rgb = crate::qr::rgba_to_rgb(&back.rgba);
+    Some((rgb, w, h))
 }
 
 /// 预览消费者：按视口裁剪 + 面积降采样，组装 24 字节头 + RGBA 负载。
@@ -448,8 +322,21 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
 pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> Option<Vec<u8>> {
     let live = lock_live();
     let s = live.as_ref()?;
-    let f = s.frame.lock().unwrap_or_else(PoisonError::into_inner);
-    if f.seq == 0 || f.w == 0 || f.h == 0 {
+    let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
+    if f.queue.is_empty() {
+        return None;
+    }
+    // 缓冲 ≥2 帧时按序弹出（摊平网络突发）；仅 1 帧时原地复用。
+    let popped = if f.queue.len() >= 2 {
+        f.queue.pop_front()
+    } else {
+        None
+    };
+    let f = match &popped {
+        Some(fr) => fr,
+        None => f.queue.front().unwrap(),
+    };
+    if f.w == 0 || f.h == 0 {
         return None;
     }
     let (fw, fh) = (f.w as i32, f.h as i32);
@@ -522,16 +409,10 @@ fn downsample_rgba(
 
 // ---------- 解码线程 ----------
 
-fn decode_loop(
-    url: String,
-    referer: String,
-    cookie: Option<String>,
-    stop: Arc<AtomicBool>,
-    frame: Arc<Mutex<SharedFrame>>,
-) {
+fn decode_loop(url: String, referer: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>) {
     let mut fails = 0u32;
     while !stop.load(Ordering::SeqCst) {
-        match decode_session(&url, &referer, cookie.as_deref(), &stop, &frame) {
+        match decode_session(&url, &referer, &stop, &frames) {
             Ok(()) => return, // 收到停止信号
             Err(e) => log::warn!("直播流断开: {e}"),
         }
@@ -577,17 +458,13 @@ fn read_exact(reader: &mut impl Read, buf: &mut Vec<u8>, n: usize) -> Result<(),
 fn decode_session(
     url: &str,
     referer: &str,
-    cookie: Option<&str>,
     stop: &AtomicBool,
-    frame: &Arc<Mutex<SharedFrame>>,
+    frames: &Arc<Mutex<Frames>>,
 ) -> Result<(), String> {
-    let mut req = stream_agent()
+    let req = stream_agent()
         .get(url)
         .set("User-Agent", BROWSER_UA)
         .set("Referer", referer);
-    if let Some(c) = cookie {
-        req = req.set("Cookie", c);
-    }
     let resp = match req.call() {
         Ok(r) => r,
         Err(ureq::Error::Status(code, _)) => return Err(format!("HTTP {code}")),
@@ -662,11 +539,17 @@ fn decode_session(
                         w as u32,
                         h as u32,
                     );
-                    let mut f = frame.lock().unwrap_or_else(PoisonError::into_inner);
-                    f.seq += 1;
-                    f.w = w as u32;
-                    f.h = h as u32;
-                    f.rgba = rgba;
+                    let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
+                    let seq = f.queue.back().map(|b| b.seq + 1).unwrap_or(1);
+                    f.queue.push_back(Frame {
+                        seq,
+                        w: w as u32,
+                        h: h as u32,
+                        rgba,
+                    });
+                    while f.queue.len() > FRAME_BUFFER_MAX {
+                        f.queue.pop_front();
+                    }
                 }
             }
             _ => {}
