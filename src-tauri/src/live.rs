@@ -214,16 +214,20 @@ struct Frame {
 }
 
 /// 帧总线：小型回放缓冲（FIFO）。
-/// 网络突发会让解码帧成簇到达——只显示最新帧会产生「冻结后跳帧」的卡顿，
-/// 故显示路径按序弹出（缓冲 ≥2 帧时）把突发摊平为均匀输出；缓冲仅 1 帧时
-/// 原地复用不弹出，回放延迟稳定在约 1 帧。扫码路径始终取最新帧（只关心当前画面）。
+/// 网络突发会让解码帧成簇到达——只显示最新帧会产生「冻结后跳帧」的卡顿。
+/// 显示路径采用**目标深度弹出**：缓冲攒到 DISPLAY_BUFFER_TARGET 帧才按序弹出
+/// （60Hz 轮询不会把缓冲立刻排空），稳定吸收约 3 帧的网络抖动；不足目标深度时
+/// 复用队首帧。扫码路径始终取最新帧（抢码只关心当前画面）。
 struct Frames {
     queue: std::collections::VecDeque<Frame>,
     /// 扫码消费者已消费的帧序号。
     scan_seen: u64,
 }
 
-const FRAME_BUFFER_MAX: usize = 3;
+/// 显示回放的目标缓冲深度（约 3 帧 ≈ 100~150ms 额外延迟）。
+const DISPLAY_BUFFER_TARGET: usize = 4;
+/// 队列硬上限（防极端突发撑爆内存；超出丢弃最旧帧）。
+const FRAME_BUFFER_MAX: usize = 6;
 
 struct LiveSession {
     stop: Arc<AtomicBool>,
@@ -326,8 +330,8 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> Option<Vec<
     if f.queue.is_empty() {
         return None;
     }
-    // 缓冲 ≥2 帧时按序弹出（摊平网络突发）；仅 1 帧时原地复用。
-    let popped = if f.queue.len() >= 2 {
+    // 攒到目标深度才按序弹出（不足时复用队首帧，60Hz 轮询不会排空缓冲）。
+    let popped = if f.queue.len() >= DISPLAY_BUFFER_TARGET {
         f.queue.pop_front()
     } else {
         None

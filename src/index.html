@@ -140,16 +140,17 @@
   .filter-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
   /* 直播源控件（房间号输入框）：占据筛选行右侧。 */
   .live-ctl { margin-left: auto; }
-  #liveRoom { width: 110px; height: 20px; }
-  /* 添加账号按钮：与账号行同规格（高度/边框/圆角/间距一致，仅文案居中）。 */
+  #liveRoom { width: 110px; height: 24px; }
+  /* 添加账号：账号列表的末项（随列表滚动），与账号行同规格，
+     透明底 + 虚线边框以示「可添加」而非账号本体。 */
   .acct-add {
-    width: 100%; height: 27px; flex: none; margin-top: 2px;
+    width: 100%; height: 27px; flex: none;
     display: flex; align-items: center; justify-content: center;
-    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    color: var(--muted); font: inherit; cursor: pointer;
+    background: transparent; border: 1px dashed var(--faint); border-radius: var(--radius);
+    color: var(--faint); font: inherit; cursor: pointer;
     transition: background 0.1s, border-color 0.1s, color 0.1s;
   }
-  .acct-add:hover { background: var(--hover); border-color: #555555; color: var(--text); }
+  .acct-add:hover { background: var(--hover); border-color: var(--muted); color: var(--text); }
 
   /* 账号区自身滚动：占据剩余空间、行高不压缩；滚动条只出现在账号区内部，
      不影响上方扫描区域（overscroll-behavior 阻断滚动链，避免外层出现滚动条）。 */
@@ -388,7 +389,6 @@
       </div>
     </div>
     <div class="acct-list" id="acctList"></div>
-    <button class="acct-add" id="btnAddAcct" title="添加账号">＋ 添加账号</button>
     <div class="startbar">
       <button id="btnStart" title="开始 / 停止扫码">
         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
@@ -818,9 +818,8 @@
     if (rows.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'acct-empty';
-      empty.textContent = '该渠道暂无账号，点击右上「+」登录';
+      empty.textContent = '该渠道暂无账号，点击下方「添加账号」登录';
       list.appendChild(empty);
-      return;
     }
     rows.forEach(({ ch, t }, idx) => {
       const key = acctKey(ch, t);
@@ -874,6 +873,24 @@
       });
       list.appendChild(row);
     });
+    // 「添加账号」作为列表末项（与账号同级、随列表滚动；不参与拖拽排序）。
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'acct-add';
+    add.textContent = '＋ 添加账号';
+    add.title = '添加账号';
+    add.addEventListener('click', () => {
+      if (filter === 'hypergryph') {
+        $('hyperPhone').value = '';
+        $('hyperCode').value = '';
+        $('hyperStatus').textContent = '';
+        $('hyperOverlay').hidden = false;
+        $('hyperPhone').focus();
+        return;
+      }
+      openLogin();
+    });
+    list.appendChild(add);
   }
 
   // 拖拽排序：把 dragUid 移到 targetUid 位置并保存。
@@ -1317,17 +1334,6 @@
   });
 
   // ---------- 按钮绑定 ----------
-  $('btnAddAcct').addEventListener('click', () => {
-    if (filter === 'hypergryph') {
-      $('hyperPhone').value = '';
-      $('hyperCode').value = '';
-      $('hyperStatus').textContent = '';
-      $('hyperOverlay').hidden = false;
-      $('hyperPhone').focus();
-      return;
-    }
-    openLogin();
-  });
   $('btnQrRefresh').addEventListener('click', () => {
     qrAutoRetry = 0;
     pollFails = 0;
