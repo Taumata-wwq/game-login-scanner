@@ -165,6 +165,10 @@ fn probe_decode_perf() {
 #[ignore = "真实网络探针，需手动运行"]
 fn probe_live() {
     use std::time::Duration;
+    let _ = env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .try_init();
+
     let room = std::env::var("LIVE_ROOM").unwrap_or_else(|_| "6".into());
     let rt = tokio::runtime::Runtime::new().expect("运行时");
     rt.block_on(async {
@@ -175,8 +179,9 @@ fn probe_live() {
                 // 模拟前端预览循环：33ms 轮询 3 秒，统计响应语义分布。
                 // 关键断言：会话存活期间不应出现 NoSession（否则前端会误回退屏幕）。
                 use game_login_scanner_lib::live::FrameOut;
+                // 12 秒轮询：给「原画超限 → 自动降级」留足时间。
                 let (mut frames, mut empty, mut no_session, mut scan_hits) = (0u32, 0u32, 0u32, 0u32);
-                for _ in 0..90 {
+                for _ in 0..360 {
                     match game_login_scanner_lib::live::crop_frame(0, 0, 0, 0, 320) {
                         FrameOut::Frame(_) => frames += 1,
                         FrameOut::Empty => empty += 1,
@@ -191,10 +196,304 @@ fn probe_live() {
                     "[OK] 3 秒轮询：完整帧 {frames} / 沿用上一帧 {empty} / 会话丢失 {no_session}（应恒为 0）"
                 );
                 println!("[OK] 扫码新帧采样命中 {scan_hits} 次");
+                println!("[INFO] 若 1080p60 原画触发超限降级，日志中会出现『清晰度降级到 qn=800』");
                 assert_eq!(no_session, 0, "会话存活期间不应出现 NoSession");
                 game_login_scanner_lib::live::stop();
             }
             Err(e) => println!("[FAIL] B站房间 {room}: {e}"),
         }
     });
+}
+
+/// 离线解码探针：对已保存的 FLV 文件用不同喂法解码，定位 1080p 流解码失败原因。
+/// 用法：DECODE_FILE=... cargo test --test probe probe_decode_file -- --ignored --nocapture
+#[test]
+#[ignore = "离线文件探针，需手动运行"]
+fn probe_decode_file() {
+    let path = std::env::var("DECODE_FILE").expect("需 DECODE_FILE 指向 FLV 文件");
+    let data = std::fs::read(&path).expect("读取文件失败");
+    let modes: [(u8, &str); 4] = [
+        (0, "Flush（当前实现，有缺陷）"),
+        (1, "NoFlush（末尾 flush_remaining 统一取帧）"),
+        (2, "NoFlush + 每 6 帧 flush_remaining（破坏参考）"),
+        (3, "NoFlush + 每帧 DecodeFrame2(NULL) 取帧（最终直播方案）"),
+    ];
+    for (mode, name) in modes {
+        let mut dec = if mode == 1 || mode == 2 || mode == 3 {
+            openh264::decoder::Decoder::with_api_config(
+                openh264::OpenH264API::from_source(),
+                openh264::decoder::DecoderConfig::new()
+                    .flush_after_decode(openh264::decoder::Flush::NoFlush),
+            )
+            .expect("解码器")
+        } else {
+            openh264::decoder::Decoder::new().expect("解码器")
+        };
+        let mut param_sets: Vec<u8> = Vec::new();
+        let mut stats = (0u32, 0u32, 0u32);
+        let mut i = 9 + 4usize;
+        while i + 11 <= data.len() {
+            let t = data[i];
+            let n = ((data[i + 1] as usize) << 16)
+                | ((data[i + 2] as usize) << 8)
+                | data[i + 3] as usize;
+            if i + 11 + n > data.len() {
+                break; // 文件截断（探针下载被截断）
+            }
+            if t == 9 && n >= 5 {
+                let body = &data[i + 11..i + 11 + n];
+                let first = body[0];
+                if first & 0x0F == 7 {
+                    match body[1] {
+                        0 => {
+                            param_sets =
+                                game_login_scanner_lib::live::avcc_config_to_annexb(&body[5..]);
+                            let _ = dec.decode(&param_sets);
+                        }
+                        1 => {
+                            let mut annexb = Vec::new();
+                            if mode == 0 && first >> 4 == 1 && !param_sets.is_empty() {
+                                annexb.extend_from_slice(&param_sets);
+                            }
+                            annexb.extend_from_slice(
+                                &game_login_scanner_lib::live::avcc_to_annexb(&body[5..]),
+                            );
+                            match dec.decode(&annexb) {
+                                Ok(Some(_)) => stats.0 += 1,
+                                Ok(None) => stats.1 += 1,
+                                Err(_) => stats.2 += 1,
+                            }
+                            if mode == 2 {
+                                if let Ok(batch) = dec.flush_remaining() {
+                                    stats.0 += batch.len() as u32;
+                                }
+                            }
+                            if mode == 3 {
+                                // 每帧 DecodeFrame2(NULL) 取回（保留参考链）。
+                                unsafe {
+                                    let mut dst = [std::ptr::null_mut::<u8>(); 3];
+                                    let mut bi = openh264_sys2::SBufferInfo::default();
+                                    let state = dec.raw_api().decode_frame2(
+                                        std::ptr::null(),
+                                        0,
+                                        dst.as_mut_ptr().cast(),
+                                        &mut bi,
+                                    );
+                                    if state == 0 && bi.iBufferStatus != 0 && !dst[0].is_null() {
+                                        stats.0 += 1;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            i += 11 + n + 4;
+        }
+        if mode == 1 || mode == 2 {
+            if let Ok(frames) = dec.flush_remaining() {
+                stats.0 += frames.len() as u32;
+            }
+        }
+        println!(
+            "[{name}] 出帧 {} / 无输出 {} / 错误 {}",
+            stats.0, stats.1, stats.2
+        );
+    }
+}
+
+/// 候选节点轮换探针：对每个 durl 候选用 HttpFlvReader（含 ALPN 修复）尝试连接，
+/// 统计 8 秒内视频 tag 数（≈fps），验证「多节点轮换 + ALPN」是否拿到正常流。
+#[test]
+#[ignore = "真实网络探针，需手动运行"]
+fn probe_rustls() {
+    use std::time::{Duration, Instant};
+    let room = std::env::var("LIVE_ROOM").unwrap_or_else(|_| "25013883".into());
+    let cands = game_login_scanner_lib::live::resolve_stream_sync(&room, 10000).expect("解析失败");
+    println!("候选 {} 个", cands.len());
+    for (i, (url, referer)) in cands.iter().enumerate() {
+        let host = url::Url::parse(url)
+            .map(|u| u.host_str().unwrap_or("?").to_string())
+            .unwrap_or_else(|_| "?".into());
+        println!("[节点 {}/{}] {host}", i + 1, cands.len());
+        // 注意：B站 durl URL 疑似一次性消费——先跑 curl 会让后续 HttpFlvReader
+        // 拿到失效地址（表现为 2 tag 即断）。故此处只测 HttpFlvReader，不加 curl 对照。
+        print!("  → ");
+        let mut reader = match game_login_scanner_lib::live::HttpFlvReader::connect(url, referer) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("connect 失败: {e}");
+                continue;
+            }
+        };
+        // 吃掉 FLV 头 13 字节。
+        let mut fh = [0u8; 13];
+        if std::io::Read::read_exact(&mut reader, &mut fh).is_err() {
+            println!("FLV 头读取失败");
+            continue;
+        }
+        let t0 = Instant::now();
+        let (mut tags, mut vids) = (0u32, 0u32);
+        let mut hdr = [0u8; 11];
+        let mut body = Vec::new();
+        while t0.elapsed() < Duration::from_secs(8) {
+            if std::io::Read::read_exact(&mut reader, &mut hdr).is_err() {
+                break;
+            }
+            let t = hdr[0];
+            let sz = ((hdr[1] as usize) << 16) | ((hdr[2] as usize) << 8) | hdr[3] as usize;
+            if sz > 8 * 1024 * 1024 {
+                break;
+            }
+            body.resize(sz + 4, 0);
+            if std::io::Read::read_exact(&mut reader, &mut body).is_err() {
+                break;
+            }
+            tags += 1;
+            if t == 9 {
+                vids += 1;
+            }
+        }
+        println!(
+            "tag {tags} / 视频 {vids} → {:.1} fps（8 秒）",
+            vids as f64 / 8.0
+        );
+    }
+}
+
+/// 指定 URL 直测 HttpFlvReader（绕开 resolve；用于对照 curl 行为）。
+#[test]
+#[ignore = "真实网络探针，需手动运行"]
+fn probe_url() {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let url = std::env::var("STREAM_URL").expect("需 STREAM_URL");
+    let referer =
+        std::env::var("STREAM_REFERER").unwrap_or_else(|_| "https://live.bilibili.com/6".into());
+    let mut reader =
+        game_login_scanner_lib::live::HttpFlvReader::connect(&url, &referer).expect("connect 失败");
+    let t0 = Instant::now();
+    let mut tags = 0u32;
+    let mut vids = 0u32;
+    let mut hdr = [0u8; 11];
+    let mut body = Vec::new();
+    while t0.elapsed() < Duration::from_secs(8) {
+        match reader.read_exact(&mut hdr) {
+            Ok(()) => {}
+            Err(e) => {
+                println!("read err: {e}");
+                break;
+            }
+        }
+        let t = hdr[0];
+        let sz = ((hdr[1] as usize) << 16) | ((hdr[2] as usize) << 8) | hdr[3] as usize;
+        if sz > 8 * 1024 * 1024 {
+            println!("非法 size {sz}");
+            break;
+        }
+        body.resize(sz + 4, 0);
+        if reader.read_exact(&mut body).is_err() {
+            println!("body err");
+            break;
+        }
+        tags += 1;
+        if t == 9 {
+            vids += 1;
+        }
+    }
+    println!(
+        "[RESULT] 8 秒 tag {tags} / 视频 {vids} → {:.1} fps",
+        vids as f64 / 8.0
+    );
+}
+
+/// 批量直播探针：对多个真实直播间验证「连接 + 持续出帧 + 扫码帧供应」稳定性。
+/// 房间来源：LIVE_ROOMS 环境变量（逗号分隔）或 target/rooms.txt（每行一个）。
+/// 用法：cargo test --test probe probe_live_batch -- --ignored --nocapture
+#[test]
+#[ignore = "真实网络批量探针，需手动运行"]
+fn probe_live_batch() {
+    use std::time::{Duration, Instant};
+    let _ = env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .try_init();
+    let rooms: Vec<String> = std::env::var("LIVE_ROOMS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            std::fs::read_to_string("target/rooms.txt")
+                .unwrap_or_default()
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        });
+    let limit: usize = std::env::var("LIVE_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    println!("待测房间 {} 个（取前 {limit}）", rooms.len());
+    let rt = tokio::runtime::Runtime::new().expect("运行时");
+    let (mut ok, mut fail) = (0u32, 0u32);
+    for room in rooms.iter().take(limit) {
+        let success = rt.block_on(async {
+            // 单独计时连接（start 阻塞至首帧）。
+            let tc = Instant::now();
+            let connected = game_login_scanner_lib::live::start(room.clone()).await;
+            let connect_ms = tc.elapsed().as_millis();
+            match connected {
+                Ok((w, h)) => {
+                    use game_login_scanner_lib::live::FrameOut;
+                    // 预览 30fps（16ms）+ 扫码 400ms 节流（真实 scan.rs 行为），跑 5 秒。
+                    let (mut frames, mut empty, mut ns) = (0u32, 0u32, 0u32);
+                    let (mut hits, mut miss) = (0u32, 0u32);
+                    let mut last_scan = Instant::now() - Duration::from_secs(1);
+                    let run_until = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < run_until {
+                        match game_login_scanner_lib::live::crop_frame(0, 0, 0, 0, 320) {
+                            FrameOut::Frame(_) => frames += 1,
+                            FrameOut::Empty => empty += 1,
+                            FrameOut::NoSession => ns += 1,
+                        }
+                        // 扫码按 400ms 节流（与 scan.rs 一致）。
+                        if last_scan.elapsed() >= Duration::from_millis(400) {
+                            last_scan = Instant::now();
+                            if let Some((rgb, sw, sh)) =
+                                game_login_scanner_lib::live::take_scan_frame()
+                            {
+                                hits += 1;
+                                let _ = game_login_scanner_lib::qr::decode_rgb(&rgb, sw, sh);
+                            } else {
+                                miss += 1;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(16)).await;
+                    }
+                    let total = hits + miss;
+                    println!(
+                        "[OK] {room} {w}x{h} 连接 {connect_ms}ms | 完整帧 {frames} 沿用 {empty} 丢失 {ns} | 扫码帧 {hits}/{total} ({:.0}%)",
+                        hits as f64 * 100.0 / total.max(1) as f64
+                    );
+                    game_login_scanner_lib::live::stop();
+                    true
+                }
+                Err(e) => {
+                    println!("[FAIL] {room}: {e}（{connect_ms}ms）");
+                    false
+                }
+            }
+        });
+        if success {
+            ok += 1
+        } else {
+            fail += 1
+        }
+    }
+    println!("== 汇总：成功 {ok} / 失败 {fail} ==");
 }

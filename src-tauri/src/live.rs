@@ -6,7 +6,8 @@
 //! - 预览：`crop_frame` 按前端视口裁剪降采样（等价屏幕预览协议）；
 //! - 扫码：`take_scan_frame` 取新帧走既有二维码识别管线（seq 去重）。
 
-use std::io::Read;
+use std::io::{Read, Write};
+use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -22,7 +23,7 @@ const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 // ---------- 流地址解析 ----------
 
 /// 解析 B站直播间为 http-flv 拉流地址，返回 (url, referer)。
-async fn resolve_stream(room: &str) -> Result<(String, String), String> {
+async fn resolve_stream(room: &str, qn: u32) -> Result<(String, String), String> {
     {
         {
             let headers = vec![
@@ -33,7 +34,7 @@ async fn resolve_stream(room: &str) -> Result<(String, String), String> {
                 ),
             ];
             let url = format!(
-                "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn=10000&platform=web&ptype=16"
+                "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn={qn}&platform=web&ptype=16"
             );
             let resp = crate::http::get(&url, headers.clone())
                 .await
@@ -51,6 +52,12 @@ async fn resolve_stream(room: &str) -> Result<(String, String), String> {
                     .unwrap_or("接口错误");
                 return Err(format!("B站直播间 {room} 获取失败: {msg}"));
             }
+            // 未开播快速失败（避免等 15s 首帧超时）。
+            if let Some(ls) = v["data"]["live_status"].as_i64() {
+                if ls != 1 {
+                    return Err(format!("B站直播间 {room} 未开播"));
+                }
+            }
             // 首选：v2 结构化流（url_list 非空时）。
             if let Some(u) = parse_bili_flv(&v) {
                 return Ok((u, format!("https://live.bilibili.com/{room}")));
@@ -62,7 +69,7 @@ async fn resolve_stream(room: &str) -> Result<(String, String), String> {
                 .map(|x| x.to_string())
                 .unwrap_or_else(|| room.to_string());
             let url2 = format!(
-                "https://api.live.bilibili.com/room/v1/Room/playUrl?cid={real_room}&qn=10000&platform=web"
+                "https://api.live.bilibili.com/room/v1/Room/playUrl?cid={real_room}&qn={qn}&platform=web"
             );
             let resp2 = crate::http::get(&url2, headers.clone())
                 .await
@@ -89,12 +96,12 @@ async fn resolve_stream(room: &str) -> Result<(String, String), String> {
 
 /// 同步版 B站流地址解析：解码线程重连时调用（每次拿全新 expires 的地址，
 /// 自愈 CDN 临时 404 与地址过期——固定 URL 重连只会反复失败）。
-fn resolve_stream_sync(room: &str) -> Result<(String, String), String> {
+pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>, String> {
     let url = format!(
-        "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn=10000&platform=web&ptype=16"
+        "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn={qn}&platform=web&ptype=16"
     );
     let referer_owned = format!("https://live.bilibili.com/{room}");
-    let v: Value = stream_agent()
+    let v: Value = api_agent()
         .get(&url)
         .set("User-Agent", BROWSER_UA)
         .set("Referer", &referer_owned)
@@ -104,17 +111,24 @@ fn resolve_stream_sync(room: &str) -> Result<(String, String), String> {
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .ok_or_else(|| "B站直播接口响应解析失败".to_string())?;
+    // 未开播快速失败：playurl 响应 data.live_status != 1 时无流，若继续走
+    // durl 解析会拿到占位/失效地址，导致解码线程反复重连直到 15s 超时。
+    if let Some(ls) = v["data"]["live_status"].as_i64() {
+        if ls != 1 {
+            return Err(format!("B站直播间 {room} 未开播"));
+        }
+    }
     if let Some(u) = parse_bili_flv(&v) {
-        return Ok((u, referer_owned.clone()));
+        return Ok(vec![(u, referer_owned.clone())]);
     }
     let real_room = v["data"]["room_id"]
         .as_i64()
         .map(|x| x.to_string())
         .unwrap_or_else(|| room.to_string());
     let url2 = format!(
-        "https://api.live.bilibili.com/room/v1/Room/playUrl?cid={real_room}&qn=10000&platform=web"
+        "https://api.live.bilibili.com/room/v1/Room/playUrl?cid={real_room}&qn={qn}&platform=web"
     );
-    let v2: Value = stream_agent()
+    let v2: Value = api_agent()
         .get(&url2)
         .set("User-Agent", BROWSER_UA)
         .set("Referer", &referer_owned)
@@ -127,9 +141,35 @@ fn resolve_stream_sync(room: &str) -> Result<(String, String), String> {
     if v2.get("code").and_then(|x| x.as_i64()) != Some(0) {
         return Err(format!("B站直播间 {room} 未开播或获取失败"));
     }
-    parse_bili_durl(&v2)
-        .ok_or_else(|| format!("B站直播间 {room} 未找到可用的 FLV 流（可能未开播）"))
-        .map(|u| (u, format!("https://live.bilibili.com/{room}")))
+    // durl 列表 = 多个 CDN 节点候选：固定用第一个可能撞上慢/故障节点，
+    // 全部收下由解码线程轮换连接（慢流/断流自动换节点）。
+    let durls = v2["data"]["durl"]
+        .as_array()
+        .ok_or_else(|| format!("B站直播间 {room} 未找到可用的 FLV 流（可能未开播）"))?;
+    let referer = format!("https://live.bilibili.com/{room}");
+    let mut out: Vec<(String, String)> = durls
+        .iter()
+        .filter_map(|u| u["url"].as_str())
+        .filter(|s| !s.is_empty())
+        .map(|u| (u.to_string(), referer.clone()))
+        .collect();
+    if out.is_empty() {
+        return Err(format!(
+            "B站直播间 {room} 未找到可用的 FLV 流（可能未开播）"
+        ));
+    }
+    // 按 host 去重，避免同一节点重复。
+    out.dedup_by(|a, b| host_of(&a.0) == host_of(&b.0));
+    Ok(out)
+}
+
+/// 从 URL 中提取 CDN 主机名（节点去重用）。
+fn host_of(url: &str) -> &str {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    rest.split('/').next().unwrap_or(rest)
 }
 
 /// 从 getRoomPlayInfo 响应提取 http_stream / flv / avc 拉流地址（base_url + host）。
@@ -258,22 +298,39 @@ struct Frame {
     rgba: Vec<u8>,
 }
 
-/// 帧总线：小型回放缓冲（FIFO）。
-/// 网络突发会让解码帧成簇到达——只显示最新帧会产生「冻结后跳帧」的卡顿，
-/// 且「到达即弹出」会把网络抖动直接透传给显示（缓冲再深也无效）。
-/// 显示路径采用**固定节拍弹出**：前端 30fps 轮询，每次轮询至多弹出一个最旧帧；
-/// 显示间隔完全由轮询时钟决定（均匀 30fps），到达抖动被队列吸收。
-/// 弹出速率(30) ≥ 到达速率(常见 24~30) 时延迟极小；到达更快时队列涨到
-/// FRAME_BUFFER_MAX（≈200ms 缓冲）后均匀丢帧，显示仍是平滑 30fps。
-/// 扫码路径始终取最新帧（抢码只关心当前画面）。
+/// 帧总线：小型回放缓冲（FIFO）+ 独立的最新帧。
+///
+/// **两条消费路径必须解耦**：
+/// - 显示路径（crop_frame，前端 30fps 轮询）破坏性弹出队列最旧帧做节拍控制；
+/// - 扫码路径（take_scan_frame，约 400ms 一次）只关心「当前最新画面」。
+///
+/// 早期设计让扫码也读同一队列的 back()：低帧率流（720p ~10fps）下显示弹出(30fps)
+/// 远快于到达(10fps)，队列常被榨空 → 扫码永远取不到帧（实测 0%）。现在解码线程
+/// 同时维护 latest（Arc 共享，零拷贝），扫码只读它，与显示解耦。
 struct Frames {
-    queue: std::collections::VecDeque<Frame>,
-    /// 扫码消费者已消费的帧序号。
-    scan_seen: u64,
+    queue: std::collections::VecDeque<Arc<Frame>>,
+    /// 最新一帧（解码线程每次产出即更新；扫码专用，不受显示弹出影响）。
+    latest: Option<Arc<Frame>>,
+    /// 上次扫码输出的 RGB 缓存。无新帧时复用，保证扫码供帧率 100%——
+    /// 低帧率流（如 ~2fps）不会因某轮 400ms 窗口内无新帧而「停一拍」
+    /// （实测 100x178 流会丢 15%~23% 的采样轮次）。
+    scan_cache: Option<ScanCache>,
+    /// 单调递增的帧序号。**不能**用「队列尾 seq + 1」——队列空时那会导致
+    /// 新帧 seq 恒为 1，使 LAST_SENT 去重把不同帧误判为同一帧（预览卡成 1 帧）。
+    next_seq: u64,
 }
 
 /// 队列硬上限（≈200ms 显示缓冲；防极端突发撑爆内存，超出丢弃最旧帧）。
 const FRAME_BUFFER_MAX: usize = 6;
+
+/// 扫码 RGB 缓存：键为 (帧序号, 裁剪区)，视口不变且无新帧时直接复用。
+struct ScanCache {
+    seq: u64,
+    crop: Option<(u32, u32, u32, u32)>,
+    rgb: Vec<u8>,
+    w: u32,
+    h: u32,
+}
 
 /// 上次发送的预览帧标识：(seq, 裁剪区, 输出宽)。相同则返回短响应。
 type SentKey = (u64, (u32, u32, u32, u32), u32);
@@ -300,16 +357,19 @@ pub async fn start(room: String) -> Result<(u32, u32), String> {
     *LAST_SENT.lock().unwrap_or_else(PoisonError::into_inner) = None;
     // 初始校验：房间可解析、可开播（失败快速反馈给前端）；
     // 实际拉流地址由解码线程每次连接/重连时重新获取（新 expires，自愈临时故障）。
-    resolve_stream(&room).await?;
+    resolve_stream(&room, 10000).await?;
     let stop = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(Mutex::new(Frames {
         queue: std::collections::VecDeque::new(),
-        scan_seen: 0,
+        latest: None,
+        scan_cache: None,
+        next_seq: 0,
     }));
-    let (room2, stop2, frames2) = (room.clone(), stop.clone(), frames.clone());
+    let fail: FailFlag = Arc::new(Mutex::new(None));
+    let (room2, stop2, frames2, fail2) = (room.clone(), stop.clone(), frames.clone(), fail.clone());
     std::thread::Builder::new()
         .name("live-decode".into())
-        .spawn(move || decode_loop(room2, stop2, frames2))
+        .spawn(move || decode_loop(room2, stop2, frames2, fail2))
         .map_err(|e| format!("解码线程启动失败: {e}"))?;
     // 等首帧（流建立 + 关键帧到达，通常 1~4 秒）。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -331,6 +391,11 @@ pub async fn start(room: String) -> Result<(u32, u32), String> {
         }
         if stop.load(Ordering::SeqCst) {
             return Err("直播会话已被取消".to_string());
+        }
+        // 解码线程回报致命失败：立即返回明确错误，不必干等 15 秒超时。
+        if let Some(reason) = fail.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            stop.store(true, Ordering::SeqCst);
+            return Err(reason);
         }
         if tokio::time::Instant::now() >= deadline {
             stop.store(true, Ordering::SeqCst);
@@ -387,15 +452,12 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
     let s = live.as_ref()?;
     let view = *LAST_VIEW.lock().unwrap_or_else(PoisonError::into_inner);
     let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
-    let (seq, w, h) = {
-        let back = f.queue.back()?;
-        if back.seq == 0 || f.scan_seen == back.seq {
-            return None;
-        }
-        (back.seq, back.w, back.h)
-    };
-    f.scan_seen = seq;
-    let back = f.queue.back().unwrap();
+    // 读独立的 latest（不是显示队列）——显示弹出不影响扫码取帧。
+    let frame = f.latest.clone()?;
+    if frame.seq == 0 {
+        return None;
+    }
+    let (fw, fh) = (frame.w, frame.h);
     let crop = view.and_then(|(x, y, w, h)| {
         if w <= 0 || h <= 0 {
             return None;
@@ -406,17 +468,30 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
         let ch0 = (h.min(h - y0)).max(2) as u32;
         Some((x0 as u32, y0 as u32, cw0, ch0))
     });
-    let (rgb, w, h) = match crop {
-        Some(c) => rgba_crop_half(&back.rgba, w, c),
+    // 无新帧且缓存命中（视口未变）：复用上次 RGB，保证供帧率 100%。
+    if let Some(c) = &f.scan_cache {
+        if c.seq == frame.seq && c.crop == crop {
+            return Some((c.rgb.clone(), c.w, c.h));
+        }
+    }
+    let (rgb, ow, oh) = match crop {
+        Some(c) => rgba_crop_half(&frame.rgba, fw, c),
         None => {
-            let mut rgb = crate::qr::rgba_to_rgb(&back.rgba);
-            let (w, h) = (w / 2, h / 2);
+            let mut rgb = crate::qr::rgba_to_rgb(&frame.rgba);
+            let (hw, hh) = (fw / 2, fh / 2);
             // 全帧同样半尺寸，保持扫码成本恒定。
-            downsample_rgb_half(&mut rgb, w * 2, h * 2, w, h);
-            (rgb, w, h)
+            downsample_rgb_half(&mut rgb, fw, fh, hw, hh);
+            (rgb, hw, hh)
         }
     };
-    Some((rgb, w, h))
+    f.scan_cache = Some(ScanCache {
+        seq: frame.seq,
+        crop,
+        rgb: rgb.clone(),
+        w: ow,
+        h: oh,
+    });
+    Some((rgb, ow, oh))
 }
 
 /// RGB 2×2 面积平均（就地降采样到 ow×oh）。
@@ -480,6 +555,7 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
     if f.w == 0 || f.h == 0 {
         return FrameOut::Empty;
     }
+    let f = f.clone();
     let (fw, fh) = (f.w as i32, f.h as i32);
     let (cx, cy, cw, ch) = if w > 0 && h > 0 {
         let x0 = x.clamp(0, fw - 1);
@@ -560,43 +636,94 @@ fn downsample_rgba(
 
 // ---------- 解码线程 ----------
 
-fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>) {
+/// 清晰度降级链：原画 → 高清 → 标清 → 流畅。
+/// B站 1080p60 原画多为高码率高 profile（openh264 可能解码失败或线程跟不上），
+/// 低清晰度档普遍是普通 AVC，解码轻松且扫码足够（直播抢码不需要高清）。
+const QN_CHAIN: [u32; 4] = [10000, 800, 450, 150];
+/// 解码持续失败的容忍次数：超过则降级清晰度重试。
+const DECODE_FAIL_LIMIT: u32 = 40;
+
+/// 解码线程向 start() 回报的致命失败原因（未开播 / 解码不支持 / 连续重连失败）。
+/// start() 轮询它以便快速返回明确错误，而非干等 15 秒首帧超时。
+type FailFlag = Arc<Mutex<Option<String>>>;
+
+/// 记录致命失败并让解码线程返回。
+fn set_fail(fail: &FailFlag, reason: &str) {
+    *fail.lock().unwrap_or_else(PoisonError::into_inner) = Some(reason.to_string());
+}
+
+fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, fail: FailFlag) {
     let mut fails = 0u32;
-    while !stop.load(Ordering::SeqCst) {
-        // 每次连接/重连都重新解析流地址：CDN 临时 404 或地址过期时拿到全新地址自愈。
-        let (url, referer) = match resolve_stream_sync(&room) {
-            Ok(u) => u,
-            Err(e) => {
-                if stop.load(Ordering::SeqCst) {
-                    return;
+    let mut qn_idx = 0usize;
+    // 候选节点池（多 CDN 节点轮换：固定一个可能撞上慢/故障节点）。
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    let mut cand_used = 0usize;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if candidates.is_empty() {
+            candidates = match resolve_stream_sync(&room, QN_CHAIN[qn_idx]) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("解析流地址失败: {e}");
+                    fails += 1;
+                    if fails > 4 {
+                        log::error!("直播流连续解析失败，会话关闭");
+                        set_fail(&fail, &format!("B站直播间 {room} 流地址解析失败：{e}"));
+                        remove_session_if(&frames);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(400));
+                    continue;
                 }
-                log::warn!("重连解析流地址失败: {e}");
-                fails += 1;
-                if fails > 4 {
-                    log::error!("直播流连续重连失败，会话关闭（约 2 秒）");
-                    remove_session_if(&frames);
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(400));
-                continue;
-            }
-        };
+            };
+            cand_used = 0;
+        }
+        if cand_used >= candidates.len() {
+            // 本轮候选全部失败：重新解析（新 expires 自愈 + 轮换节点）。
+            candidates.clear();
+            continue;
+        }
+        let (url, referer) = candidates[cand_used].clone();
+        cand_used += 1;
+        log::info!("连接直播流节点 {cand_used}/{} …", candidates.len());
         match decode_session(&url, &referer, &stop, &frames) {
             Ok(()) => return, // 收到停止信号
+            // 解码器持续失败（编码不兼容/解码跟不上）：降级清晰度换低码率流重试。
+            Err(e) if e.starts_with("H.264 解码持续失败") => {
+                if qn_idx + 1 < QN_CHAIN.len() {
+                    qn_idx += 1;
+                    fails = 0;
+                    candidates.clear();
+                    log::info!("清晰度降级到 qn={} 重试", QN_CHAIN[qn_idx]);
+                    continue;
+                }
+                log::error!("最低清晰度仍无法解码，会话关闭");
+                set_fail(
+                    &fail,
+                    &format!("B站直播间 {room} 编码格式不受支持（openh264 解码失败）"),
+                );
+                remove_session_if(&frames);
+                return;
+            }
             Err(e) => log::warn!("直播流断开: {e}"),
         }
         if stop.load(Ordering::SeqCst) {
             return;
         }
         fails += 1;
-        // 下播时 CDN 会快速关闭连接，重连也立即失败——快速放弃并移除会话，
-        // 让预览/扫码自动回退屏幕（前端检测到空帧响应即切换）。
-        if fails > 4 {
-            log::error!("直播流连续重连失败，会话关闭（约 2 秒）");
+        // 下播时 CDN 会快速关闭连接，重连也立即失败——快速放弃并移除会话。
+        if fails > 8 {
+            log::error!("直播流连续重连失败，会话关闭");
+            set_fail(
+                &fail,
+                &format!("B站直播间 {room} 连接失败（CDN 节点均不可用）"),
+            );
             remove_session_if(&frames);
             return;
         }
-        log::info!("直播流重连（第 {fails} 次）…");
+        log::info!("直播流重连（第 {fails} 次，尝试下一节点）…");
         std::thread::sleep(Duration::from_millis(400));
     }
 }
@@ -612,8 +739,11 @@ fn remove_session_if(frames: &Arc<Mutex<Frames>>) {
     }
 }
 
-/// 流式读取 agent：只设连接/读超时（不设整体超时——拉流是长连接）。
-fn stream_agent() -> &'static ureq::Agent {
+/// 慢流判定读超时：CDN 节点 3 秒不推数据 → read 超时 → 换节点。
+const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 普通 API 请求 agent（一次性 GET，超时 20s；流式拉流不走这里）。
+fn api_agent() -> &'static ureq::Agent {
     static A: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     A.get_or_init(|| {
         let connector = std::sync::Arc::new(
@@ -623,12 +753,242 @@ fn stream_agent() -> &'static ureq::Agent {
         );
         ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(10))
-            .timeout_read(Duration::from_secs(30))
+            .timeout(Duration::from_secs(20))
             .tls_connector(connector)
             .build()
     })
 }
 
+/// 手写 HTTP/1.1 流式读取（http-flv 用）。
+///
+/// 为什么不用 ureq：实测 ureq 2.12 的 `into_reader()` 对 B站 http-flv 的
+/// chunked 长连接会卡死（10 秒仅读到 2 个 tag，curl 同流 60fps 正常）。
+/// 这里手写 GET + chunked 解码，读超时兼作慢流检测。
+pub struct HttpFlvReader {
+    stream: Box<dyn Read>,
+    /// 响应是否用 chunked 传输编码。
+    /// **关键**：B站不同 CDN 服务器行为不一——JSP3 返回 chunked，Tengine 返回
+    /// 裸 FLV（Connection: close 直出）。必须按响应头区分，否则裸流会被误当
+    /// chunk 头解析（"FLV\x01" 被当 hex 大小行）而读不出任何数据。
+    chunked: bool,
+    /// 当前 chunk 剩余字节（仅 chunked 模式使用）。
+    chunk_left: usize,
+    done: bool,
+}
+
+impl Read for HttpFlvReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.done {
+            return Ok(0);
+        }
+        // 裸 FLV 模式：直接透传底层流（Connection: close 直出，读到 EOF 为止）。
+        if !self.chunked {
+            return self.stream.read(buf);
+        }
+        if self.chunk_left == 0 {
+            // 读 chunk 大小行（hex + CRLF）。
+            let mut size_line = Vec::with_capacity(16);
+            loop {
+                let mut b = [0u8; 1];
+                if self.stream.read(&mut b)? == 0 {
+                    return Ok(0);
+                }
+                size_line.push(b[0]);
+                if size_line.ends_with(b"\r\n") {
+                    break;
+                }
+                if size_line.len() > 32 {
+                    return Err(std::io::Error::other("chunk 大小行过长"));
+                }
+            }
+            let hex = String::from_utf8_lossy(&size_line[..size_line.len() - 2]);
+            let size = usize::from_str_radix(hex.trim(), 16).map_err(std::io::Error::other)?;
+            if size == 0 {
+                // 终止 chunk：吃掉结尾 CRLF。
+                let mut crlf = [0u8; 2];
+                let _ = self.stream.read(&mut crlf)?;
+                self.done = true;
+                return Ok(0);
+            }
+            self.chunk_left = size;
+        }
+        let n = buf.len().min(self.chunk_left);
+        let got = self.stream.read(&mut buf[..n])?;
+        self.chunk_left -= got;
+        if self.chunk_left == 0 {
+            // chunk 数据后的 CRLF。
+            let mut crlf = [0u8; 2];
+            let _ = self.stream.read(&mut crlf)?;
+        }
+        Ok(got)
+    }
+}
+
+impl HttpFlvReader {
+    /// 连接 https://... 并发起 GET，返回已就绪的流式读取器（响应头已消费）。
+    ///
+    /// **跟随重定向**：B站 CDN 常返回 302 跳转到实际流节点（curl -L 同行为）。
+    /// 早期实现把 302 当"节点不可用"直接失败，导致永远读不到流。
+    pub fn connect(url: &str, referer: &str) -> Result<Self, String> {
+        let mut current = url.to_string();
+        // 302 跳转链一般 1~2 跳，给足 6 次冗余。
+        for _ in 0..6 {
+            let parsed = url::Url::parse(&current).map_err(|e| format!("流地址解析失败: {e}"))?;
+            let host = parsed
+                .host_str()
+                .ok_or_else(|| "流地址缺少主机名".to_string())?
+                .to_string();
+            let port = parsed.port_or_known_default().unwrap_or(443);
+            // 连接超时：重定向到不可达 host 时避免永久阻塞（TcpStream::connect 无超时）。
+            let addr = (host.as_str(), port)
+                .to_socket_addrs()
+                .map_err(|e| format!("解析 CDN 主机失败: {e}"))?
+                .next()
+                .ok_or_else(|| "CDN 主机无地址".to_string())?;
+            let tcp = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+                .map_err(|e| format!("连接直播 CDN 失败: {e}"))?;
+            tcp.set_nodelay(true).ok();
+            tcp.set_read_timeout(Some(STREAM_READ_TIMEOUT))
+                .map_err(|e| format!("设置读超时失败: {e}"))?;
+            // rustls：纯 Rust TLS。Windows schannel（native-tls）对该 CDN 长连接
+            // 会出现读乱码/EOF（同请求 curl / OpenSSL / rustls 均正常拿到 FLV）。
+            let mut store = rustls::RootCertStore::empty();
+            for cert in rustls_native_certs::load_native_certs().certs {
+                let _ = store.add(cert);
+            }
+            let mut config = rustls::ClientConfig::builder()
+                .with_root_certificates(store)
+                .with_no_client_auth();
+            // 关键：显式声明 ALPN = http/1.1。
+            // rustls 默认不发 ALPN 扩展，B站 CDN（openresty）对无 ALPN 的 ClientHello
+            // 会走 h2/特殊路径或直接拒绝（表现为响应头乱码/EOF）；curl 默认发
+            // "h2,http/1.1"，故正常。这里只声明 http/1.1（本模块手写 HTTP/1.1 文本请求）。
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let conn = rustls::ClientConnection::new(
+                std::sync::Arc::new(config),
+                rustls::pki_types::ServerName::try_from(host.clone())
+                    .map_err(|_| "服务器名无效".to_string())?,
+            )
+            .map_err(|e| format!("TLS 初始化失败: {e}"))?;
+            let mut tls = rustls::StreamOwned::new(conn, tcp);
+            let path = parsed.path().to_string()
+                + parsed
+                    .query()
+                    .map(|q| format!("?{q}"))
+                    .as_deref()
+                    .unwrap_or("");
+            write!(
+                tls,
+                "GET {path} HTTP/1.1
+Host: {host}
+User-Agent: {BROWSER_UA}
+Referer: {referer}
+Accept: */*
+Connection: keep-alive
+
+"
+            )
+            .map_err(|e| format!("发送请求失败: {e}"))?;
+            // rustls Writer 有内部缓冲：必须 flush 请求才会真正发出。
+            tls.flush()
+                .map_err(|e| format!("发送请求失败(flush): {e}"))?;
+            // 读响应头直到空行（缓冲式读取：一次读一块，避免逐字节 syscall 与
+            // 单字节读在慢首包下的脆弱性）。
+            let mut headers = Vec::with_capacity(1024);
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = tls
+                    .read(&mut buf)
+                    .map_err(|e| format!("读取响应头失败: {e}"))?;
+                if n == 0 {
+                    return Err("响应中断".to_string());
+                }
+                headers.extend_from_slice(&buf[..n]);
+                if headers.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if headers.len() > 16 * 1024 {
+                    return Err("响应头过大".to_string());
+                }
+            }
+            // 只保留响应头部分（缓冲可能多读了首块 body 的前几个字节）。
+            let hdr_end = headers
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|p| p + 4)
+                .unwrap_or(headers.len());
+            let leftover: Vec<u8> = headers[hdr_end..].to_vec();
+            headers.truncate(hdr_end);
+            // 状态行解析：HTTP/1.x <code>。
+            let status = headers
+                .split(|&b| b == b' ')
+                .nth(1)
+                .and_then(|s| std::str::from_utf8(s).ok())
+                .and_then(|s| s.parse::<u16>().ok())
+                .ok_or_else(|| {
+                    format!(
+                        "无法解析 HTTP 状态行: {}",
+                        String::from_utf8_lossy(&headers[..headers.len().min(80)])
+                    )
+                })?;
+            // 3xx 重定向：读 Location 并跟随（B站 CDN 常态）。
+            if (300..400).contains(&status) {
+                let loc = headers
+                    .split(|&b| b == b'\n')
+                    .find_map(|line| {
+                        let line = line.strip_suffix(b"\r").unwrap_or(line);
+                        let (k, v) = line.split_at(line.iter().position(|&b| b == b':')?);
+                        if k.eq_ignore_ascii_case(b"location") {
+                            Some(v[1..].trim_ascii())
+                        } else {
+                            None
+                        }
+                    })
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .ok_or_else(|| format!("HTTP {status} 重定向缺少 Location 头"))?;
+                current = parsed
+                    .join(loc)
+                    .map_err(|e| format!("重定向地址解析失败: {e}"))?
+                    .to_string();
+                continue;
+            }
+            if status != 200 {
+                return Err(format!(
+                    "直播流 HTTP {status}: {}",
+                    String::from_utf8_lossy(&headers[..headers.len().min(120)])
+                ));
+            }
+            // 依响应头判定传输编码：有 Transfer-Encoding: chunked 才走 chunked 解析。
+            let chunked = headers
+                .split(|&b| b == b'\n')
+                .filter_map(|line| {
+                    let line = line.strip_suffix(b"\r").unwrap_or(line);
+                    let (k, v) = line.split_at(line.iter().position(|&b| b == b':')?);
+                    Some((k, v[1..].trim_ascii()))
+                })
+                .any(|(k, v)| {
+                    k.eq_ignore_ascii_case(b"transfer-encoding")
+                        && v.eq_ignore_ascii_case(b"chunked")
+                });
+            log::info!(
+                "直播流已连接（传输编码: {}）",
+                if chunked { "chunked" } else { "raw" }
+            );
+            // 响应头读取时多读的 body 前置字节拼回流**最前端**（流级别前缀），
+            // 让它们照常进入后续解析——直接透传会破坏 chunk 头/FLV 边界。
+            let stream = std::io::Cursor::new(leftover).chain(tls);
+            return Ok(HttpFlvReader {
+                stream: Box::new(stream),
+                chunked,
+                chunk_left: 0,
+                done: false,
+            });
+        }
+        Err("重定向次数过多（>6）".to_string())
+    }
+}
+
+/// 从流中精确读取 n 字节（FLV tag 头/体用）；EOF/超时返回「流已结束」。
 fn read_exact(reader: &mut impl Read, buf: &mut Vec<u8>, n: usize) -> Result<(), String> {
     buf.resize(n, 0);
     reader
@@ -636,24 +996,13 @@ fn read_exact(reader: &mut impl Read, buf: &mut Vec<u8>, n: usize) -> Result<(),
         .map_err(|_| "流已结束".to_string())
 }
 
-/// 一次拉流会话：连接 → FLV 逐 Tag 解复用 → H.264 解码 → 写共享帧。
-/// 返回 Ok(()) 表示因停止信号退出；Err 表示连接/解析异常（上层重连）。
 fn decode_session(
     url: &str,
     referer: &str,
     stop: &AtomicBool,
     frames: &Arc<Mutex<Frames>>,
 ) -> Result<(), String> {
-    let req = stream_agent()
-        .get(url)
-        .set("User-Agent", BROWSER_UA)
-        .set("Referer", referer);
-    let resp = match req.call() {
-        Ok(r) => r,
-        Err(ureq::Error::Status(code, _)) => return Err(format!("HTTP {code}")),
-        Err(e) => return Err(format!("{e}")),
-    };
-    let mut reader = resp.into_reader();
+    let mut reader = HttpFlvReader::connect(url, referer)?;
 
     // FLV 头（9 字节）+ PreviousTagSize0（4 字节）。
     let mut hdr = Vec::new();
@@ -662,13 +1011,39 @@ fn decode_session(
         return Err("响应不是 FLV 流".to_string());
     }
 
-    let mut decoder =
-        openh264::decoder::Decoder::new().map_err(|e| format!("解码器初始化失败: {e}"))?;
-    let mut param_sets: Vec<u8> = Vec::new(); // SPS/PPS（Annex-B）
+    // 关键：NoFlush 模式。默认每帧 decode 后强制 flush 会把参考帧链冲掉，
+    // P 帧全部因无参考失败（实测 1080p60 流仅解出 110/1261 帧）；NoFlush 保留
+    // 参考链，配合每 FLUSH_FRAME_INTERVAL 帧 flush_remaining 批量取帧（实测 1259/1261）。
+    let mut decoder = openh264::decoder::Decoder::with_api_config(
+        openh264::OpenH264API::from_source(),
+        openh264::decoder::DecoderConfig::new()
+            .flush_after_decode(openh264::decoder::Flush::NoFlush),
+    )
+    .map_err(|e| format!("解码器初始化失败: {e}"))?;
+    let mut dec_fails = 0u32;
+    let (mut out_ok, mut out_none, mut out_err) = (0u32, 0u32, 0u32);
     let mut tag = Vec::new();
+    // 慢流检测：某节点推流过慢（CDN 故障/限流）时返回错误，上层换节点。
+    let mut last_data_at = std::time::Instant::now();
+    // 统计窗口：6 秒内视频帧不足 30（≈5fps）判节点劣化——视频 tag 稀疏
+    // 而音频不断时 3 秒检测会被绕过，窗口法稳定覆盖。
+    let mut window_frames = 0u32;
+    let mut window_start = std::time::Instant::now();
     loop {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
+        }
+        // 连接后 3 秒无任何视频数据：节点劣化，切换节点重连。
+        if last_data_at.elapsed() > Duration::from_secs(3) {
+            return Err("流传输过慢（CDN 节点劣化），切换节点重连".to_string());
+        }
+        // 6 秒窗口帧数不足：节点只推音频+零星视频的劣化形态。
+        if window_start.elapsed() >= Duration::from_secs(6) {
+            if window_frames < 30 {
+                return Err("流传输过慢（6 秒不足 30 帧，CDN 节点劣化），切换节点重连".to_string());
+            }
+            window_start = std::time::Instant::now();
+            window_frames = 0;
         }
         // Tag 头 11 字节：type(1) data_size(3) timestamp(3+1) stream_id(3)。
         read_exact(&mut reader, &mut tag, 11)?;
@@ -679,8 +1054,11 @@ fn decode_session(
         }
         read_exact(&mut reader, &mut tag, data_size + 4)?; // 体 + PreviousTagSize
         if tag_type != 9 || data_size < 5 {
-            continue; // 只关心视频 Tag
+            // 音频等非视频 tag 不断不代表流正常——慢流节拍只看视频数据。
+            continue;
         }
+        last_data_at = std::time::Instant::now();
+        window_frames += 1;
         let body = &tag[..data_size];
         let first = body[0];
         let _frame_type = first >> 4;
@@ -690,49 +1068,134 @@ fn decode_session(
         match body[1] {
             0 => {
                 // AVC sequence header：AVCDecoderConfigurationRecord → SPS/PPS。
-                param_sets = avcc_config_to_annexb(&body[5..]);
+                let param_sets = avcc_config_to_annexb(&body[5..]);
+                log::info!(
+                    "AVC 序列参数集: {} 字节（体前 8 字节 {:02x?}）",
+                    param_sets.len(),
+                    &body[..8]
+                );
                 if !param_sets.is_empty() {
-                    let _ = decoder.decode(&param_sets);
+                    log::info!(
+                        "参数集前 16 字节: {:02x?}",
+                        &param_sets[..param_sets.len().min(16)]
+                    );
+                    if let Err(e) = decoder.decode(&param_sets) {
+                        log::warn!("参数集解码失败: {e:?}");
+                    }
                 }
             }
             1 => {
-                let mut annexb = Vec::with_capacity(body.len() + 16);
-                if first >> 4 == 1 && !param_sets.is_empty() {
-                    // 关键帧前带参数集，保证解码器随时可恢复。
-                    annexb.extend_from_slice(&param_sets);
-                }
                 // 体布局：flags(1) + AVCPacketType(1) + CompositionTime(3) + AVCC NALU。
-                annexb.extend_from_slice(&avcc_to_annexb(&body[5..]));
+                // NoFlush 下参考链持续有效，无需关键帧前重复拼接参数集。
+                let annexb = avcc_to_annexb(&body[5..]);
                 if annexb.is_empty() {
                     continue;
                 }
                 // 组合时间（body[2..5]）忽略——显示延迟可接受。
-                if let Ok(Some(yuv)) = decoder.decode(&annexb) {
-                    let (w, h) = yuv.dimensions();
-                    if w == 0 || h == 0 {
-                        continue;
+                // 解码错误不静默：持续失败（编码不兼容等）由上层降级清晰度。
+                match decoder.decode(&annexb) {
+                    Ok(Some(yuv)) => {
+                        out_ok += 1;
+                        let (w, h) = yuv.dimensions();
+                        if w == 0 || h == 0 {
+                            continue;
+                        }
+                        let strides = yuv.strides();
+                        let rgba = yuv420_to_rgba(
+                            yuv.y(),
+                            yuv.u(),
+                            yuv.v(),
+                            strides.0,
+                            strides.1,
+                            w as u32,
+                            h as u32,
+                        );
+                        let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
+                        f.next_seq += 1;
+                        let frame = Arc::new(Frame {
+                            seq: f.next_seq,
+                            w: w as u32,
+                            h: h as u32,
+                            rgba,
+                        });
+                        f.latest = Some(frame.clone());
+                        f.queue.push_back(frame);
+                        while f.queue.len() > FRAME_BUFFER_MAX {
+                            f.queue.pop_front();
+                        }
                     }
-                    let strides = yuv.strides();
-                    let rgba = yuv420_to_rgba(
-                        yuv.y(),
-                        yuv.u(),
-                        yuv.v(),
-                        strides.0,
-                        strides.1,
-                        w as u32,
-                        h as u32,
+                    Ok(None) => out_none += 1,
+                    Err(e) => {
+                        out_err += 1;
+                        dec_fails += 1;
+                        if dec_fails == 1 || dec_fails.is_multiple_of(20) {
+                            log::warn!("H.264 解码失败（{dec_fails} 次）: {e:?}");
+                        }
+                        if dec_fails >= DECODE_FAIL_LIMIT {
+                            return Err(
+                                "H.264 解码持续失败（编码不兼容或解码器能力不足），降级清晰度重试"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                // NoFlush 下帧留在解码器内部缓冲：用官方推荐的 DecodeFrame2(NULL)
+                // 每帧显式取回（保留参考链——周期 flush_remaining 实测会破坏重排，
+                // 导致 P 帧大面积失败）。取回失败（无输出）属正常，继续下一帧。
+                unsafe {
+                    let mut dst = [std::ptr::null_mut::<u8>(); 3];
+                    let mut bi = openh264_sys2::SBufferInfo::default();
+                    let state = decoder.raw_api().decode_frame2(
+                        std::ptr::null(),
+                        0,
+                        dst.as_mut_ptr().cast(),
+                        &mut bi,
                     );
-                    let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
-                    let seq = f.queue.back().map(|b| b.seq + 1).unwrap_or(1);
-                    f.queue.push_back(Frame {
-                        seq,
-                        w: w as u32,
-                        h: h as u32,
-                        rgba,
-                    });
-                    while f.queue.len() > FRAME_BUFFER_MAX {
-                        f.queue.pop_front();
+                    if state == 0 && bi.iBufferStatus != 0 && !dst[0].is_null() {
+                        let info = bi.UsrData.sSystemBuffer;
+                        let (w, h) = (info.iWidth as u32, info.iHeight as u32);
+                        if w != 0 && h != 0 {
+                            let (ys, us) = (info.iStride[0] as usize, info.iStride[1] as usize);
+                            let y = std::slice::from_raw_parts(
+                                dst[0] as *const u8,
+                                info.iHeight as usize * ys,
+                            );
+                            let uv_len = info.iHeight as usize * us / 2;
+                            let u = std::slice::from_raw_parts(dst[1] as *const u8, uv_len);
+                            let v = std::slice::from_raw_parts(dst[2] as *const u8, uv_len);
+                            let rgba = yuv420_to_rgba(y, u, v, ys, us, w, h);
+                            let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
+                            f.next_seq += 1;
+                            let frame = Arc::new(Frame {
+                                seq: f.next_seq,
+                                w,
+                                h,
+                                rgba,
+                            });
+                            f.latest = Some(frame.clone());
+                            f.queue.push_back(frame);
+                            while f.queue.len() > FRAME_BUFFER_MAX {
+                                f.queue.pop_front();
+                            }
+                        }
                     }
+                }
+                // 每 50 个视频 tag 心跳（诊断用）。
+                if (out_ok + out_none + out_err) % 50 == 0 {
+                    let qlen = frames
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .queue
+                        .len();
+                    log::info!(
+                        "解码心跳: 出帧 {out_ok} / 无输出 {out_none} / 错误 {out_err}，队列深度 {qlen}"
+                    );
+                }
+                // 每 300 个视频 tag（约 5 秒）摘要一次解码结果分布（诊断用）。
+                if (out_ok + out_none + out_err) % 300 == 0 {
+                    log::info!(
+                        "解码摘要: 出帧 {out_ok} / 无输出 {out_none} / 错误 {out_err}（当前清晰度 qn）"
+                    );
                 }
             }
             _ => {}

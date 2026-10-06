@@ -55,6 +55,12 @@ url = "2"
 # 米哈游/B站 密码登录：RSA 公钥加密账号密码（PKCS1_v1_5）
 rsa = { version = "0.9", features = ["sha2"] }
 openh264 = "0.9.8"
+# openh264-sys2：解码取帧用 DecodeFrame2(NULL) 裸 API 的 SBufferInfo 类型
+openh264-sys2 = "0.9.8"
+# 直播流拉取：rustls（纯 Rust TLS，Windows schannel 对 B站 CDN 长连接有读乱码/EOF）
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8.4"
+rustls-pki-types = "1.15.1"
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 
