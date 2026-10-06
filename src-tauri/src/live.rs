@@ -258,6 +258,7 @@ pub fn avcc_config_to_annexb(data: &[u8]) -> Vec<u8> {
 }
 
 /// YUV420 平面（BT.601 有限色域）→ RGBA。
+/// 保留作为测试基准（生产路径已改按需转换，见 yuv_crop_to_rgb/rgba）。
 pub fn yuv420_to_rgba(
     y: &[u8],
     u: &[u8],
@@ -288,14 +289,131 @@ pub fn yuv420_to_rgba(
     out
 }
 
+/// 紧凑 YUV420 裁剪区 → RGB（3 字节/像素），面积平均降采样到 tw×th。
+///
+/// **只转换输出像素所需的源区域**（对比早先「全帧转 RGBA 再降采样」），
+/// 预览 320 宽时转换量约为全帧的 1/16。Y 取箱内平均，U/V 取对应色度箱平均。
+/// `src_w` 为源帧宽（紧凑布局，Y 跨距 = src_w，UV 跨距 = src_w/2）。
+#[allow(clippy::too_many_arguments)]
+fn yuv_crop_to_rgb(
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    src_w: usize,
+    src_h: usize,
+    crop: (u32, u32, u32, u32),
+    tw: usize,
+    th: usize,
+    step: usize,
+) -> Vec<u8> {
+    let (cx, cy, cw, ch) = (
+        crop.0 as usize,
+        crop.1 as usize,
+        crop.2 as usize,
+        crop.3 as usize,
+    );
+    let cw = cw.min(src_w.saturating_sub(cx)).max(1);
+    let ch = ch.min(src_h.saturating_sub(cy)).max(1);
+    let (tw, th) = (tw.max(1), th.max(1));
+    let step = step.max(1);
+    let cw2 = src_w / 2; // 色度跨距
+    let mut out = Vec::with_capacity(tw * th * 3);
+    for oy in 0..th {
+        let sy0 = cy + oy * ch / th;
+        let sy1 = (cy + (oy + 1) * ch / th).max(sy0 + 1);
+        let cys0 = sy0 / 2;
+        let cys1 = (sy1 / 2).max(cys0 + 1);
+        for ox in 0..tw {
+            let sx0 = cx + ox * cw / tw;
+            let sx1 = (cx + (ox + 1) * cw / tw).max(sx0 + 1);
+            // Y 箱步进平均（step=1 为全平均，扫码用；step>1 为采样，预览用）。
+            let mut ysum = 0u32;
+            let mut yn = 0u32;
+            let mut yy = sy0;
+            while yy < sy1 {
+                let base = yy * src_w;
+                let mut xx = sx0;
+                while xx < sx1 {
+                    ysum += y[base + xx] as u32;
+                    yn += 1;
+                    xx += step;
+                }
+                yy += step;
+            }
+            // 色度箱步进平均（色度是 Y 的一半分辨率，step 相应处理）。
+            let cxs0 = sx0 / 2;
+            let cxs1 = (sx1 / 2).max(cxs0 + 1);
+            let cstep = step.div_ceil(2).max(1);
+            let mut us = 0u32;
+            let mut vs = 0u32;
+            let mut cn = 0u32;
+            let mut cyy = cys0;
+            while cyy < cys1 {
+                let base = cyy * cw2;
+                let mut cxx = cxs0;
+                while cxx < cxs1 {
+                    us += u[base + cxx] as u32;
+                    vs += v[base + cxx] as u32;
+                    cn += 1;
+                    cxx += cstep;
+                }
+                cyy += cstep;
+            }
+            let yv = (ysum / yn.max(1)) as i32;
+            let uv = (us / cn.max(1)) as i32 - 128;
+            let vv = (vs / cn.max(1)) as i32 - 128;
+            let yy = yv - 16;
+            let r = (1192 * yy + 1634 * vv) >> 10;
+            let g = (1192 * yy - 400 * uv - 833 * vv) >> 10;
+            let b = (1192 * yy + 2066 * uv) >> 10;
+            out.push(r.clamp(0, 255) as u8);
+            out.push(g.clamp(0, 255) as u8);
+            out.push(b.clamp(0, 255) as u8);
+        }
+    }
+    out
+}
+
+/// 同 yuv_crop_to_rgb，但输出 RGBA（预览协议用，多一字节 255）。
+#[allow(clippy::too_many_arguments)]
+fn yuv_crop_to_rgba(
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    src_w: usize,
+    src_h: usize,
+    crop: (u32, u32, u32, u32),
+    tw: usize,
+    th: usize,
+    step: usize,
+) -> Vec<u8> {
+    let rgb = yuv_crop_to_rgb(y, u, v, src_w, src_h, crop, tw, th, step);
+    let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
+    for px in rgb.as_chunks::<3>().0 {
+        out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+    }
+    out
+}
+
 // ---------- 会话与帧总线 ----------
 
-/// 解码产出的一帧。
+/// 解码产出的一帧（紧凑 YUV420 / I420）。
+///
+/// **为什么存 YUV 而不是 RGBA**：解码器原生输出即 YUV420（1.5 字节/像素），
+/// 早先每帧全帧转 RGBA（4 字节/像素）纯属浪费——720p 每帧要转换 92 万像素，
+/// 30fps 下每秒 2760 万像素；而预览只输出 ~320 宽、扫码只取 ROI。
+/// 现改存紧凑 YUV（内存与拷贝量降 62%），把 YUV→RGB 转换**推迟到消费端、
+/// 且只转换输出像素所需的源区域**（转换量降一个数量级）。
 struct Frame {
     seq: u64,
     w: u32,
     h: u32,
-    rgba: Vec<u8>,
+    /// Y 平面，紧凑布局（行跨距 = w）。
+    y: Vec<u8>,
+    /// U 平面（w/2 × h/2，行跨距 = w/2）。
+    u: Vec<u8>,
+    /// V 平面（w/2 × h/2，行跨距 = w/2）。
+    v: Vec<u8>,
 }
 
 /// 帧总线：小型回放缓冲（FIFO）+ 独立的最新帧。
@@ -318,6 +436,43 @@ struct Frames {
     /// 单调递增的帧序号。**不能**用「队列尾 seq + 1」——队列空时那会导致
     /// 新帧 seq 恒为 1，使 LAST_SENT 去重把不同帧误判为同一帧（预览卡成 1 帧）。
     next_seq: u64,
+}
+
+/// 从解码器输出的 Y/U/V 平面（可能带行跨距）拷贝为紧凑布局的 Frame。
+#[allow(clippy::too_many_arguments)]
+fn frame_from_yuv(
+    seq: u64,
+    w: u32,
+    h: u32,
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    ys: usize,
+    us: usize,
+) -> Frame {
+    let (w, h) = (w as usize, h as usize);
+    let cw = w / 2;
+    let ch = h / 2;
+    let mut yc = Vec::with_capacity(w * h);
+    for row in 0..h {
+        let base = row * ys;
+        yc.extend_from_slice(&y[base..base + w]);
+    }
+    let mut uc = Vec::with_capacity(cw * ch);
+    let mut vc = Vec::with_capacity(cw * ch);
+    for row in 0..ch {
+        let base = row * us;
+        uc.extend_from_slice(&u[base..base + cw]);
+        vc.extend_from_slice(&v[base..base + cw]);
+    }
+    Frame {
+        seq,
+        w: w as u32,
+        h: h as u32,
+        y: yc,
+        u: uc,
+        v: vc,
+    }
 }
 
 /// 队列硬上限（≈200ms 显示缓冲；防极端突发撑爆内存，超出丢弃最旧帧）。
@@ -418,33 +573,6 @@ pub fn active() -> bool {
     lock_live().is_some()
 }
 
-/// RGBA 裁剪 + 2×2 面积平均 → RGB（供扫码：半尺寸即可承载游戏登录码，
-/// 拷贝与解码成本约为全分辨率的 1/4）。
-fn rgba_crop_half(rgba: &[u8], src_w: u32, crop: (u32, u32, u32, u32)) -> (Vec<u8>, u32, u32) {
-    let (cx, cy, cw, ch) = crop;
-    let (ow, oh) = (cw / 2, ch / 2);
-    let mut out = Vec::with_capacity((ow as usize) * (oh as usize) * 3);
-    for oy in 0..oh {
-        for ox in 0..ow {
-            let mut acc = [0u32; 3];
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let i = (((cy + oy * 2 + dy) as usize) * src_w as usize
-                        + (cx + ox * 2 + dx) as usize)
-                        * 4;
-                    acc[0] += rgba[i] as u32;
-                    acc[1] += rgba[i + 1] as u32;
-                    acc[2] += rgba[i + 2] as u32;
-                }
-            }
-            out.push((acc[0] / 4) as u8);
-            out.push((acc[1] / 4) as u8);
-            out.push((acc[2] / 4) as u8);
-        }
-    }
-    (out, ow, oh)
-}
-
 /// 扫码消费者：自上次消费以来有新帧时返回最新帧的**当前显示视口**区域
 /// （2×2 平均半尺寸 RGB）。视口未知时用全帧。
 pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
@@ -474,14 +602,24 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
             return Some((c.rgb.clone(), c.w, c.h));
         }
     }
+    // 输出半尺寸（2×2 面积平均）——二维码半尺寸足够，成本约 1/4。
+    // 扫码要求还原度：step=1 全平均（输出半尺寸，等于 2×2 面积平均）。
     let (rgb, ow, oh) = match crop {
-        Some(c) => rgba_crop_half(&frame.rgba, fw, c),
+        Some(c) => {
+            let (hw, hh) = ((c.2 / 2).max(1), (c.3 / 2).max(1));
+            (
+                yuv_crop_to_rgb(&frame.y, &frame.u, &frame.v, fw as usize, fh as usize, c, hw as usize, hh as usize, 1),
+                hw,
+                hh,
+            )
+        }
         None => {
-            let mut rgb = crate::qr::rgba_to_rgb(&frame.rgba);
-            let (hw, hh) = (fw / 2, fh / 2);
-            // 全帧同样半尺寸，保持扫码成本恒定。
-            downsample_rgb_half(&mut rgb, fw, fh, hw, hh);
-            (rgb, hw, hh)
+            let (hw, hh) = ((fw / 2).max(1), (fh / 2).max(1));
+            (
+                yuv_crop_to_rgb(&frame.y, &frame.u, &frame.v, fw as usize, fh as usize, (0, 0, fw, fh), hw as usize, hh as usize, 1),
+                hw,
+                hh,
+            )
         }
     };
     f.scan_cache = Some(ScanCache {
@@ -492,28 +630,6 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
         h: oh,
     });
     Some((rgb, ow, oh))
-}
-
-/// RGB 2×2 面积平均（就地降采样到 ow×oh）。
-fn downsample_rgb_half(rgb: &mut Vec<u8>, sw: u32, _sh: u32, ow: u32, oh: u32) {
-    let src = std::mem::take(rgb);
-    let sw = sw as usize;
-    for oy in 0..oh as usize {
-        for ox in 0..ow as usize {
-            let mut acc = [0u32; 3];
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let i = ((oy * 2 + dy) * sw + ox * 2 + dx) * 3;
-                    acc[0] += src[i] as u32;
-                    acc[1] += src[i + 1] as u32;
-                    acc[2] += src[i + 2] as u32;
-                }
-            }
-            rgb.push((acc[0] / 4) as u8);
-            rgb.push((acc[1] / 4) as u8);
-            rgb.push((acc[2] / 4) as u8);
-        }
-    }
 }
 
 /// 预览消费者：按视口裁剪 + 面积降采样，组装 24 字节头 + RGBA 负载。
@@ -579,7 +695,20 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
         }
         *last = Some(key);
     }
-    let rgba = downsample_rgba(&f.rgba, f.w, (cx, cy, cw, ch), tw, th);
+    // 预览允许采样：步长与旧 downsample_rgba 一致（cv/tw 后再折半），
+    // 保证预览转换量约为全帧的 1/4~1/16。
+    let step = (cw.div_ceil(tw).max(1).div_ceil(2).max(1)) as usize;
+    let rgba = yuv_crop_to_rgba(
+        &f.y,
+        &f.u,
+        &f.v,
+        f.w as usize,
+        f.h as usize,
+        (cx, cy, cw, ch),
+        tw as usize,
+        th as usize,
+        step,
+    );
     let mut out = Vec::with_capacity(24 + rgba.len());
     out.extend_from_slice(&tw.to_le_bytes());
     out.extend_from_slice(&th.to_le_bytes());
@@ -589,49 +718,6 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
     out.extend_from_slice(&f.h.to_le_bytes());
     out.extend_from_slice(&rgba);
     FrameOut::Frame(out)
-}
-
-/// 面积平均降采样（RGBA 源，裁剪区 → tw×th），步进采样控 CPU。
-fn downsample_rgba(
-    src: &[u8],
-    src_w: u32,
-    crop: (u32, u32, u32, u32),
-    tw: u32,
-    th: u32,
-) -> Vec<u8> {
-    let (cx, cy, cw, ch) = (
-        crop.0 as usize,
-        crop.1 as usize,
-        crop.2 as usize,
-        crop.3 as usize,
-    );
-    let (tw, th) = (tw as usize, th as usize);
-    let sw = src_w as usize;
-    let x_step = cw.div_ceil(tw).max(1).div_ceil(2).max(1);
-    let y_step = ch.div_ceil(th).max(1).div_ceil(2).max(1);
-    let mut sums = vec![0u32; tw * th * 3];
-    let mut counts = vec![0u16; tw * th];
-    for sy in (0..ch).step_by(y_step) {
-        let yb = sy * th / ch;
-        for sx in (0..cw).step_by(x_step) {
-            let xb = sx * tw / cw;
-            let i = ((cy + sy) * sw + cx + sx) * 4;
-            let o = (yb * tw + xb) * 3;
-            sums[o] += src[i] as u32;
-            sums[o + 1] += src[i + 1] as u32;
-            sums[o + 2] += src[i + 2] as u32;
-            counts[yb * tw + xb] += 1;
-        }
-    }
-    let mut out = Vec::with_capacity(tw * th * 4);
-    for i in 0..tw * th {
-        let c = counts[i].max(1) as u32;
-        out.push((sums[i * 3] / c) as u8);
-        out.push((sums[i * 3 + 1] / c) as u8);
-        out.push((sums[i * 3 + 2] / c) as u8);
-        out.push(255);
-    }
-    out
 }
 
 // ---------- 解码线程 ----------
@@ -1101,23 +1187,18 @@ fn decode_session(
                             continue;
                         }
                         let strides = yuv.strides();
-                        let rgba = yuv420_to_rgba(
+                        let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
+                        f.next_seq += 1;
+                        let frame = Arc::new(frame_from_yuv(
+                            f.next_seq,
+                            w as u32,
+                            h as u32,
                             yuv.y(),
                             yuv.u(),
                             yuv.v(),
                             strides.0,
                             strides.1,
-                            w as u32,
-                            h as u32,
-                        );
-                        let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
-                        f.next_seq += 1;
-                        let frame = Arc::new(Frame {
-                            seq: f.next_seq,
-                            w: w as u32,
-                            h: h as u32,
-                            rgba,
-                        });
+                        ));
                         f.latest = Some(frame.clone());
                         f.queue.push_back(frame);
                         while f.queue.len() > FRAME_BUFFER_MAX {
@@ -1163,15 +1244,18 @@ fn decode_session(
                             let uv_len = info.iHeight as usize * us / 2;
                             let u = std::slice::from_raw_parts(dst[1] as *const u8, uv_len);
                             let v = std::slice::from_raw_parts(dst[2] as *const u8, uv_len);
-                            let rgba = yuv420_to_rgba(y, u, v, ys, us, w, h);
                             let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
                             f.next_seq += 1;
-                            let frame = Arc::new(Frame {
-                                seq: f.next_seq,
+                            let frame = Arc::new(frame_from_yuv(
+                                f.next_seq,
                                 w,
                                 h,
-                                rgba,
-                            });
+                                y,
+                                u,
+                                v,
+                                ys,
+                                us,
+                            ));
                             f.latest = Some(frame.clone());
                             f.queue.push_back(frame);
                             while f.queue.len() > FRAME_BUFFER_MAX {
