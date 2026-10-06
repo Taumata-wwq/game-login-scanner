@@ -6,6 +6,7 @@ pub mod constants;
 pub mod crypto;
 pub mod duplication;
 pub mod http;
+pub mod live;
 pub mod qr;
 pub mod scan;
 pub mod screenshot;
@@ -1141,6 +1142,41 @@ fn set_preview_active(active: bool) {
     }
 }
 
+// ---------- 直播流（B站/抖音低延迟捕获） ----------
+
+/// 启动直播会话：解析平台直播间为 http-flv 流并开始解码，
+/// 阻塞至拿到首帧（前端随后用 capture_live_frame 拉取视口画面）。
+/// 返回 (流宽, 流高)。
+#[tauri::command]
+async fn live_start(platform: String, room: String) -> Result<(u32, u32), String> {
+    let p = crate::live::parse_platform(&platform).ok_or_else(|| "未知直播平台".to_string())?;
+    crate::live::start(p, room).await
+}
+
+/// 停止直播会话（预览恢复屏幕画面，扫码恢复屏幕扫描）。
+#[tauri::command]
+fn live_stop() {
+    crate::live::stop();
+}
+
+/// 直播预览帧：按前端视口裁剪最新解码帧并降采样，
+/// 24 字节头（w,h,mon.x,mon.y,mon.w=流宽,mon.h=流高）+ RGBA；暂无帧返回 24 字节零头。
+#[tauri::command]
+fn capture_live_frame(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    max_width: Option<u32>,
+) -> Result<tauri::ipc::Response, String> {
+    let mw = max_width.unwrap_or(384).clamp(80, 4096);
+    match crate::live::crop_frame(x, y, w, h, mw) {
+        Some(payload) => Ok(tauri::ipc::Response::new(payload)),
+        // 无会话或尚无解码帧：24 字节零头 = 「暂无画面」。
+        None => Ok(tauri::ipc::Response::new(vec![0u8; 24])),
+    }
+}
+
 /// 设置扫描区域（虚拟桌面绝对坐标，物理像素）；w/h 非正表示恢复全屏。
 #[tauri::command]
 fn set_scan_region(
@@ -1445,6 +1481,9 @@ pub fn run() {
             take_captcha_result,
             capture_preview,
             capture_tiles,
+            capture_live_frame,
+            live_start,
+            live_stop,
             set_tile_mode,
             set_scan_region,
             set_preview_active,

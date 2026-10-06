@@ -138,14 +138,10 @@
   }
   .filter-seg button:hover { color: var(--text); background: var(--hover); }
   .filter-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
-  .acct-filter .addbtn {
-    margin-left: auto; height: 24px; display: inline-flex; align-items: center; gap: 5px;
-    background: var(--panel-2); color: var(--text);
-    border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 0 9px; font: 500 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
-    cursor: pointer; transition: background 0.1s;
-  }
-  .acct-filter .addbtn:hover { background: var(--hover); border-color: #4a4a4a; }
+  /* 直播源控件（平台页签 + 房间号）：占据筛选行右侧。 */
+  .live-ctl { margin-left: auto; display: flex; align-items: center; gap: 3px; }
+  .live-ctl .filter-seg button { padding: 0 6px; }
+  #liveRoom { width: 88px; height: 24px; }
 
   /* 账号区自身滚动：占据剩余空间、行高不压缩；滚动条只出现在账号区内部，
      不影响上方扫描区域（overscroll-behavior 阻断滚动链，避免外层出现滚动条）。 */
@@ -379,11 +375,16 @@
         <button data-f="bilibili">B 服</button>
         <button data-f="hypergryph" hidden>鹰角</button>
       </div>
-      <button class="addbtn" id="btnAddAcct" title="添加账号">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-      </button>
+      <div class="live-ctl" title="输入直播间号后，预览与扫码自动切换到直播画面">
+        <div class="filter-seg" id="livePlatSeg">
+          <button data-p="bilibili" class="on">B站</button>
+          <button data-p="douyin">抖音</button>
+        </div>
+        <input class="txtin" id="liveRoom" placeholder="直播间号" maxlength="24" autocomplete="off" spellcheck="false" />
+      </div>
     </div>
     <div class="acct-list" id="acctList"></div>
+    <button class="btn block" id="btnAddAcct" title="添加账号">＋ 添加账号</button>
     <div class="startbar">
       <button id="btnStart" title="开始 / 停止扫码">
         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
@@ -1437,8 +1438,95 @@
     return { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
   }
 
+  // ---------- 直播源（B站/抖音低延迟画面） ----------
+  let liveOn = false;
+  let livePlat = 'bilibili';
+  let liveSeq = 0;
+  let liveTimer = null;
+
+  function scheduleLive() {
+    if (liveTimer) clearTimeout(liveTimer);
+    liveTimer = setTimeout(connectLive, 600);
+  }
+  async function connectLive() {
+    const seq = ++liveSeq;
+    const room = $('liveRoom').value.trim();
+    if (!room) {
+      if (liveOn) {
+        liveOn = false;
+        invoke('live_stop').catch(() => {});
+        log('已断开直播，恢复屏幕预览', 'info');
+      }
+      return;
+    }
+    try {
+      const [w, h] = await invoke('live_start', { platform: livePlat, room });
+      if (seq !== liveSeq) {
+        // 已被更新的请求取代；房间已清空则回收会话。
+        if (!$('liveRoom').value.trim()) invoke('live_stop').catch(() => {});
+        return;
+      }
+      liveOn = true;
+      preview = null;                 // mon 切换为流尺寸，视口重置
+      view = { scale: 1, fx: 0.5, fy: 0.5 };
+      viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+      srcCanvas = null;
+      log('已连接' + (livePlat === 'bilibili' ? 'B站' : '抖音') + '直播间 ' + room + '（' + w + '×' + h + '），预览与扫码已切换', 'success');
+    } catch (e) {
+      if (seq !== liveSeq) return;
+      liveOn = false;
+      log('连接' + (livePlat === 'bilibili' ? 'B站' : '抖音') + '直播间 ' + room + ' 失败: ' + e, 'error');
+    }
+  }
+  document.querySelectorAll('#livePlatSeg button').forEach((b) => {
+    b.addEventListener('click', () => {
+      if (livePlat === b.dataset.p) return;
+      livePlat = b.dataset.p;
+      document.querySelectorAll('#livePlatSeg button').forEach((x) => x.classList.toggle('on', x === b));
+      scheduleLive();
+    });
+  });
+  $('liveRoom').addEventListener('input', scheduleLive);
+  $('liveRoom').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { if (liveTimer) clearTimeout(liveTimer); connectLive(); }
+  });
+
+  // 直播帧拉取：协议与屏幕预览一致（24 字节头 + RGBA），mon = 流原始尺寸，
+  // 因此视口/拖拽/缩放交互完全复用；无需底图（每帧即当前视口裁剪）。
+  async function refreshLiveFrame() {
+    const region = viewportMonRect() || { x: 0, y: 0, w: 0, h: 0 };
+    const buf = await invoke('capture_live_frame', {
+      x: region.x, y: region.y, w: region.w, h: region.h,
+      maxWidth: canvas.width,
+    });
+    if (!(buf instanceof ArrayBuffer)) throw new Error('直播数据异常');
+    if (buf.byteLength <= 24) return false;   // 暂无解码帧
+    const dv = new DataView(buf);
+    const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
+    const mon = { x: 0, y: 0, w: dv.getInt32(16, true), h: dv.getInt32(20, true) };
+    if (!pw || !ph || 24 + pw * ph * 4 > buf.byteLength) throw new Error('直播数据异常');
+    if (!preview || preview.mon.w !== mon.w || preview.mon.h !== mon.h) {
+      preview = { mon };
+      view = { scale: 1, fx: 0.5, fy: 0.5 };
+      viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+    }
+    if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
+      srcCanvas = document.createElement('canvas');
+      srcCanvas.width = pw;
+      srcCanvas.height = ph;
+    }
+    const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
+    srcCanvas.getContext('2d').putImageData(img, 0, 0);
+    clearPendingRealtime();
+    viewDirty = false;
+    drawView();
+    previewErrShown = false;
+    return true;
+  }
+
   let previewBusy = false;
   async function refreshPreview() {
+    if (liveOn) return refreshLiveFrame();
     if (previewBusy) return false;
     previewBusy = true;
     try {
@@ -1729,7 +1817,7 @@
   }
 
   function updateRegion() {
-    if (!preview) return;
+    if (!preview || liveOn) return;   // 直播模式下无屏幕扫描区域语义
     const r = viewportMonRect();
     const str = r.x + ',' + r.y + ',' + r.w + ',' + r.h;
     if (str !== prevRegionStr) {
@@ -1815,6 +1903,7 @@
       stopPreview();
       el.classList.add('paused');
       el.innerHTML = PAUSE_ICON;
+      if (liveOn) return;   // 直播画面天然冻结在最后一帧
       const origW = preview ? preview.mon.w : 1920;
       capturePauseShot(origW).then(() => {
         if (paused) drawView();

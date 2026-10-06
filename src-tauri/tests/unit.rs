@@ -549,3 +549,92 @@ fn extract_hypergryph_scan_login() {
     assert_eq!(qr.kind, QrKind::Hypergryph);
     assert_eq!(qr.ticket, "SCAN123");
 }
+
+// ---------- live（直播流解析纯函数） ----------
+
+#[test]
+fn parse_bili_flv_extracts_stream_url() {
+    let v: serde_json::Value = serde_json::json!({
+        "code": 0,
+        "data": { "playurl_info": { "playurl": { "stream": [
+            {
+                "protocol_name": "http_hls",
+                "format": [{ "format_name": "ts", "codec": [{ "codec_name": "hevc", "base_url": "/x.m3u8", "url_list": ["https://h"] }] }]
+            },
+            {
+                "protocol_name": "http_stream",
+                "format": [{ "format_name": "flv", "codec": [
+                    { "codec_name": "hevc", "base_url": "/hevc.flv", "url_list": ["https://h1"] },
+                    { "codec_name": "avc", "base_url": "/avc.flv", "url_list": ["https://h2"] }
+                ] }]
+            }
+        ] } } } });
+    let url = game_login_scanner_lib::live::parse_bili_flv(&v).expect("应提取到 avc flv");
+    assert_eq!(url, "https://h2/avc.flv");
+}
+
+#[test]
+fn parse_douyin_flv_prefers_full_hd() {
+    let v: serde_json::Value = serde_json::json!({
+        "data": { "data": [{ "stream_url": {
+            "flv_pull_url": { "sd1": "http://a/sd.flv", "full_hd1": "http://a/fhd.flv" }
+        } }] }
+    });
+    let url = game_login_scanner_lib::live::parse_douyin_flv(&v).expect("应提取到 flv");
+    assert_eq!(url, "http://a/fhd.flv");
+}
+
+#[test]
+fn parse_douyin_flv_stream_data_fallback() {
+    let v: serde_json::Value = serde_json::json!({
+        "data": { "data": [{ "stream_url": {
+            "live_core_sdk_data": { "pull_data": {
+                "stream_data": serde_json::json!({
+                    "data": { "0": { "main": { "flv": "http://pull/main.flv", "hls": "http://pull/m.m3u8" } } }
+                })
+                .to_string()
+            } } }
+        } ] }
+    });
+    let url = game_login_scanner_lib::live::parse_douyin_flv(&v).expect("stream_data 回退应命中");
+    assert_eq!(url, "http://pull/main.flv");
+}
+
+#[test]
+fn avcc_to_annexb_converts_length_prefixes() {
+    let avcc = [0u8, 0, 0, 2, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC];
+    let out = game_login_scanner_lib::live::avcc_to_annexb(&avcc);
+    assert_eq!(out, vec![0, 0, 0, 1, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC]);
+}
+
+#[test]
+fn avcc_config_extracts_sps_pps() {
+    // 5 字节头 + 1 个 SPS(2B) + pps_count(1) + 1 个 PPS(2B)
+    let rec = vec![
+        1u8, 0x64, 0, 0x1F, 0xFF, 0xE1, 0, 2, 0x67, 0x40, 1, 0, 2, 0x68, 0xBE,
+    ];
+    let out = game_login_scanner_lib::live::avcc_config_to_annexb(&rec);
+    assert_eq!(out, vec![0, 0, 0, 1, 0x67, 0x40, 0, 0, 0, 1, 0x68, 0xBE]);
+}
+
+#[test]
+fn yuv420_to_rgba_gray_and_clamp() {
+    // 2x2 YUV：全 Y=0（黑）与 Y=255（白）；U/V=128（无色度）。
+    let y = [0u8, 0, 0, 0];
+    let yw = [255u8, 255, 255, 255];
+    let uv = [128u8];
+    let black = game_login_scanner_lib::live::yuv420_to_rgba(&y, &uv, &uv, 2, 1, 2, 2);
+    assert!(black.iter().step_by(4).all(|&p| p <= 16));
+    let white = game_login_scanner_lib::live::yuv420_to_rgba(&yw, &uv, &uv, 2, 1, 2, 2);
+    assert!(white.iter().step_by(4).all(|&p| p >= 235));
+}
+
+#[test]
+fn parse_bili_durl_extracts_legacy_url() {
+    let v: serde_json::Value = serde_json::json!({
+        "code": 0,
+        "data": { "durl": [ { "url": "https://d1--cn-gotcha04.bilivideo.com/live.flv?expires=1" } ] }
+    });
+    let url = game_login_scanner_lib::live::parse_bili_durl(&v).expect("应提取到 durl url");
+    assert!(url.starts_with("https://d1--cn-gotcha04"));
+}

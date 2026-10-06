@@ -558,61 +558,56 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
     // 2) 全屏/指定区域检测：
     //    桌面复制「无新帧即零成本跳过」→ 指纹去重 → ROI 优先 →
     //    降采样快路径 → 节流的全分辨率解码。
+    //    直播会话激活时改为扫直播帧（断流自动回退屏幕扫描）。
+    let mut live_seen = false;
     loop {
         if stop.load(Ordering::SeqCst) {
             emit(&app, "stopped", "已停止扫描");
             return;
         }
 
-        // 用户指定了扫描区域（会话内有效，不持久化）时只扫该区域。
-        // Option<(i32,i32,i32,i32)> 实现了 Copy，直接解引用拷贝即可。
-        let region = *app
-            .state::<crate::AppState>()
-            .region
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match region {
-            Some(rect) => {
-                if process_screen(
-                    &app,
-                    &mut ctx,
-                    &mut st,
-                    0,
-                    rect,
-                    clear_clipboard,
-                    auto_close,
-                )
-                .await
-                {
-                    if st.stopped {
-                        emit(&app, "stopped", "已停止扫描");
-                    } else {
-                        finish_success(&app, &st, clear_clipboard, auto_close).await;
+        // 直播源优先：取自上次消费以来的新帧（seq 去重，静止/未变帧近零成本）。
+        if crate::live::active() {
+            if let Some((rgb, w, h)) = crate::live::take_scan_frame() {
+                live_seen = true;
+                if let Some(text) = qr::decode_rgb(&rgb, w, h) {
+                    if let Some(qrc) = qr::extract(&text) {
+                        if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
+                            if st.stopped {
+                                emit(&app, "stopped", "已停止扫描");
+                            } else {
+                                finish_success(&app, &st, clear_clipboard, auto_close).await;
+                            }
+                            return;
+                        }
+                        if st.stopped {
+                            emit(&app, "stopped", "已停止扫描");
+                            return;
+                        }
                     }
-                    return;
                 }
             }
-            None => {
-                let rects = crate::screenshot::screen_rects();
-                if rects.is_empty() {
-                    if !st.screens_empty_reported {
-                        emit(&app, "error", "屏幕捕获失败，请检查显示设置");
-                        st.screens_empty_reported = true;
-                    }
-                } else {
-                    st.screens_empty_reported = false;
-                }
-                for (idx, rect) in rects.iter().enumerate() {
-                    if stop.load(Ordering::SeqCst) {
-                        emit(&app, "stopped", "已停止扫描");
-                        return;
-                    }
+        } else {
+            if live_seen {
+                live_seen = false;
+                emit(&app, "info", "直播已断开，回退屏幕扫描");
+            }
+
+            // 用户指定了扫描区域（会话内有效，不持久化）时只扫该区域。
+            // Option<(i32,i32,i32,i32)> 实现了 Copy，直接解引用拷贝即可。
+            let region = *app
+                .state::<crate::AppState>()
+                .region
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match region {
+                Some(rect) => {
                     if process_screen(
                         &app,
                         &mut ctx,
                         &mut st,
-                        idx,
-                        *rect,
+                        0,
+                        rect,
                         clear_clipboard,
                         auto_close,
                     )
@@ -624,6 +619,41 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                             finish_success(&app, &st, clear_clipboard, auto_close).await;
                         }
                         return;
+                    }
+                }
+                None => {
+                    let rects = crate::screenshot::screen_rects();
+                    if rects.is_empty() {
+                        if !st.screens_empty_reported {
+                            emit(&app, "error", "屏幕捕获失败，请检查显示设置");
+                            st.screens_empty_reported = true;
+                        }
+                    } else {
+                        st.screens_empty_reported = false;
+                    }
+                    for (idx, rect) in rects.iter().enumerate() {
+                        if stop.load(Ordering::SeqCst) {
+                            emit(&app, "stopped", "已停止扫描");
+                            return;
+                        }
+                        if process_screen(
+                            &app,
+                            &mut ctx,
+                            &mut st,
+                            idx,
+                            *rect,
+                            clear_clipboard,
+                            auto_close,
+                        )
+                        .await
+                        {
+                            if st.stopped {
+                                emit(&app, "stopped", "已停止扫描");
+                            } else {
+                                finish_success(&app, &st, clear_clipboard, auto_close).await;
+                            }
+                            return;
+                        }
                     }
                 }
             }
