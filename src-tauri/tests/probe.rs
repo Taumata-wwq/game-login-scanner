@@ -171,18 +171,27 @@ fn probe_live() {
         let t0 = std::time::Instant::now();
         match game_login_scanner_lib::live::start(room.clone()).await {
             Ok((w, h)) => {
-                println!(
-                    "[OK] B站房间 {room} 已连接 {w}x{h}（耗时 {:?}）",
-                    t0.elapsed()
-                );
-                let mut new_frames = 0u32;
-                for _ in 0..10 {
-                    if game_login_scanner_lib::live::take_scan_frame().is_some() {
-                        new_frames += 1;
+                println!("[OK] B站房间 {room} 已连接 {w}x{h}（耗时 {:?}）", t0.elapsed());
+                // 模拟前端预览循环：33ms 轮询 3 秒，统计响应语义分布。
+                // 关键断言：会话存活期间不应出现 NoSession（否则前端会误回退屏幕）。
+                use game_login_scanner_lib::live::FrameOut;
+                let (mut frames, mut empty, mut no_session, mut scan_hits) = (0u32, 0u32, 0u32, 0u32);
+                for _ in 0..90 {
+                    match game_login_scanner_lib::live::crop_frame(0, 0, 0, 0, 320) {
+                        FrameOut::Frame(_) => frames += 1,
+                        FrameOut::Empty => empty += 1,
+                        FrameOut::NoSession => no_session += 1,
                     }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if game_login_scanner_lib::live::take_scan_frame().is_some() {
+                        scan_hits += 1;
+                    }
+                    tokio::time::sleep(Duration::from_millis(33)).await;
                 }
-                println!("[OK] 2 秒内新帧数 {new_frames}（约 {}fps）", new_frames / 2);
+                println!(
+                    "[OK] 3 秒轮询：完整帧 {frames} / 沿用上一帧 {empty} / 会话丢失 {no_session}（应恒为 0）"
+                );
+                println!("[OK] 扫码新帧采样命中 {scan_hits} 次");
+                assert_eq!(no_session, 0, "会话存活期间不应出现 NoSession");
                 game_login_scanner_lib::live::stop();
             }
             Err(e) => println!("[FAIL] B站房间 {room}: {e}"),
