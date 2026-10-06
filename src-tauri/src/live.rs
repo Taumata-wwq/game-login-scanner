@@ -1162,6 +1162,8 @@ fn decode_session(
     let mut anchor: Option<(u32, std::time::Instant)> = None;
     // 是否处于追帧丢弃态（排空积压，等下一个关键帧恢复）。
     let mut skipping = false;
+    // 追帧开始时刻（用于超时保护：异常流长时间无关键帧时强制重连，避免假死）。
+    let mut skip_since: Option<std::time::Instant> = None;
     // 本会话累计追帧次数。健康流几乎不需要追帧；某会话追帧达 CATCHUP_LIMIT 即判
     // 解码吞吐不足 → 降级清晰度（新会话计数从 0 起，自然沿 qn 链逐级下探）。
     let mut catchup_count = 0u32;
@@ -1221,6 +1223,7 @@ fn decode_session(
                 let lag = expected - media_ts as i64;
                 if !skipping && lag > CATCHUP_LAG_MS {
                     skipping = true;
+                    skip_since = Some(now);
                     catchup_count += 1;
                     log::info!(
                         "直播追帧：落后 {lag}ms（本会话第 {catchup_count} 次），丢弃至下一关键帧"
@@ -1229,6 +1232,10 @@ fn decode_session(
             }
         }
         if skipping {
+            // 超时保护：追帧态持续过久仍无关键帧（流异常/丢 SPS）→ 重连，避免假死。
+            if skip_since.is_some_and(|t| t.elapsed() > Duration::from_secs(8)) {
+                return Err("直播追帧超时（长时间无关键帧），重连".to_string());
+            }
             // 只读不解码，快速排空 socket 缓冲；遇关键帧（IDR）重建解码器恢复。
             if frame_type == 1 && body[1] == 1 && !param_sets.is_empty() {
                 decoder = openh264::decoder::Decoder::with_api_config(
@@ -1239,6 +1246,7 @@ fn decode_session(
                 .map_err(|e| format!("解码器重建失败: {e}"))?;
                 let _ = decoder.decode(&param_sets);
                 skipping = false;
+                skip_since = None;
                 anchor = Some((media_ts, std::time::Instant::now()));
                 log::info!("直播追帧：已在关键帧恢复（ts={media_ts}ms）");
                 // 本会话追帧达上限：解码吞吐跟不上码率。仅在还能降级时返回错误；
