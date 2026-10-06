@@ -1,41 +1,35 @@
-//! 共享 HTTP 客户端：ureq（阻塞式，经 `spawn_blocking` 包装为 async），进程内
-//! 复用连接池与 TLS 会话。
+//! 共享 HTTP 客户端：手写 HTTP/1.1 + rustls（经 `spawn_blocking` 包装为 async）。
 //!
-//! 选型说明：各登录端点调用面很窄（POST/GET + 头 + 超时 + 读全文），ureq +
-//! 系统 schannel（native-tls）比 reqwest+hyper 全家桶小 ~1.5MB。阻塞调用运行在
-//! tokio blocking 线程池，不占用异步 worker；停止扫描时 `select!` 丢弃 future，
-//! 底层请求线程随超时自行结束。
+//! 为什么不用 ureq：本工具的 HTTP 调用面极窄（GET/POST + 头 + JSON 响应），
+//! ureq 会拖入 `url` → `idna` → `icu_*` 全套 Unicode 表（数百 KB）。而直播拉流
+//! 已手写 rustls + HTTP/1.1 管道（schannel 对 B站 CDN 长连接读乱码，故用纯 Rust
+//! TLS）——把同一管道泛化为请求/响应客户端，零额外依赖。API 调用低频
+//! （登录/轮询），每请求新建连接的握手开销可忽略。阻塞调用运行在 tokio
+//! blocking 线程池；停止扫描时 `select!` 丢弃 future，底层线程随超时自行结束。
 
-use std::sync::OnceLock;
+use std::io::{Read, Write};
+use std::net::ToSocketAddrs;
 use std::time::Duration;
 
-/// 默认 User-Agent：仅对未显式设置 UA 的请求生效（reqwest 默认不发送 UA，
-/// ureq 默认发 `ureq/x.y`——统一改为对各端点都已被社区实现验证过的短 UA）。
+use rustls::pki_types::ServerName;
+
+/// 默认 User-Agent：仅对未显式设置 UA 的请求生效（对各端点都已被社区实现
+/// 验证过的短 UA）。
 const DEFAULT_UA: &str = "Mozilla/5.0 BH3Scanner";
 
-static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-
-fn agent() -> &'static ureq::Agent {
-    AGENT.get_or_init(|| {
-        // 未启用 ureq 默认的 rustls（`tls` 特性），显式注入系统 schannel 后端。
-        let connector = std::sync::Arc::new(
-            native_tls::TlsConnector::builder()
-                .build()
-                .expect("TLS 初始化失败"),
-        );
-        ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout(Duration::from_secs(20))
-            .tls_connector(connector)
-            .build()
-    })
-}
+/// API 请求的连接/读超时。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(20);
+/// 响应体上限（防异常服务器撑爆内存）。
+const MAX_BODY: usize = 8 * 1024 * 1024;
+/// 重定向跟随上限。
+const MAX_REDIRECTS: usize = 6;
 
 /// 请求头列表（键大小写保留；查找时忽略大小写）。
 pub type Headers = Vec<(String, String)>;
 
-/// 头部值 ASCII 化：非 ASCII 字节按 UTF-8 百分号编码（ureq 只接受 ASCII 头值，
-/// reqwest 曾允许直接发 UTF-8 头）。米哈游 x-rpc 头参考协议本身即用百分号编码
+/// 头部值 ASCII 化：非 ASCII 字节按 UTF-8 百分号编码（HTTP/1.1 头仅允许
+/// 可见 ASCII）。米哈游 x-rpc 头参考协议本身即用百分号编码
 /// （如 `Chrome%20152.0.0.0`），服务端可正常处理；已有 `%` 原样保留防二次编码。
 pub fn header_utf8(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -75,73 +69,335 @@ impl Response {
     }
 }
 
-fn convert(resp: ureq::Response) -> Result<Response, String> {
-    let status = resp.status();
-    let headers: Headers = resp
-        .headers_names()
-        .into_iter()
-        .flat_map(|name| {
-            resp.all(&name)
-                .into_iter()
-                .map(move |v| (name.clone(), v.to_string()))
-        })
-        .collect();
-    let body = resp
-        .into_string()
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    Ok(Response {
-        status,
-        headers,
-        body,
-    })
+/// URL 拆分：仅支持 http(s) 绝对地址，返回 (是否 https, host, port, path?query)。
+pub(crate) fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
+    let (https, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return Err(format!("仅支持 http(s) URL: {url}"));
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (
+            h.to_string(),
+            p.parse::<u16>()
+                .map_err(|_| format!("端口无效: {authority}"))?,
+        ),
+        None => (authority.to_string(), if https { 443 } else { 80 }),
+    };
+    if host.is_empty() {
+        return Err(format!("URL 缺少主机名: {url}"));
+    }
+    Ok((https, host, port, path.to_string()))
 }
 
-async fn request(
-    is_post: bool,
-    url: String,
-    mut headers: Headers,
-    body: Option<String>,
+/// rustls TLS 流（加载系统根证书，ALPN 声明 http/1.1——rustls 默认不发 ALPN
+/// 扩展，B站 CDN（openresty）对无 ALPN 的 ClientHello 会拒绝，表现为乱码/EOF）。
+pub(crate) fn tls_connect(
+    host: &str,
+    port: u16,
+    read_timeout: Duration,
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>, String> {
+    let addr = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("解析主机 {host} 失败: {e}"))?
+        .next()
+        .ok_or_else(|| format!("主机 {host} 无可用地址"))?;
+    let tcp = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+        .map_err(|e| format!("连接 {host}:{port} 失败: {e}"))?;
+    tcp.set_nodelay(true).ok();
+    tcp.set_read_timeout(Some(read_timeout))
+        .map_err(|e| format!("设置读超时失败: {e}"))?;
+    let mut store = rustls::RootCertStore::empty();
+    for cert in rustls_native_certs::load_native_certs().certs {
+        let _ = store.add(cert);
+    }
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(store)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let conn = rustls::ClientConnection::new(
+        std::sync::Arc::new(config),
+        ServerName::try_from(host.to_string()).map_err(|_| "服务器名无效".to_string())?,
+    )
+    .map_err(|e| format!("TLS 初始化失败: {e}"))?;
+    Ok(rustls::StreamOwned::new(conn, tcp))
+}
+
+/// 逐段读取直到出现 `\r\n\r\n`（响应头结束），多读的 body 前置字节返回给调用方。
+fn read_headers(stream: &mut impl Read) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream
+            .read(&mut chunk)
+            .map_err(|e| format!("读取响应头失败: {e}"))?;
+        if n == 0 {
+            return Err("响应中断".to_string());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let hdr_end = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|p| p + 4)
+                .unwrap_or(buf.len());
+            let body_prefix = buf[hdr_end..].to_vec();
+            buf.truncate(hdr_end);
+            return Ok((buf, body_prefix));
+        }
+        if buf.len() > 64 * 1024 {
+            return Err("响应头过大".to_string());
+        }
+    }
+}
+
+/// 解析状态行与响应头。
+fn parse_response(raw: &[u8]) -> Result<(u16, Headers), String> {
+    let text = String::from_utf8_lossy(raw);
+    let mut lines = text.split('\n');
+    let status_line = lines.next().unwrap_or("");
+    let status = status_line
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .ok_or_else(|| format!("无法解析 HTTP 状态行: {status_line}"))?;
+    let mut headers = Headers::new();
+    for line in lines {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            headers.push((k.trim().to_string(), v.trim().to_string()));
+        }
+    }
+    Ok((status, headers))
+}
+
+fn header_find<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+/// 按 framing（chunked / content-length / 读到 EOF）读取响应体。
+/// `prefix` 为响应头之后已多读的 body 前置字节。
+fn read_body(
+    stream: &mut impl Read,
+    headers: &Headers,
+    mut prefix: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    if header_find(headers, "transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked"))
+    {
+        // 从 prefix/流中按 chunk 帧结构解出（hex 大小行 + 数据 + CRLF 循环）。
+        let mut need = |n: usize, prefix: &mut Vec<u8>| -> Result<Vec<u8>, String> {
+            while prefix.len() < n {
+                let mut chunk = [0u8; 8192];
+                let got = stream
+                    .read(&mut chunk)
+                    .map_err(|_| "流已结束".to_string())?;
+                if got == 0 {
+                    return Err("流已结束".to_string());
+                }
+                prefix.extend_from_slice(&chunk[..got]);
+            }
+            Ok(prefix.drain(..n).collect())
+        };
+        loop {
+            let mut line = Vec::new();
+            loop {
+                let b = need(1, &mut prefix)?;
+                line.push(b[0]);
+                if line.ends_with(b"\r\n") {
+                    break;
+                }
+                if line.len() > 32 {
+                    return Err("chunk 大小行过长".to_string());
+                }
+            }
+            let size =
+                usize::from_str_radix(String::from_utf8_lossy(&line[..line.len() - 2]).trim(), 16)
+                    .map_err(|e| e.to_string())?;
+            if size == 0 {
+                return Ok(body);
+            }
+            if body.len() + size > MAX_BODY {
+                return Err("响应体超过大小上限".to_string());
+            }
+            body.extend_from_slice(&need(size, &mut prefix)?);
+            need(2, &mut prefix)?; // chunk 尾 CRLF
+        }
+    }
+    if let Some(n) =
+        header_find(headers, "content-length").and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        if n > MAX_BODY {
+            return Err("响应体超过大小上限".to_string());
+        }
+        while prefix.len() < n {
+            let mut chunk = [0u8; 16384];
+            let got = stream
+                .read(&mut chunk)
+                .map_err(|_| "流已结束".to_string())?;
+            if got == 0 {
+                return Err("流已结束".to_string());
+            }
+            prefix.extend_from_slice(&chunk[..got]);
+        }
+        prefix.truncate(n);
+        return Ok(prefix);
+    }
+    // 无 framing：读到 EOF（服务器 Connection: close 场景）。
+    body = prefix;
+    let mut chunk = [0u8; 16384];
+    loop {
+        let got = stream
+            .read(&mut chunk)
+            .map_err(|e| format!("读取响应体失败: {e}"))?;
+        if got == 0 {
+            return Ok(body);
+        }
+        if body.len() + got > MAX_BODY {
+            return Err("响应体超过大小上限".to_string());
+        }
+        body.extend_from_slice(&chunk[..got]);
+    }
+}
+
+/// API 请求 TLS 流：rustls 优先；握手被服务器拒绝（如 mihoyo 的 WAF 对
+/// rustls ClientHello 指纹回 ProtocolVersion alert，实测 curl/schannel 均正常）
+/// 时回退 schannel（Windows 系统栈）。
+/// 返回错误仅在 TCP/TLS 全失败时发生；写入阶段的握手告警安全（请求未发出）。
+fn api_tls_connect(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, String> {
+    match tls_connect(host, port, READ_TIMEOUT) {
+        Ok(mut t) => {
+            // rustls 惰性握手：用 complete_io 显式完成（不发送应用数据）。
+            // 失败（服务器对 rustls ClientHello 指纹回 ProtocolVersion alert 等）
+            // → 回退 schannel（Windows 系统栈，指纹与 curl/浏览器系一致）。
+            match t.conn.complete_io(&mut t.sock) {
+                Ok(_) => Ok(Box::new(t)),
+                Err(alert) => {
+                    log::info!("rustls 握手被拒（{alert}），回退 schannel");
+                    tls_connect_schannel(host, port)
+                }
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// schannel 回退（Windows 系统栈）。
+fn tls_connect_schannel(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, String> {
+    use schannel::tls_stream;
+    let addr = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("解析主机 {host} 失败: {e}"))?
+        .next()
+        .ok_or_else(|| format!("主机 {host} 无可用地址"))?;
+    let tcp = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+        .map_err(|e| format!("连接 {host}:{port} 失败: {e}"))?;
+    tcp.set_nodelay(true).ok();
+    tcp.set_read_timeout(Some(READ_TIMEOUT))
+        .map_err(|e| format!("设置读超时失败: {e}"))?;
+    let cred = schannel::schannel_cred::SchannelCred::builder()
+        .acquire(schannel::schannel_cred::Direction::Outbound)
+        .map_err(|e| format!("schannel 凭据获取失败: {e}"))?;
+    let stream = tls_stream::Builder::new()
+        .domain(host)
+        .connect(cred, tcp)
+        .map_err(|e| format!("schannel TLS 失败: {e}"))?;
+    Ok(Box::new(stream))
+}
+
+/// Read + Write 组合 trait（双 TLS 栈的统一流类型）。
+trait ReadWrite: Read + Write {}
+impl<T: Read + Write> ReadWrite for T {}
+
+/// 同步请求：连接 → 发送 → 跟随重定向 → 读取响应（解码线程可直接调用）。
+pub(crate) fn request_sync(
+    method: &str,
+    url: &str,
+    headers: &Headers,
+    body: Option<&str>,
 ) -> Result<Response, String> {
-    let agent = agent().clone();
-    tokio::task::spawn_blocking(move || {
-        let mut req = if is_post {
-            agent.post(&url)
-        } else {
-            agent.get(&url)
-        };
-        if !headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
-        {
-            headers.push(("User-Agent".to_string(), DEFAULT_UA.to_string()));
+    let mut current = url.to_string();
+    for _ in 0..MAX_REDIRECTS {
+        let (https, host, port, path) = split_url(&current)?;
+        if !https {
+            return Err("明文 http 已禁用（凭据安全）".to_string());
         }
-        for (k, v) in &headers {
-            req = req.set(k, v);
+        let mut tls = api_tls_connect(&host, port)?;
+        let mut req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\nConnection: close\r\n"
+        );
+        let mut has_ua = false;
+        for (k, v) in headers {
+            if k.eq_ignore_ascii_case("host") {
+                continue;
+            }
+            if k.eq_ignore_ascii_case("user-agent") {
+                has_ua = true;
+            }
+            req.push_str(&format!("{k}: {}\r\n", header_utf8(v)));
         }
-        // POST 用 send_bytes（ureq 只对 send_string 自动补 text/plain 头），
-        // 头部与调用方声明保持一一对应。
-        let result = if is_post {
-            req.send_bytes(body.as_deref().unwrap_or("").as_bytes())
-        } else {
-            req.call()
-        };
-        match result {
-            Ok(resp) => convert(resp),
-            // 4xx/5xx 也读出 body：鹰角 400 带 msg、风控页等调用方需要内容。
-            Err(ureq::Error::Status(_, resp)) => convert(resp),
-            Err(e) => Err(format!("{e}")),
+        if !has_ua {
+            req.push_str(&format!("User-Agent: {DEFAULT_UA}\r\n"));
         }
-    })
-    .await
-    .map_err(|e| format!("HTTP 任务失败: {e}"))?
+        if let Some(b) = body {
+            req.push_str(&format!("Content-Length: {}\r\n", b.len()));
+        }
+        req.push_str("\r\n");
+        if let Some(b) = body {
+            req.push_str(b);
+        }
+        write!(tls, "{req}").map_err(|e| format!("发送请求失败: {e}"))?;
+        tls.flush()
+            .map_err(|e| format!("发送请求失败(flush): {e}"))?;
+        let (raw_headers, prefix) = read_headers(&mut tls)?;
+        let (status, resp_headers) = parse_response(&raw_headers)?;
+        if (300..400).contains(&status) {
+            let loc = header_find(&resp_headers, "location")
+                .ok_or_else(|| format!("HTTP {status} 重定向缺少 Location 头"))?
+                .to_string();
+            // 绝对/相对 Location 均支持（相对路径沿用当前 host）。
+            current = if loc.starts_with("http://") || loc.starts_with("https://") {
+                loc
+            } else {
+                format!("https://{host}{loc}")
+            };
+            continue;
+        }
+        let resp_body = read_body(&mut tls, &resp_headers, prefix)?;
+        return Ok(Response {
+            status,
+            headers: resp_headers,
+            body: String::from_utf8_lossy(&resp_body).into_owned(),
+        });
+    }
+    Err("重定向次数过多".to_string())
 }
 
-/// GET 请求。
+/// GET 请求（async 包装）。
 pub async fn get(url: &str, headers: Headers) -> Result<Response, String> {
-    request(false, url.to_string(), headers, None).await
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || request_sync("GET", &url, &headers, None))
+        .await
+        .map_err(|e| format!("HTTP 任务失败: {e}"))?
 }
 
 /// POST 请求（body 为原始字符串）。
 pub async fn post(url: &str, headers: Headers, body: &str) -> Result<Response, String> {
-    request(true, url.to_string(), headers, Some(body.to_string())).await
+    let url = url.to_string();
+    let body = body.to_string();
+    tokio::task::spawn_blocking(move || request_sync("POST", &url, &headers, Some(&body)))
+        .await
+        .map_err(|e| format!("HTTP 任务失败: {e}"))?
 }

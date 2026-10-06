@@ -61,6 +61,21 @@ pub fn set_sign(data: &mut Value) -> String {
 
 // ---------- TV 扫码登录 ----------
 
+/// application/x-www-form-urlencoded 编码（B站签名表单用；替代 url crate）。
+fn form_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// TV 扫码登录签名：参数按 key 排序拼 `k=v&...`（去尾 `&`）后追加盐做 MD5。
 pub fn tv_sign(params: &[(&str, String)]) -> String {
     let mut sorted: Vec<(&str, String)> = params.to_vec();
@@ -100,10 +115,20 @@ fn tv_signed_form(extra: &[(&str, String)]) -> String {
     ];
     params.extend_from_slice(extra);
     let sign = tv_sign(&params);
-    url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(params.iter().map(|(k, v)| (*k, v.as_str())))
-        .append_pair("sign", &sign)
-        .finish()
+    let mut out = String::new();
+    for (k, v) in params
+        .iter()
+        .map(|(k, v)| (*k, v.as_str()))
+        .chain([("sign", sign.as_str())])
+    {
+        if !out.is_empty() {
+            out.push('&');
+        }
+        out.push_str(&form_encode(k));
+        out.push('=');
+        out.push_str(&form_encode(v));
+    }
+    out
 }
 
 /// 扫码登录会话：二维码内容 + 轮询凭据。

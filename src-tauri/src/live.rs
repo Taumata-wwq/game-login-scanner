@@ -8,7 +8,6 @@
 //! - 扫码：`take_scan_frame` 取新帧走既有二维码识别管线（seq 去重）。
 
 use std::io::{Read, Write};
-use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -102,15 +101,15 @@ pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>,
         "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn={qn}&platform=web&ptype=16"
     );
     let referer_owned = format!("https://live.bilibili.com/{room}");
-    let v: Value = api_agent()
-        .get(&url)
-        .set("User-Agent", BROWSER_UA)
-        .set("Referer", &referer_owned)
-        .call()
+    let headers = vec![
+        ("User-Agent".to_string(), BROWSER_UA.to_string()),
+        ("Referer".to_string(), referer_owned.clone()),
+    ];
+    let body = crate::http::request_sync("GET", &url, &headers, None)
         .map_err(|e| format!("B站直播接口请求失败: {e}"))?
-        .into_string()
+        .body;
+    let v: Value = serde_json::from_str(&body)
         .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .ok_or_else(|| "B站直播接口响应解析失败".to_string())?;
     // 未开播快速失败：playurl 响应 data.live_status != 1 时无流，若继续走
     // durl 解析会拿到占位/失效地址，导致解码线程反复重连直到 15s 超时。
@@ -129,15 +128,15 @@ pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>,
     let url2 = format!(
         "https://api.live.bilibili.com/room/v1/Room/playUrl?cid={real_room}&qn={qn}&platform=web"
     );
-    let v2: Value = api_agent()
-        .get(&url2)
-        .set("User-Agent", BROWSER_UA)
-        .set("Referer", &referer_owned)
-        .call()
+    let headers2 = vec![
+        ("User-Agent".to_string(), BROWSER_UA.to_string()),
+        ("Referer".to_string(), referer_owned.clone()),
+    ];
+    let body2 = crate::http::request_sync("GET", &url2, &headers2, None)
         .map_err(|e| format!("B站直播接口请求失败: {e}"))?
-        .into_string()
+        .body;
+    let v2: Value = serde_json::from_str(&body2)
         .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .ok_or_else(|| "B站直播接口响应解析失败".to_string())?;
     if v2.get("code").and_then(|x| x.as_i64()) != Some(0) {
         return Err(format!("B站直播间 {room} 未开播或获取失败"));
@@ -446,6 +445,8 @@ fn yuv_crop_to_rgba(
 /// 且只转换输出像素所需的源区域**（转换量降一个数量级）。
 struct Frame {
     seq: u64,
+    /// FLV 媒体时间戳（ms，流自身时钟）。输出侧追帧与诊断用。
+    ts: u32,
     w: u32,
     h: u32,
     /// Y 平面，紧凑布局（行跨距 = w）。
@@ -482,6 +483,7 @@ struct Frames {
 #[allow(clippy::too_many_arguments)]
 fn frame_from_yuv(
     seq: u64,
+    ts: u32,
     w: u32,
     h: u32,
     y: &[u8],
@@ -507,6 +509,7 @@ fn frame_from_yuv(
     }
     Frame {
         seq,
+        ts,
         w: w as u32,
         h: h as u32,
         y: yc,
@@ -611,6 +614,15 @@ pub fn stop() {
 /// 是否存在活跃会话。
 pub fn active() -> bool {
     lock_live().is_some()
+}
+
+/// 诊断：最新解码帧的 (seq, 媒体时间戳, 队列深度)。探针观测延迟漂移用。
+pub fn diag() -> Option<(u64, u32, usize)> {
+    let live = lock_live();
+    let s = live.as_ref()?;
+    let f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
+    let b = f.latest.as_ref()?;
+    Some((b.seq, b.ts, f.queue.len()))
 }
 
 /// 扫码消费者：自上次消费以来有新帧时返回最新帧的**当前显示视口**区域
@@ -801,14 +813,13 @@ fn fetch_qn_chain(room: &str) -> Vec<u32> {
         "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn=10000&platform=web&ptype=16"
     );
     let referer = format!("https://live.bilibili.com/{room}");
-    let v: Option<Value> = api_agent()
-        .get(&url)
-        .set("User-Agent", BROWSER_UA)
-        .set("Referer", &referer)
-        .call()
+    let headers = vec![
+        ("User-Agent".to_string(), BROWSER_UA.to_string()),
+        ("Referer".to_string(), referer),
+    ];
+    let v: Option<Value> = crate::http::request_sync("GET", &url, &headers, None)
         .ok()
-        .and_then(|r| r.into_string().ok())
-        .and_then(|t| serde_json::from_str(&t).ok());
+        .and_then(|r| serde_json::from_str(&r.body).ok());
     match v {
         Some(v) => build_qn_chain(&parse_accept_qn(&v)),
         None => vec![10000],
@@ -827,11 +838,15 @@ fn decode_config() -> openh264::decoder::DecoderConfig {
     openh264::decoder::DecoderConfig::new().flush_after_decode(openh264::decoder::Flush::NoFlush)
 }
 
-/// 直播追帧阈值（毫秒）：媒体时间戳落后「应有值」超过此值即判积压，
-/// 丢弃至下一关键帧重建解码器，把延迟压回直播边缘。
-/// 权衡：过小会因解码偶发变慢频繁丢帧（顿挫），过大则延迟偏高；
+/// 直播追帧阈值（毫秒）：输出帧媒体时间戳落后「应有值」超过此值进入快进态。
+/// 权衡：过小会因解码偶发波动频繁快进（顿挫），过大则延迟偏高；
 /// 1.2s 远低于浏览器端 2~4s，且给解码留缓冲余量。
 const CATCHUP_LAG_MS: i64 = 1200;
+/// 快进追不动的严重积压阈值：落后超过 3×CATCHUP 时跳到关键帧硬追
+/// （解码吞吐不足以支撑快进时的兜底）。
+const SEVERE_LAG_MS: i64 = 3 * CATCHUP_LAG_MS;
+/// 快进视为追上的滞后余量。
+const CATCHUP_DONE_MS: i64 = 300;
 
 /// 持续追帧上限：连续快速追帧（间隔 < 4s）达到此次数，判为解码吞吐持续不足，
 /// 降级清晰度换低码率流。仅「持续跟不上」才降级，偶发追帧不触发。
@@ -840,6 +855,14 @@ const CATCHUP_LIMIT: u32 = 4;
 /// 解码线程向 start() 回报的致命失败原因（未开播 / 解码不支持 / 连续重连失败）。
 /// start() 轮询它以便快速返回明确错误，而非干等 15 秒首帧超时。
 type FailFlag = Arc<Mutex<Option<String>>>;
+
+/// 当前输出帧相对墙钟锚点的滞后量（ms）。
+fn out_lag_ms(anchor: Option<(u32, std::time::Instant)>, media_ts: u32) -> i64 {
+    match anchor {
+        Some((a_ts, a_at)) => a_ts as i64 + a_at.elapsed().as_millis() as i64 - media_ts as i64,
+        None => 0,
+    }
+}
 
 /// 记录致命失败并让解码线程返回。
 fn set_fail(fail: &FailFlag, reason: &str) {
@@ -949,23 +972,6 @@ fn remove_session_if(frames: &Arc<Mutex<Frames>>) {
 /// 慢流判定读超时：CDN 节点 3 秒不推数据 → read 超时 → 换节点。
 const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 普通 API 请求 agent（一次性 GET，超时 20s；流式拉流不走这里）。
-fn api_agent() -> &'static ureq::Agent {
-    static A: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    A.get_or_init(|| {
-        let connector = std::sync::Arc::new(
-            native_tls::TlsConnector::builder()
-                .build()
-                .expect("TLS 初始化失败"),
-        );
-        ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout(Duration::from_secs(20))
-            .tls_connector(connector)
-            .build()
-    })
-}
-
 /// 手写 HTTP/1.1 流式读取（http-flv 用）。
 ///
 /// 为什么不用 ureq：实测 ureq 2.12 的 `into_reader()` 对 B站 http-flv 的
@@ -1040,50 +1046,15 @@ impl HttpFlvReader {
         let mut current = url.to_string();
         // 302 跳转链一般 1~2 跳，给足 6 次冗余。
         for _ in 0..6 {
-            let parsed = url::Url::parse(&current).map_err(|e| format!("流地址解析失败: {e}"))?;
-            let host = parsed
-                .host_str()
-                .ok_or_else(|| "流地址缺少主机名".to_string())?
-                .to_string();
-            let port = parsed.port_or_known_default().unwrap_or(443);
-            // 连接超时：重定向到不可达 host 时避免永久阻塞（TcpStream::connect 无超时）。
-            let addr = (host.as_str(), port)
-                .to_socket_addrs()
-                .map_err(|e| format!("解析 CDN 主机失败: {e}"))?
-                .next()
-                .ok_or_else(|| "CDN 主机无地址".to_string())?;
-            let tcp = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-                .map_err(|e| format!("连接直播 CDN 失败: {e}"))?;
-            tcp.set_nodelay(true).ok();
-            tcp.set_read_timeout(Some(STREAM_READ_TIMEOUT))
-                .map_err(|e| format!("设置读超时失败: {e}"))?;
+            let (https, host, port, path) =
+                crate::http::split_url(&current).map_err(|e| format!("流地址解析失败: {e}"))?;
+            if !https {
+                return Err("明文 http 已禁用".to_string());
+            }
             // rustls：纯 Rust TLS。Windows schannel（native-tls）对该 CDN 长连接
             // 会出现读乱码/EOF（同请求 curl / OpenSSL / rustls 均正常拿到 FLV）。
-            let mut store = rustls::RootCertStore::empty();
-            for cert in rustls_native_certs::load_native_certs().certs {
-                let _ = store.add(cert);
-            }
-            let mut config = rustls::ClientConfig::builder()
-                .with_root_certificates(store)
-                .with_no_client_auth();
-            // 关键：显式声明 ALPN = http/1.1。
-            // rustls 默认不发 ALPN 扩展，B站 CDN（openresty）对无 ALPN 的 ClientHello
-            // 会走 h2/特殊路径或直接拒绝（表现为响应头乱码/EOF）；curl 默认发
-            // "h2,http/1.1"，故正常。这里只声明 http/1.1（本模块手写 HTTP/1.1 文本请求）。
-            config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            let conn = rustls::ClientConnection::new(
-                std::sync::Arc::new(config),
-                rustls::pki_types::ServerName::try_from(host.clone())
-                    .map_err(|_| "服务器名无效".to_string())?,
-            )
-            .map_err(|e| format!("TLS 初始化失败: {e}"))?;
-            let mut tls = rustls::StreamOwned::new(conn, tcp);
-            let path = parsed.path().to_string()
-                + parsed
-                    .query()
-                    .map(|q| format!("?{q}"))
-                    .as_deref()
-                    .unwrap_or("");
+            // 读超时兼作慢流检测（3 秒无数据换节点）。
+            let mut tls = crate::http::tls_connect(&host, port, STREAM_READ_TIMEOUT)?;
             write!(
                 tls,
                 "GET {path} HTTP/1.1
@@ -1153,10 +1124,11 @@ Connection: keep-alive
                     })
                     .and_then(|v| std::str::from_utf8(v).ok())
                     .ok_or_else(|| format!("HTTP {status} 重定向缺少 Location 头"))?;
-                current = parsed
-                    .join(loc)
-                    .map_err(|e| format!("重定向地址解析失败: {e}"))?
-                    .to_string();
+                current = if loc.starts_with("http://") || loc.starts_with("https://") {
+                    loc.to_string()
+                } else {
+                    format!("https://{host}{loc}")
+                };
                 continue;
             }
             if status != 200 {
@@ -1245,6 +1217,10 @@ fn decode_session(
     let mut skipping = false;
     // 追帧开始时刻（用于超时保护：异常流长时间无关键帧时强制重连，避免假死）。
     let mut skip_since: Option<std::time::Instant> = None;
+    // 快进态：Some((倍率, 起始时刻))。解码持续进行（参考链完整、无跳变），
+    // 仅按 1/倍率 入队——画面平滑快进追上直播边缘。倍率 2 起，4 秒未追上升 4。
+    let mut ff: Option<(u32, std::time::Instant)> = None;
+    let mut ff_tick: u32 = 0;
     // 本会话累计追帧次数。健康流几乎不需要追帧；某会话追帧达 CATCHUP_LIMIT 即判
     // 解码吞吐不足 → 降级清晰度（新会话计数从 0 起，自然沿 qn 链逐级下探）。
     let mut catchup_count = 0u32;
@@ -1386,6 +1362,7 @@ fn decode_session(
                         f.next_seq += 1;
                         let frame = Arc::new(frame_from_yuv(
                             f.next_seq,
+                            media_ts,
                             w as u32,
                             h as u32,
                             yuv.y(),
@@ -1395,10 +1372,39 @@ fn decode_session(
                             strides.1,
                         ));
                         f.latest = Some(frame.clone());
-                        f.queue.push_back(frame);
+                        // 快进态：按 1/倍率 入队（解码不中断，参考链完整）。
+                        let push = match &mut ff {
+                            Some((factor, start)) => {
+                                ff_tick += 1;
+                                if out_lag_ms(anchor, media_ts) < CATCHUP_DONE_MS {
+                                    log::info!("直播追帧：快进完成，恢复正常输出");
+                                    ff = None;
+                                    true
+                                } else if start.elapsed() > Duration::from_secs(4) && *factor < 4 {
+                                    *factor = 4;
+                                    *start = std::time::Instant::now();
+                                    log::info!("直播追帧：4 秒未追上，快进倍率升至 4×");
+                                    ff_tick.is_multiple_of(4)
+                                } else if start.elapsed() > Duration::from_secs(10) {
+                                    // 快进 10 秒仍严重落后：转跳帧模式。
+                                    skipping = true;
+                                    skip_since = Some(std::time::Instant::now());
+                                    ff = None;
+                                    log::info!("直播追帧：快进超时，转丢弃至下一关键帧");
+                                    true
+                                } else {
+                                    ff_tick.is_multiple_of(*factor)
+                                }
+                            }
+                            None => true,
+                        };
+                        if push {
+                            f.queue.push_back(frame);
+                        }
                         while f.queue.len() > FRAME_BUFFER_MAX {
                             f.queue.pop_front();
                         }
+                        drop(f);
                     }
                     Ok(None) => out_none += 1,
                     Err(e) => {
@@ -1439,26 +1445,70 @@ fn decode_session(
                             let uv_len = info.iHeight as usize * us / 2;
                             let u = std::slice::from_raw_parts(dst[1] as *const u8, uv_len);
                             let v = std::slice::from_raw_parts(dst[2] as *const u8, uv_len);
+                            // 输出侧追帧（NULL 取回路径）。
+                            if let Some((a_ts, a_at)) = anchor {
+                                let expected = a_ts as i64 + a_at.elapsed().as_millis() as i64;
+                                let out_lag = expected - media_ts as i64;
+                                if out_lag > SEVERE_LAG_MS && !skipping {
+                                    // 严重积压：快进也追不上，跳到关键帧硬追。
+                                    skipping = true;
+                                    skip_since = Some(std::time::Instant::now());
+                                    ff = None;
+                                    catchup_count += 1;
+                                    log::info!(
+                                        "直播追帧（严重积压 {out_lag}ms，第 {catchup_count} 次）：丢弃至下一关键帧"
+                                    );
+                                } else if out_lag > CATCHUP_LAG_MS && ff.is_none() && !skipping {
+                                    ff = Some((2, std::time::Instant::now()));
+                                    ff_tick = 0;
+                                    catchup_count += 1;
+                                    log::info!(
+                                        "直播追帧（快进 2×，落后 {out_lag}ms，第 {catchup_count} 次）"
+                                    );
+                                }
+                            }
                             let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
                             f.next_seq += 1;
-                            let frame = Arc::new(frame_from_yuv(f.next_seq, w, h, y, u, v, ys, us));
+                            let frame = Arc::new(frame_from_yuv(
+                                f.next_seq, media_ts, w, h, y, u, v, ys, us,
+                            ));
                             f.latest = Some(frame.clone());
-                            f.queue.push_back(frame);
+                            // 快进态入队门控（与 decode() 路径一致）。
+                            let push = match &mut ff {
+                                Some((factor, _start)) => {
+                                    ff_tick += 1;
+                                    if out_lag_ms(anchor, media_ts) < CATCHUP_DONE_MS {
+                                        ff = None;
+                                        true
+                                    } else {
+                                        ff_tick.is_multiple_of(*factor)
+                                    }
+                                }
+                                None => true,
+                            };
+                            if push {
+                                f.queue.push_back(frame);
+                            }
                             while f.queue.len() > FRAME_BUFFER_MAX {
                                 f.queue.pop_front();
                             }
                         }
                     }
                 }
-                // 每 50 个视频 tag 心跳（诊断用）。
+                // 每 50 个视频 tag 心跳（诊断用）：输入滞后 / 输出滞后 / 队列深度。
                 if (out_ok + out_none + out_err) % 50 == 0 {
-                    let qlen = frames
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .queue
-                        .len();
+                    let (qlen, out_ts) = {
+                        let f = frames.lock().unwrap_or_else(PoisonError::into_inner);
+                        (f.queue.len(), f.latest.as_ref().map(|b| b.ts).unwrap_or(0))
+                    };
+                    let in_lag = anchor.as_ref().map_or(0, |(a_ts, a_at)| {
+                        *a_ts as i64 + a_at.elapsed().as_millis() as i64 - media_ts as i64
+                    });
+                    let out_lag = anchor.as_ref().map_or(0, |(a_ts, a_at)| {
+                        *a_ts as i64 + a_at.elapsed().as_millis() as i64 - out_ts as i64
+                    });
                     log::info!(
-                        "解码心跳: 出帧 {out_ok} / 无输出 {out_none} / 错误 {out_err}，队列深度 {qlen}"
+                        "解码心跳: 出帧 {out_ok} / 无输出 {out_none} / 错误 {out_err}，队列 {qlen}，输入滞后 {in_lag}ms，输出滞后 {out_lag}ms"
                     );
                 }
                 // 每 300 个视频 tag（约 5 秒）摘要一次解码结果分布（诊断用）。

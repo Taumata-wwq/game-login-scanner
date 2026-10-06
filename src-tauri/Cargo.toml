@@ -36,10 +36,6 @@ env_logger = { version = "0.11", default-features = false }
 
 base64 = "0.22"
 
-# HTTP：ureq（阻塞式，经 spawn_blocking 包装），默认特性全关 + native-tls（Windows 走
-# 系统 schannel），比 reqwest+hyper 全家桶小 ~1.5MB。
-ureq = { version = "2", default-features = false, features = ["native-tls"] }
-native-tls = "0.2"
 
 # 二维码解码 rqrr（纯 QR，依赖仅 g2p+lru；替代 rxing——其拖 regex/chrono-tz/
 # encoding 合计约 1.7MB）；生成 qrcodegen（零依赖）。反色码由解码层翻转重试支持。
@@ -52,7 +48,6 @@ hmac = "0.12"
 md-5 = "0.10"
 hex = "0.4"
 rand = "0.8"
-url = "2"
 # 米哈游/B站 密码登录：RSA 公钥加密账号密码（PKCS1_v1_5）
 rsa = { version = "0.9", features = ["sha2"] }
 openh264 = "0.9.8"
@@ -62,6 +57,7 @@ openh264-sys2 = "0.9.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8.4"
 rustls-pki-types = "1.15.1"
+schannel = "0.1.29"
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 
@@ -80,8 +76,45 @@ codegen-units = 1
 
 # openh264 的 C 代码单独用 opt-level=3（速度优先）：全局 "s"（体积优先）会让
 # 1080p 软解码显著变慢（实测单线程跟不上 60fps 流）。仅此依赖提速，本 crate 仍 "s"。
+# O3→O2：解码吞吐足够（release 实测远超流帧率），体积省 ~40KB。
 [profile.release.package.openh264-sys2]
-opt-level = 3
+opt-level = 2
+
+# 体积再裁剪：事件驱动 / 低频路径的 crate 用 "z"（性能不敏感）。
+[profile.release.package.tauri]
+opt-level = "z"
+[profile.release.package.tao]
+opt-level = "z"
+[profile.release.package.wry]
+opt-level = "z"
+[profile.release.package.muda]
+opt-level = "z"
+[profile.release.package.tauri-runtime-wry]
+opt-level = "z"
+[profile.release.package.tauri-runtime]
+opt-level = "z"
+[profile.release.package.tauri-utils]
+opt-level = "z"
+[profile.release.package.rustls]
+opt-level = "z"
+[profile.release.package.serde_json]
+opt-level = "z"
+[profile.release.package.rsa]
+opt-level = "z"
+[profile.release.package.num-bigint-dig]
+opt-level = "z"
+[profile.release.package.schannel]
+opt-level = "z"
+[profile.release.package.webview2-com]
+opt-level = "z"
+[profile.release.package.rustls-native-certs]
+opt-level = "z"
+[profile.release.package.hex]
+opt-level = "z"
+[profile.release.package.base64]
+opt-level = "z"
+[profile.release.package.dirs]
+opt-level = "z"
 
 [target.'cfg(windows)'.dependencies]
 # 截屏（GDI 兜底）、剪贴板（读图/清空）替代 screenshots / arboard 两个重依赖

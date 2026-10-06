@@ -222,7 +222,9 @@ fn probe_live_lag() {
         match game_login_scanner_lib::live::start(room.clone()).await {
             Ok((w, h)) => {
                 println!("[OK] {room} {w}x{h} 连接 {}ms", tc.elapsed().as_millis());
-                // 长跑：每 5 秒打印一次追帧统计（由 live 层日志输出「落后/恢复」）。
+                // 长跑：每 5 秒采样「媒体时间戳增量 vs 墙钟增量」（识别重打时间戳/
+                // 慢速推流）与输出滞后趋势，配合 live 层心跳日志定位延迟堆积层。
+                let mut last_ts: Option<(u32, Instant)> = None;
                 for i in 1..=7 {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     // 持续消费预览帧（模拟前端 30fps），触发解码线程运转。
@@ -230,7 +232,25 @@ fn probe_live_lag() {
                         let _ = game_login_scanner_lib::live::crop_frame(0, 0, 0, 0, 320);
                         tokio::time::sleep(Duration::from_millis(16)).await;
                     }
-                    println!("[采样 {i}] 已运行 {}s", i * 5);
+                    let msg = match game_login_scanner_lib::live::diag() {
+                        Some((seq, ts, qlen)) => {
+                            let rate = match (last_ts, ts) {
+                                (Some((p_ts, p_at)), _) => {
+                                    let d_ts = ts.wrapping_sub(p_ts) as i64;
+                                    let d_wall = p_at.elapsed().as_millis() as i64;
+                                    format!(
+                                        "媒体速率 {:.2}×墙钟",
+                                        d_ts as f64 / d_wall.max(1) as f64
+                                    )
+                                }
+                                _ => "首采样".into(),
+                            };
+                            last_ts = Some((ts, Instant::now()));
+                            format!("seq {seq} ts {ts}ms 队列 {qlen}，{rate}")
+                        }
+                        None => "会话已关闭".into(),
+                    };
+                    println!("[采样 {i}] {}s：{msg}", i * 5);
                 }
                 game_login_scanner_lib::live::stop();
             }
