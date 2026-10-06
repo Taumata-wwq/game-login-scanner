@@ -184,7 +184,6 @@
   .acct-item .ibtn { width: 18px; height: 18px; visibility: hidden; }
   .acct-item:hover .ibtn { visibility: visible; }
   .acct-item .ibtn:hover { color: #ff8f8f; background: rgba(207, 74, 74, 0.12); }
-  .acct-empty { flex: none; padding: 6px 8px; font-size: 10px; color: var(--faint); border: 1px dashed var(--border); border-radius: var(--radius); text-align: center; }
 
   .btn {
     height: 24px; padding: 0 11px;
@@ -815,12 +814,6 @@
     const list = $('acctList');
     list.textContent = '';
     const rows = accountsAll().filter((a) => a.ch === filter);
-    if (rows.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'acct-empty';
-      empty.textContent = '该渠道暂无账号，点击下方「添加账号」登录';
-      list.appendChild(empty);
-    }
     rows.forEach(({ ch, t }, idx) => {
       const key = acctKey(ch, t);
       const row = document.createElement('div');
@@ -1464,6 +1457,7 @@
       if (liveOn) {
         liveOn = false;
         invoke('live_stop').catch(() => {});
+        invoke('set_preview_active', { active: true }).catch(() => {});
         log('已断开直播，恢复屏幕预览', 'info');
       }
       return;
@@ -1484,6 +1478,9 @@
       baseMap = null; baseMapReady = false; baseMapActive = false;
       if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
       if (tileMode) { invoke('set_tile_mode', { x: 0, y: 0, w: 0, h: 0, on: false }).catch(() => {}); tileMode = false; }
+      // 停用本地显示器捕获（清除预览 ROI，DXGI 帧总线跳过拷贝）——直播模式下
+      // 本地画面无人消费，不清除会因鼠标移动等持续触发 GPU 拷贝。
+      invoke('set_preview_active', { active: false }).catch(() => {});
       log('已连接B站直播间 ' + room + '（' + w + '×' + h + '），预览与扫码已切换', 'success');
     } catch (e) {
       if (seq !== liveSeq) return;
@@ -1498,6 +1495,16 @@
 
   // 直播帧拉取：协议与屏幕预览一致（24 字节头 + RGBA），mon = 流原始尺寸，
   // 因此视口/拖拽/缩放交互完全复用；无需底图（每帧即当前视口裁剪）。
+  let liveEmptyStreak = 0;
+  // 下播/断流后后端会关闭会话，前端收到空帧响应即自动切回屏幕预览与扫码。
+  function revertLive(msg) {
+    if (!liveOn) return;
+    liveOn = false;
+    liveEmptyStreak = 0;
+    invoke('live_stop').catch(() => {});
+    invoke('set_preview_active', { active: true }).catch(() => {});
+    log(msg, 'info');
+  }
   async function refreshLiveFrame() {
     const region = viewportMonRect() || { x: 0, y: 0, w: 0, h: 0 };
     const buf = await invoke('capture_live_frame', {
@@ -1505,7 +1512,12 @@
       maxWidth: canvas.width,
     });
     if (!(buf instanceof ArrayBuffer)) throw new Error('直播数据异常');
-    if (buf.byteLength <= 24) return false;   // 暂无解码帧
+    if (buf.byteLength <= 24) {
+      // 会话已被后端关闭（下播/重连失败）：立即回退屏幕预览与扫码。
+      if (++liveEmptyStreak >= 2) revertLive('直播已结束，恢复屏幕预览与扫码');
+      return false;
+    }
+    liveEmptyStreak = 0;
     const dv = new DataView(buf);
     const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
     const mon = { x: 0, y: 0, w: dv.getInt32(16, true), h: dv.getInt32(20, true) };

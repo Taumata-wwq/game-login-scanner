@@ -224,8 +224,8 @@ struct Frames {
     scan_seen: u64,
 }
 
-/// 显示回放的目标缓冲深度（约 3 帧 ≈ 100~150ms 额外延迟）。
-const DISPLAY_BUFFER_TARGET: usize = 4;
+/// 显示回放的目标缓冲深度（约 4 帧 ≈ 130~200ms 额外延迟）。
+const DISPLAY_BUFFER_TARGET: usize = 5;
 /// 队列硬上限（防极端突发撑爆内存；超出丢弃最旧帧）。
 const FRAME_BUFFER_MAX: usize = 6;
 
@@ -290,12 +290,6 @@ pub fn stop() {
         s.stop.store(true, Ordering::SeqCst);
         log::info!("直播会话已断开（B站 {}）", s.room);
     }
-}
-
-/// 当前会话信息（前端日志用）。
-pub fn session_label() -> Option<String> {
-    let live = lock_live();
-    live.as_ref().map(|s| format!("B站 {}", s.room))
 }
 
 /// 是否存在活跃会话。
@@ -424,12 +418,26 @@ fn decode_loop(url: String, referer: String, stop: Arc<AtomicBool>, frames: Arc<
             return;
         }
         fails += 1;
-        if fails > 20 {
-            log::error!("直播流连续重连失败 20 次，解码线程退出");
+        // 下播时 CDN 会快速关闭连接，重连也立即失败——快速放弃并移除会话，
+        // 让预览/扫码自动回退屏幕（前端检测到空帧响应即切换）。
+        if fails > 4 {
+            log::error!("直播流连续重连失败，会话关闭（约 2 秒）");
+            remove_session_if(&frames);
             return;
         }
         log::info!("直播流重连（第 {fails} 次）…");
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(400));
+    }
+}
+
+/// 仅当 LIVE 中仍是本线程对应的会话时移除（防止误删替换后的新会话）。
+fn remove_session_if(frames: &Arc<Mutex<Frames>>) {
+    let mut live = lock_live();
+    if let Some(s) = live.as_ref() {
+        if Arc::ptr_eq(&s.frames, frames) {
+            live.take();
+            log::info!("直播会话已关闭（流结束/重连失败），回退屏幕预览与扫码");
+        }
     }
 }
 
