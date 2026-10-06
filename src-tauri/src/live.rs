@@ -608,7 +608,17 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
         Some(c) => {
             let (hw, hh) = ((c.2 / 2).max(1), (c.3 / 2).max(1));
             (
-                yuv_crop_to_rgb(&frame.y, &frame.u, &frame.v, fw as usize, fh as usize, c, hw as usize, hh as usize, 1),
+                yuv_crop_to_rgb(
+                    &frame.y,
+                    &frame.u,
+                    &frame.v,
+                    fw as usize,
+                    fh as usize,
+                    c,
+                    hw as usize,
+                    hh as usize,
+                    1,
+                ),
                 hw,
                 hh,
             )
@@ -616,7 +626,17 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
         None => {
             let (hw, hh) = ((fw / 2).max(1), (fh / 2).max(1));
             (
-                yuv_crop_to_rgb(&frame.y, &frame.u, &frame.v, fw as usize, fh as usize, (0, 0, fw, fh), hw as usize, hh as usize, 1),
+                yuv_crop_to_rgb(
+                    &frame.y,
+                    &frame.u,
+                    &frame.v,
+                    fw as usize,
+                    fh as usize,
+                    (0, 0, fw, fh),
+                    hw as usize,
+                    hh as usize,
+                    1,
+                ),
                 hw,
                 hh,
             )
@@ -1246,16 +1266,7 @@ fn decode_session(
                             let v = std::slice::from_raw_parts(dst[2] as *const u8, uv_len);
                             let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
                             f.next_seq += 1;
-                            let frame = Arc::new(frame_from_yuv(
-                                f.next_seq,
-                                w,
-                                h,
-                                y,
-                                u,
-                                v,
-                                ys,
-                                us,
-                            ));
+                            let frame = Arc::new(frame_from_yuv(f.next_seq, w, h, y, u, v, ys, us));
                             f.latest = Some(frame.clone());
                             f.queue.push_back(frame);
                             while f.queue.len() > FRAME_BUFFER_MAX {

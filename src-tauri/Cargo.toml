@@ -27,7 +27,8 @@ tauri = { version = "2", default-features = false, features = ["wry"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-dirs = "5"
+# 与 tauri 拖入的 dirs 保持同一主版本，避免 v5/v6 双份。
+dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 log = "0.4"
 # 关闭 env_filter（其 regex 栈约 700KB，本工具只用固定级别过滤）
@@ -72,6 +73,10 @@ custom-protocol = ["tauri/custom-protocol"]
 opt-level = "s"
 panic = "abort"
 strip = true
+# fat LTO + 单 codegen 单元：让链接器跨 crate 做死代码消除（体积优先）。
+# 构建耗时增加可接受（release 非高频）。
+lto = true
+codegen-units = 1
 
 [target.'cfg(windows)'.dependencies]
 # 截屏（GDI 兜底）、剪贴板（读图/清空）替代 screenshots / arboard 两个重依赖
