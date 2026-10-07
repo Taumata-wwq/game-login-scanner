@@ -728,10 +728,11 @@ fn frame_from_yuv(
 const FRAME_BUFFER_MAX: usize = 6;
 
 /// 扫码 RGB 缓存：键为 (帧序号, 裁剪区)，视口不变且无新帧时直接复用。
+/// rgb 用 Arc：命中时只克隆指针（零拷贝），避免在持锁路径上复制整块图像。
 struct ScanCache {
     seq: u64,
     crop: Option<(u32, u32, u32, u32)>,
-    rgb: Vec<u8>,
+    rgb: Arc<Vec<u8>>,
     w: u32,
     h: u32,
 }
@@ -856,79 +857,70 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
     let live = lock_live();
     let s = live.as_ref()?;
     let view = *LAST_VIEW.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
-    // 读独立的 latest（不是显示队列）——显示弹出不影响扫码取帧。
-    let frame = f.latest.clone()?;
-    if frame.seq == 0 {
-        return None;
-    }
-    let (fw, fh) = (frame.w, frame.h);
-    // 裁剪区 = 视口（流坐标系），并夹到流尺寸内（此前用错坐标系且未夹到流边界，
-    // 视口超出流时裁剪会越界）。
-    let crop = view.and_then(|(x, y, w, h)| {
-        if w <= 0 || h <= 0 {
+    // 只在锁内取「帧引用 + 缓存命中判断」，**不在锁内做 YUV→RGB 转换**：
+    // 转换（原分辨率 1080p ~2M 像素）耗时远大于取引用，而解码线程 push 新帧
+    // 需要同一把锁——持锁转换会把解码线程堵住 → 不读 socket → 延迟堆积，
+    // 追帧也回不到低点。frame 是 Arc，clone 出来即可在锁外转换。
+    let (frame, crop, cached) = {
+        let f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        // 读独立的 latest（不是显示队列）——显示弹出不影响扫码取帧。
+        let frame = f.latest.clone()?;
+        if frame.seq == 0 {
             return None;
         }
-        let x0 = (x.max(0) as u32).min(fw.saturating_sub(1));
-        let y0 = (y.max(0) as u32).min(fh.saturating_sub(1));
-        let cw0 = (w as u32).min(fw - x0).max(2);
-        let ch0 = (h as u32).min(fh - y0).max(2);
-        Some((x0, y0, cw0, ch0))
-    });
-    // 无新帧且缓存命中（视口未变）：复用上次 RGB，保证供帧率 100%。
-    if let Some(c) = &f.scan_cache {
-        if c.seq == frame.seq && c.crop == crop {
-            return Some((c.rgb.clone(), c.w, c.h));
-        }
-    }
-    // 原分辨率输出（保二维码模块细节），仅超上限才等比缩小。
-    // 此前无条件减半，导致全屏视口下二维码模块过小、无法识别（放大才可识别）。
-    let (rgb, ow, oh) = match crop {
-        Some(c) => {
-            let (ow, oh) = scan_output_size(c.2, c.3);
-            (
-                yuv_crop_to_rgb(
-                    &frame.y,
-                    &frame.u,
-                    &frame.v,
-                    fw as usize,
-                    fh as usize,
-                    c,
-                    ow as usize,
-                    oh as usize,
-                    1,
-                ),
-                ow,
-                oh,
-            )
-        }
-        None => {
-            let (ow, oh) = scan_output_size(fw, fh);
-            (
-                yuv_crop_to_rgb(
-                    &frame.y,
-                    &frame.u,
-                    &frame.v,
-                    fw as usize,
-                    fh as usize,
-                    (0, 0, fw, fh),
-                    ow as usize,
-                    oh as usize,
-                    1,
-                ),
-                ow,
-                oh,
-            )
-        }
+        let (fw, fh) = (frame.w, frame.h);
+        // 裁剪区 = 视口（流坐标系），并夹到流尺寸内（此前用错坐标系且未夹到流边界，
+        // 视口超出流时裁剪会越界）。
+        let crop = view.and_then(|(x, y, w, h)| {
+            if w <= 0 || h <= 0 {
+                return None;
+            }
+            let x0 = (x.max(0) as u32).min(fw.saturating_sub(1));
+            let y0 = (y.max(0) as u32).min(fh.saturating_sub(1));
+            let cw0 = (w as u32).min(fw - x0).max(2);
+            let ch0 = (h as u32).min(fh - y0).max(2);
+            Some((x0, y0, cw0, ch0))
+        });
+        // 无新帧且缓存命中（视口未变）：复用上次 RGB，保证供帧率 100%。
+        let cached = f
+            .scan_cache
+            .as_ref()
+            .filter(|c| c.seq == frame.seq && c.crop == crop)
+            .map(|c| (c.rgb.clone(), c.w, c.h));
+        (frame, crop, cached)
     };
-    f.scan_cache = Some(ScanCache {
-        seq: frame.seq,
-        crop,
-        rgb: rgb.clone(),
-        w: ow,
-        h: oh,
-    });
-    Some((rgb, ow, oh))
+    if let Some((rgb, w, h)) = cached {
+        return Some((rgb.as_ref().clone(), w, h));
+    }
+    let (fw, fh) = (frame.w, frame.h);
+    // 原分辨率输出（保二维码模块细节），仅超上限才等比缩小。
+    // 此前无条件减半，导致全屏视口下二维码模块明显过小、无法识别（放大才可识别）。
+    let crop_rect = crop.unwrap_or((0, 0, fw, fh));
+    let (ow, oh) = scan_output_size(crop_rect.2, crop_rect.3);
+    let rgb = yuv_crop_to_rgb(
+        &frame.y,
+        &frame.u,
+        &frame.v,
+        fw as usize,
+        fh as usize,
+        crop_rect,
+        ow as usize,
+        oh as usize,
+        1,
+    );
+    let rgb = Arc::new(rgb);
+    // 回写缓存（短锁）。
+    {
+        let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        f.scan_cache = Some(ScanCache {
+            seq: frame.seq,
+            crop,
+            rgb: rgb.clone(),
+            w: ow,
+            h: oh,
+        });
+    }
+    Some((rgb.as_ref().clone(), ow, oh))
 }
 
 /// 预览消费者：按视口裁剪 + 面积降采样，组装 24 字节头 + RGBA 负载。
