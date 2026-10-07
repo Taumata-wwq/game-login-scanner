@@ -826,9 +826,12 @@ fn fetch_qn_chain(room: &str) -> Vec<u32> {
     }
 }
 /// 直播追帧阈值（毫秒）：输出帧媒体时间戳落后「应有值」超过此值即追帧。
-/// asm 生效后解码吞吐充足（1080p 实测平均 ~10ms/帧 ≪ 33ms 帧间隔），正常流滞后
-/// 恒为 0 不触发；仅当码率提升/机器性能不足导致解码跟不上时作为安全网兜底。
-const CATCHUP_LAG_MS: i64 = 1200;
+///
+/// **主控参数，非安全网**：openh264 单线程解码耗时（~19-24ms/帧）略超部分流帧间隔，
+/// 客户端消费速度比推流慢约 6%，滞后单调累积（实测 ~60ms/s）。把阈值压到 400ms，
+/// 让追帧常态化工作，把端到端延迟钉在 ≤0.4s（代价：每 ~7s 追帧一次，画面跳 1 个 GOP）。
+/// 阈值越低延迟越低、跳帧越频繁；300-600ms 是「扫码抢码」场景的合理折中。
+const CATCHUP_LAG_MS: i64 = 400;
 
 /// 解码持续失败的容忍次数：超过则降级清晰度重试。
 const DECODE_FAIL_LIMIT: u32 = 40;
@@ -1420,9 +1423,14 @@ fn decode_session(
                 }
                 // 每 50 个视频 tag 心跳（诊断用）：输入滞后 / 输出滞后 / 队列深度。
                 if (out_ok + out_none + out_err) % 50 == 0 {
+                    // out_lag 用「显示队列最旧帧」（即将被播出的帧）的媒体时间戳，
+                    // 而非 latest——追帧恢复过渡期 latest 尚未更新，用它会把
+                    // 「追帧跳变」误报成持续高延迟（实测尖峰虚高至 1.9~3.5s）。
+                    // 队列为空时显示端无积压，回退到当前 tag 时间戳（≈输入延迟）。
                     let (qlen, out_ts) = {
                         let f = frames.lock().unwrap_or_else(PoisonError::into_inner);
-                        (f.queue.len(), f.latest.as_ref().map(|b| b.ts).unwrap_or(0))
+                        let ts = f.queue.front().map(|b| b.ts).unwrap_or(media_ts);
+                        (f.queue.len(), ts)
                     };
                     let in_lag = anchor.as_ref().map_or(0, |(a_ts, a_at)| {
                         *a_ts as i64 + a_at.elapsed().as_millis() as i64 - media_ts as i64
