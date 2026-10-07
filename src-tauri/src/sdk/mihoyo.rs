@@ -116,8 +116,12 @@ async fn get_bh_ver() -> Result<String, String> {
 }
 
 /// 获取 OA 分发信息（返回 dispatch 原始文本）。
-/// 注意：PC 客户端使用 `_gf_pc_bilibili` 版本标签，安卓标签的分发信息
-/// 会让游戏登录返回错误（游戏端 errorCode 10030）。
+///
+/// **优先动态查询（query_gameserver），预置仅作网络异常回退**。
+/// 关键：动态查询返回的是与**当前游戏版本实时匹配**的分发串（实测短串 ~44 字符）；
+/// 而预置串是固化的旧数据（实测长串 ~3200 字符，源自 BBH3ScanLaunch 的启动器格式），
+/// 游戏小版本更新后会过期——用它会让游戏端资源版本不匹配、下载数百 MB 差异资源。
+/// 参考 scannerHelper（同类扫码器）亦只用动态查询。
 pub async fn get_oa_server() -> Result<String, String> {
     let bh_ver = match get_bh_ver().await {
         Ok(v) => v,
@@ -131,29 +135,32 @@ pub async fn get_oa_server() -> Result<String, String> {
             }
         }
     }
-    // 方式一（参考 BBH3ScanLaunch）：使用按版本预置的分发串（社区实测可用）。
+    // 方式一（首选）：query_gameserver 动态查询——拿到当前版本的分发串。
+    // 安卓标签（_gf_android_bilibili）为参考项目一致用法；旧 PC 标签会导致
+    // 工具侧确认成功但游戏端报错。
+    let url = format!(
+        "https://outer-dp-bb01.bh3.com/query_gameserver?version={}_gf_android_bilibili&token={}",
+        bh_ver,
+        constants::OA_TOKEN_DEFAULT
+    );
+    match send_get_raw(&url).await {
+        Ok(dispatch) if dispatch.trim().chars().count() >= 10 => {
+            let dispatch = dispatch.trim().to_string();
+            if let Ok(mut c) = OA_DISPATCH_CACHE.write() {
+                *c = Some((bh_ver, dispatch.clone()));
+            }
+            return Ok(dispatch);
+        }
+        _ => {}
+    }
+    // 方式二（回退）：动态查询失败时用预置分发串兜底（可能过期，仅网络异常时用）。
     if let Some(dispatch) = constants::preset_dispatch(&bh_ver) {
         if let Ok(mut c) = OA_DISPATCH_CACHE.write() {
             *c = Some((bh_ver, dispatch.to_string()));
         }
         return Ok(dispatch.to_string());
     }
-    // 方式二：query_gameserver 动态查询（安卓标签——参考项目一致；旧 PC 标签会导致
-    // 工具侧确认成功但游戏端报错）。
-    let url = format!(
-        "https://outer-dp-bb01.bh3.com/query_gameserver?version={}_gf_android_bilibili&token={}",
-        bh_ver,
-        constants::OA_TOKEN_DEFAULT
-    );
-    let dispatch = send_get_raw(&url).await?;
-    // dispatch 是 base64 分发串；过短（如空串/错误页）视为获取失败。
-    if dispatch.trim().chars().count() < 10 {
-        return Err("获取 OA 服务器信息失败，请检查网络后重试".to_string());
-    }
-    if let Ok(mut c) = OA_DISPATCH_CACHE.write() {
-        *c = Some((bh_ver, dispatch.clone()));
-    }
-    Ok(dispatch)
+    Err("获取 OA 服务器信息失败，请检查网络后重试".to_string())
 }
 
 /// B 服 bh_info（由 verify 得到）。
