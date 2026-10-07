@@ -118,11 +118,10 @@ async fn get_bh_ver() -> Result<String, String> {
 /// 获取 OA 分发信息（返回 dispatch 原始文本）。
 ///
 /// **优先动态查询（query_gameserver），预置仅作网络异常回退**。
-/// 关键：
-/// 1. 动态查询返回与**当前游戏版本实时匹配**的分发串；预置串是固化旧数据，
-///    游戏更新后会过期——用它会让游戏端资源版本不匹配、下载数百 MB 差异资源。
-/// 2. 必须用 PC 标签 _gf_pc_bilibili（本工具确认 PC 客户端登录）；安卓标签
-///    的分发串会让 PC 游戏端报 errorCode 10030。
+/// 关键：动态查询返回的是与**当前游戏版本实时匹配**的分发串（实测短串 ~44 字符）；
+/// 而预置串是固化的旧数据（实测长串 ~3200 字符，源自 BBH3ScanLaunch 的启动器格式），
+/// 游戏小版本更新后会过期——用它会让游戏端资源版本不匹配、下载数百 MB 差异资源。
+/// 参考 scannerHelper（同类扫码器）亦只用动态查询。
 pub async fn get_oa_server() -> Result<String, String> {
     let bh_ver = match get_bh_ver().await {
         Ok(v) => v,
@@ -137,11 +136,10 @@ pub async fn get_oa_server() -> Result<String, String> {
         }
     }
     // 方式一（首选）：query_gameserver 动态查询——拿到当前版本的分发串。
-    // 必须用 PC 标签 _gf_pc_bilibili：本工具确认的是 PC 客户端登录，
-    // 安卓标签（_gf_android_bilibili）返回的安卓分发串会让 PC 游戏端
-    // 报 errorCode 10030（实测两标签返回不同：PC 172 字符 / 安卓 44 字符）。
+    // 安卓标签（_gf_android_bilibili）为参考项目一致用法；旧 PC 标签会导致
+    // 工具侧确认成功但游戏端报错。
     let url = format!(
-        "https://outer-dp-bb01.bh3.com/query_gameserver?version={}_gf_pc_bilibili&token={}",
+        "https://outer-dp-bb01.bh3.com/query_gameserver?version={}_gf_android_bilibili&token={}",
         bh_ver,
         constants::OA_TOKEN_DEFAULT
     );
