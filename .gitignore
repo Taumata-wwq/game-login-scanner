@@ -1,16 +1,6 @@
-# Rust / Tauri
-/src-tauri/target/
-/src-tauri/gen/schemas/
-/src-tauri/check.out
-/src-tauri/check.err
-/src-tauri/rel.out
-/src-tauri/rel.err
-/b.err
-/b.out
-/.tmp_check.js
-**/*.rs.bk
-
 # 构建产物
+/src-tauri/target/
+/src-tauri/gen/
 /dist/
 *.exe
 *.pdb
@@ -20,22 +10,21 @@
 # 依赖
 node_modules/
 
-# 临时文件
-*.tmp
-*.json.tmp
-*.json.corrupt.*
-*.log
-/clippy.err
+# 本地文档（维护者本地保留，不入库）
+/docs/
 
-# 参考项目（只读，不纳入版本控制）
+# 参考项目与第三方工具（只读参照，不入库）
 /reference/
-
-# 第三方 PC 扫码器（参照对比用，不纳入版本控制）
-/\[仅B服\]PC扫码器v1.4.7/
-/\[仅B服\]PC扫码器v1.4.7.exe_extracted/
+/[仅B服]PC扫码器v1.4.7*
 
 # GitHub Actions（token 缺 workflow scope，暂不推送）
 /.github/workflows/
+
+# 临时文件
+*.log
+*.tmp
+*.json.tmp
+*.json.corrupt.*
 
 # 编辑器 / 系统
 .vscode/
