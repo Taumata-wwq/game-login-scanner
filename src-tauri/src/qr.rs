@@ -306,7 +306,9 @@ pub fn decode_rgb_zedbar(rgb: &[u8], width: u32, height: u32) -> Option<(String,
     }
     // zedbar 只吃灰度：BT.601 亮度。
     let gray: Vec<u8> = rgb
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 151 + p[2] as u32 * 28) >> 8) as u8)
         .collect();
     let mut img = zedbar::Image::from_gray(&gray, width, height).ok()?;

@@ -41,7 +41,7 @@ fn live_probe() {
                         "[OK] verify: open_id={} combo_id={}",
                         info.open_id, info.combo_id
                     );
-                    match mihoyo::get_oa_server().await {
+                    match mihoyo::get_oa_server(&info.open_id).await {
                         Ok(d) => println!("[OK] OA 分发获取成功 ({} 字符)", d.chars().count()),
                         Err(e) => println!("[FAIL] OA 分发: {e}"),
                     }

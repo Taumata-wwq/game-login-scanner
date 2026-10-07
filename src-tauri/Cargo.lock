@@ -997,7 +997,6 @@ dependencies = [
  "rsa",
  "rustls",
  "rustls-native-certs",
- "rustls-pki-types",
  "schannel",
  "serde",
  "serde_json",

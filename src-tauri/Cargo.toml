@@ -59,7 +59,6 @@ openh264-sys2 = "0.9.8"
 # 直播流拉取：rustls（纯 Rust TLS，Windows schannel 对 B站 CDN 长连接有读乱码/EOF）
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8.4"
-rustls-pki-types = "1.15.1"
 schannel = "0.1.29"
 [features]
 custom-protocol = ["tauri/custom-protocol"]

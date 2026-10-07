@@ -1,0 +1,36 @@
+warning: field `prefix_symbols` is never read
+   --> vendor\openh264-sys2\build.rs:140:9
+    |
+127 |     struct NasmConfiguration {
+    |            ----------------- field in this struct
+...
+140 |         prefix_symbols: bool,
+    |         ^^^^^^^^^^^^^^
+    |
+    = note: `NasmConfiguration` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `openh264-sys2` (build script) generated 1 warning
+   Compiling game-login-scanner v0.2.0 (G:\py\崩坏3扫码器\src-tauri)
+warning: manually reimplementing `div_ceil`
+   --> src\live.rs:385:19
+    |
+385 |         let mag = ((v + 1) / 2) as i32;
+    |                   ^^^^^^^^^^^^^ help: consider using `.div_ceil()`: `v.div_ceil(2)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#manual_div_ceil
+    = note: `#[warn(clippy::manual_div_ceil)]` on by default
+
+warning: using `chunks_exact` with a constant chunk size
+   --> src\qr.rs:309:10
+    |
+309 |         .chunks_exact(3)
+    |          ^^^^^^^^^^^^^^^ help: consider using `as_chunks` instead: `as_chunks::<3>().0.iter()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#chunks_exact_to_as_chunks
+    = note: `#[warn(clippy::chunks_exact_to_as_chunks)]` on by default
+
+warning: `game-login-scanner` (lib) generated 2 warnings (run `cargo clippy --fix --lib -p game-login-scanner -- ` to apply 2 suggestions)
+warning: `game-login-scanner` (lib test) generated 2 warnings (2 duplicates)
+warning: `game-login-scanner` (lib) generated 2 warnings (2 duplicates)
+    Finished `release` profile [optimized] target(s) in 17.54s

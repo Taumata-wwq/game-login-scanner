@@ -1,0 +1,15 @@
+warning: field `prefix_symbols` is never read
+   --> vendor\openh264-sys2\build.rs:140:9
+    |
+127 |     struct NasmConfiguration {
+    |            ----------------- field in this struct
+...
+140 |         prefix_symbols: bool,
+    |         ^^^^^^^^^^^^^^
+    |
+    = note: `NasmConfiguration` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `openh264-sys2` (build script) generated 1 warning
+   Compiling game-login-scanner v0.2.0 (G:\py\崩坏3扫码器\src-tauri)
+    Finished `release` profile [optimized] target(s) in 3m 15s

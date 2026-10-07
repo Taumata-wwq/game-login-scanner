@@ -382,7 +382,7 @@ impl<'a> BitReader<'a> {
     }
     fn se(&mut self) -> Option<i32> {
         let v = self.ue()?;
-        let mag = ((v + 1) / 2) as i32;
+        let mag = v.div_ceil(2) as i32;
         Some(if v % 2 == 1 { mag } else { -mag })
     }
 }
