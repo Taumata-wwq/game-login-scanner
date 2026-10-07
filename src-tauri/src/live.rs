@@ -831,8 +831,27 @@ pub fn diag() -> Option<(u64, u32, usize)> {
     Some((b.seq, b.ts, f.queue.len()))
 }
 
-/// 扫码消费者：自上次消费以来有新帧时返回最新帧的**当前显示视口**区域
-/// （2×2 平均半尺寸 RGB）。视口未知时用全帧。
+/// 扫码取帧输出的最长边上限（像素）：超过则等比缩小以控制 YUV→RGB 成本；
+/// 1080p 及以下流不受影响（原分辨率输出）。
+const SCAN_MAX_LONG_SIDE: u32 = 1920;
+
+/// 扫码取帧的输出尺寸：裁剪区不超过上限时原分辨率输出（保二维码模块细节），
+/// 超过则等比缩小到最长边 = SCAN_MAX_LONG_SIDE。
+pub fn scan_output_size(cw: u32, ch: u32) -> (u32, u32) {
+    let (cw, ch) = (cw.max(1), ch.max(1));
+    if cw.max(ch) <= SCAN_MAX_LONG_SIDE {
+        return (cw, ch);
+    }
+    let lim = SCAN_MAX_LONG_SIDE as u64;
+    if cw >= ch {
+        (SCAN_MAX_LONG_SIDE, ((ch as u64 * lim) / cw as u64).max(1) as u32)
+    } else {
+        (((cw as u64 * lim) / ch as u64).max(1) as u32, SCAN_MAX_LONG_SIDE)
+    }
+}
+
+/// 扫码消费者：返回最新帧的**当前显示视口**区域（原分辨率 RGB，
+/// 超上限才等比缩小）。视口未知时用全帧。
 pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
     let live = lock_live();
     let s = live.as_ref()?;
@@ -844,15 +863,17 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
         return None;
     }
     let (fw, fh) = (frame.w, frame.h);
+    // 裁剪区 = 视口（流坐标系），并夹到流尺寸内（此前用错坐标系且未夹到流边界，
+    // 视口超出流时裁剪会越界）。
     let crop = view.and_then(|(x, y, w, h)| {
         if w <= 0 || h <= 0 {
             return None;
         }
-        let x0 = x.clamp(0, w - 1);
-        let y0 = y.clamp(0, h - 1);
-        let cw0 = (w.min(w - x0)).max(2) as u32;
-        let ch0 = (h.min(h - y0)).max(2) as u32;
-        Some((x0 as u32, y0 as u32, cw0, ch0))
+        let x0 = (x.max(0) as u32).min(fw.saturating_sub(1));
+        let y0 = (y.max(0) as u32).min(fh.saturating_sub(1));
+        let cw0 = (w as u32).min(fw - x0).max(2);
+        let ch0 = (h as u32).min(fh - y0).max(2);
+        Some((x0, y0, cw0, ch0))
     });
     // 无新帧且缓存命中（视口未变）：复用上次 RGB，保证供帧率 100%。
     if let Some(c) = &f.scan_cache {
@@ -860,11 +881,11 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
             return Some((c.rgb.clone(), c.w, c.h));
         }
     }
-    // 输出半尺寸（2×2 面积平均）——二维码半尺寸足够，成本约 1/4。
-    // 扫码要求还原度：step=1 全平均（输出半尺寸，等于 2×2 面积平均）。
+    // 原分辨率输出（保二维码模块细节），仅超上限才等比缩小。
+    // 此前无条件减半，导致全屏视口下二维码模块过小、无法识别（放大才可识别）。
     let (rgb, ow, oh) = match crop {
         Some(c) => {
-            let (hw, hh) = ((c.2 / 2).max(1), (c.3 / 2).max(1));
+            let (ow, oh) = scan_output_size(c.2, c.3);
             (
                 yuv_crop_to_rgb(
                     &frame.y,
@@ -873,16 +894,16 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
                     fw as usize,
                     fh as usize,
                     c,
-                    hw as usize,
-                    hh as usize,
+                    ow as usize,
+                    oh as usize,
                     1,
                 ),
-                hw,
-                hh,
+                ow,
+                oh,
             )
         }
         None => {
-            let (hw, hh) = ((fw / 2).max(1), (fh / 2).max(1));
+            let (ow, oh) = scan_output_size(fw, fh);
             (
                 yuv_crop_to_rgb(
                     &frame.y,
@@ -891,12 +912,12 @@ pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
                     fw as usize,
                     fh as usize,
                     (0, 0, fw, fh),
-                    hw as usize,
-                    hh as usize,
+                    ow as usize,
+                    oh as usize,
                     1,
                 ),
-                hw,
-                hh,
+                ow,
+                oh,
             )
         }
     };

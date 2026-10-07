@@ -694,3 +694,23 @@ fn strip_sps_vui_handles_idr_embedded_sps() {
     assert_eq!(out[15], 0x95);
 }
 
+#[test]
+fn scan_output_size_preserves_full_hd() {
+    // 1080p 及以下原分辨率输出（保二维码模块细节）。
+    assert_eq!(game_login_scanner_lib::live::scan_output_size(1920, 1080), (1920, 1080));
+    assert_eq!(game_login_scanner_lib::live::scan_output_size(960, 540), (960, 540));
+    // 全屏视口（1920 宽）不再被无条件减半。
+    assert_eq!(game_login_scanner_lib::live::scan_output_size(1920, 1080).0, 1920);
+}
+
+#[test]
+fn scan_output_size_caps_4k() {
+    // 超过 1920 才等比缩小到最长边 1920。
+    assert_eq!(game_login_scanner_lib::live::scan_output_size(3840, 2160), (1920, 1080));
+    // 竖屏（高为长边）。
+    let (w, h) = game_login_scanner_lib::live::scan_output_size(1080, 3840);
+    assert_eq!(h, 1920);
+    assert!(w < h);
+}
+
+
