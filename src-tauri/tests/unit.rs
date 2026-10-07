@@ -638,3 +638,59 @@ fn parse_bili_durl_extracts_legacy_url() {
     let url = game_login_scanner_lib::live::parse_bili_durl(&v).expect("应提取到 durl url");
     assert!(url.starts_with("https://d1--cn-gotcha04"));
 }
+
+// ---------- 直播 SPS VUI 清除（openh264 兼容性补丁）----------
+
+fn hex_decode(s: &str) -> Vec<u8> {
+    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    (0..cleaned.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&cleaned[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn strip_sps_vui_removes_vui_flag() {
+    // 房间 11762420 真实参数集：SPS 带 VUI（HRD 等），openh264 解析失败（dsNoParamSets）。
+    let params = hex_decode(
+        "000000016764002aac2ca501e0089f97016a020202800001f40000ea607000000493e000007a1205de5c14\
+         0000000168eb8f2c",
+    );
+    let (out, changed) = game_login_scanner_lib::live::strip_sps_vui(&params);
+    assert!(changed, "带 VUI 的 SPS 应被清除");
+    assert_eq!(out.len(), params.len(), "仅翻转 flag 位，长度不变");
+    // vui_present_flag 位于 SPS 内 RBSP 第 86 bit（params[15] 的 bit6）：
+    // 0x97 (1001 0111) → 0x95 (1001 0101)
+    assert_eq!(params[15], 0x97);
+    assert_eq!(out[15], 0x95);
+    // PPS 部分保持不变
+    assert_eq!(
+        &out[out.len() - 8..],
+        &[0x00, 0x00, 0x00, 0x01, 0x68, 0xeb, 0x8f, 0x2c]
+    );
+}
+
+#[test]
+fn strip_sps_vui_noop_without_vui() {
+    // 已无 VUI 的 SPS（flag=0）：应原样返回，不改动。
+    let params = hex_decode(
+        "000000016764002aac2ca501e0089f95016a020202800001f40000ea607000000493e000007a1205de5c14\
+         0000000168eb8f2c",
+    );
+    let (out, changed) = game_login_scanner_lib::live::strip_sps_vui(&params);
+    assert!(!changed, "无 VUI 不应改动");
+    assert_eq!(out, params);
+}
+
+#[test]
+fn strip_sps_vui_handles_idr_embedded_sps() {
+    // IDR 帧内嵌一份带 VUI 的重复 SPS：也必须清除（帧 0 报 dsNoParamSets 的根因）。
+    let idr = hex_decode(
+        "000000016764002aac2ca501e0089f97016a020202800001f40000ea607000000493e000007a1205de5c14\
+         0000000165b8",
+    );
+    let (out, changed) = game_login_scanner_lib::live::strip_sps_vui(&idr);
+    assert!(changed);
+    assert_eq!(out[15], 0x95);
+}
+
