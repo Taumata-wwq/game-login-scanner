@@ -116,8 +116,11 @@ async fn get_bh_ver() -> Result<String, String> {
 }
 
 /// 获取 OA 分发信息（返回 dispatch 原始文本）。
-/// 注意：PC 客户端使用 `_gf_pc_bilibili` 版本标签，安卓标签的分发信息
-/// 会让游戏登录返回错误（游戏端 errorCode 10030）。
+///
+/// 优先实时接口（MHY_Scanner 同款 api.v6qbb.cloud/get_bh3_bilibili_oa）。
+/// 关键：固化的预置串是旧游戏版本的数据，游戏资源更新后即过期，会导致游戏端
+/// 资源版本不匹配、每次登录下载数百 MB 差异资源。实时接口返回与当前游戏版本
+/// 匹配的分发串，避免下载。回退链：实时接口 -> 预置串 -> query_gameserver。
 pub async fn get_oa_server() -> Result<String, String> {
     let bh_ver = match get_bh_ver().await {
         Ok(v) => v,
@@ -131,15 +134,24 @@ pub async fn get_oa_server() -> Result<String, String> {
             }
         }
     }
-    // 方式一（参考 BBH3ScanLaunch）：使用按版本预置的分发串（社区实测可用）。
+    // 方式一（首选）：实时接口（MHY_Scanner 同款），返回当前版本的分发串。
+    if let Ok(dispatch) = send_get_raw(constants::BH3_OA_REALTIME_URL).await {
+        if dispatch.trim().chars().count() >= 100 {
+            let dispatch = dispatch.trim().to_string();
+            if let Ok(mut c) = OA_DISPATCH_CACHE.write() {
+                *c = Some((bh_ver, dispatch.clone()));
+            }
+            return Ok(dispatch);
+        }
+    }
+    // 方式二（回退）：按版本预置的分发串（可能过期，仅实时接口不可用时用）。
     if let Some(dispatch) = constants::preset_dispatch(&bh_ver) {
         if let Ok(mut c) = OA_DISPATCH_CACHE.write() {
             *c = Some((bh_ver, dispatch.to_string()));
         }
         return Ok(dispatch.to_string());
     }
-    // 方式二：query_gameserver 动态查询（安卓标签——参考项目一致；旧 PC 标签会导致
-    // 工具侧确认成功但游戏端报错）。
+    // 方式三（回退）：query_gameserver 动态查询（安卓标签）。
     let url = format!(
         "https://outer-dp-bb01.bh3.com/query_gameserver?version={}_gf_android_bilibili&token={}",
         bh_ver,
