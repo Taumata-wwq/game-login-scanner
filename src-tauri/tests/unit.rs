@@ -714,3 +714,14 @@ fn scan_output_size_caps_4k() {
 }
 
 
+// ---------- 分块扫码解码（全屏小二维码兜底）----------
+
+#[test]
+fn decode_rgb_tiled_finds_small_qr() {
+    // 需真实测试图，见 zz_probe_screen（手动运行）。此处仅验证小图直接返回 None。
+    let rgb = vec![255u8; 100 * 100 * 3];
+    assert!(game_login_scanner_lib::qr::decode_rgb_tiled(&rgb, 100, 100).is_none());
+}
+
+
+

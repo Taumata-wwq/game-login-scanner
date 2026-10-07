@@ -36,6 +36,8 @@ const STOP_MARKER: &str = "__stopped__";
 const ROI_MARGIN: u32 = 96;
 /// 全分辨率整屏解码的最小间隔（最贵路径，节流用）。
 const FULLRES_MIN_INTERVAL: Duration = Duration::from_millis(400);
+/// 分块解码的最小间隔：单次遍历全屏分块约 100~400ms，必须节流（最贵路径）。
+const TILED_MIN_INTERVAL: Duration = Duration::from_millis(600);
 /// 缩略图抽样步长（像素）。
 const THUMB_STRIDE: u32 = 16;
 /// 「非登录码」诊断提示的最大次数。
@@ -269,6 +271,8 @@ struct LoopState {
     last_thumbs: Vec<Option<Vec<u8>>>,
     /// 上次全分辨率整屏解码时间（节流）。
     last_fullres: Option<tokio::time::Instant>,
+    /// 上次分块解码时间（最贵路径，独立节流）。
+    last_tiled: Option<tokio::time::Instant>,
     unknown_qr_reported: u32,
     /// 每个票据的失败次数（超过上限后跳过，避免无限重试同一失效码）。
     failed_count: std::collections::HashMap<String, u32>,
@@ -295,6 +299,7 @@ impl LoopState {
             screens_empty_reported: false,
             last_thumbs: Vec::new(),
             last_fullres: None,
+            last_tiled: None,
             unknown_qr_reported: 0,
             failed_count: std::collections::HashMap::new(),
             throttle_stop: false,
@@ -725,7 +730,7 @@ async fn process_screen(
 
     // 3) 降采样快路径（大屏）。
     let located = qr::decode_rgb_downscaled(&frame.rgb, frame.w, frame.h).or_else(|| {
-        // 4) 全分辨率解码（最贵路径，节流）。
+        // 4) 全分辨率解码（较贵路径，节流）。
         let now = tokio::time::Instant::now();
         if let Some(t) = st.last_fullres {
             if now - t < FULLRES_MIN_INTERVAL {
@@ -734,6 +739,19 @@ async fn process_screen(
         }
         st.last_fullres = Some(now);
         qr::decode_rgb_fullres(&frame.rgb, frame.w, frame.h)
+        // 5) 分块全分辨率解码（最贵路径，独立节流）：全屏小二维码在整图中
+        //    占比过小、整图网格检测易失败，切重叠块后等价放大，识别率更高。
+        //    仅在整图未命中时兜底，不做每轮都跑（耗时与画面尺寸成正比）。
+        .or_else(|| {
+            let now2 = tokio::time::Instant::now();
+            if let Some(t) = st.last_tiled {
+                if now2 - t < TILED_MIN_INTERVAL {
+                    return None;
+                }
+            }
+            st.last_tiled = Some(now2);
+            qr::decode_rgb_tiled(&frame.rgb, frame.w, frame.h)
+        })
     });
     let Some((text, loc)) = located else {
         return false;

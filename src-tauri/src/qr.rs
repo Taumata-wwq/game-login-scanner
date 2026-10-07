@@ -295,6 +295,42 @@ pub fn decode_rgb_fullres(rgb: &[u8], width: u32, height: u32) -> Option<(String
     None
 }
 
+/// 分块全分辨率解码（全屏小二维码兜底）。
+///
+/// 全屏扫描时二维码在整图中占比很小，rqrr 直接对整图检测网格易失败；切成
+/// 重叠块后二维码在块内占比显著增大（等价「放大到二维码附近」），识别率提升。
+/// 命中即返回，最坏（无码）才遍历全部块。调用方应先试过全图解码。
+pub fn decode_rgb_tiled(rgb: &[u8], width: u32, height: u32) -> Option<(String, Option<QrBox>)> {
+    const TILE: u32 = 384;
+    const STEP: u32 = 256; // 重叠 128px：小二维码不会被块边界切断
+    if width <= TILE && height <= TILE {
+        return None;
+    }
+    let mut y = 0u32;
+    loop {
+        let mut x = 0u32;
+        loop {
+            let tw = TILE.min(width - x);
+            let th = TILE.min(height - y);
+            if let Some((sub, sw, sh)) = crop_rgb(rgb, width, height, QrBox { x, y, w: tw, h: th }) {
+                if let Some((text, loc)) = decode_rgb_fullres(&sub, sw, sh) {
+                    let loc = loc.map(|b| QrBox { x: b.x + x, y: b.y + y, w: b.w, h: b.h });
+                    return Some((text, loc));
+                }
+            }
+            if x + TILE >= width {
+                break;
+            }
+            x += STEP;
+        }
+        if y + TILE >= height {
+            break;
+        }
+        y += STEP;
+    }
+    None
+}
+
 /// 解码 RGB 图片，返回文本。
 pub fn decode_rgb(rgb: &[u8], width: u32, height: u32) -> Option<String> {
     decode_rgb_located(rgb, width, height).map(|(text, _)| text)
