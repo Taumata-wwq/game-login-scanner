@@ -1,26 +1,14 @@
-//! 系统剪贴板：读取位图（CF_DIB/CF_DIBV5）与清空。
+//! 系统剪贴板：读取位图（CF_DIB/CF_DIBV5）。
 //!
-//! 替代 arboard 依赖（其携带完整 image 库）；只实现本工具需要的两个操作，
+//! 替代 arboard 依赖（其携带完整 image 库）；只实现本工具需要的读图操作，
 //! 坐标/行序按 Windows DIB 规范手工解析。
 
 use windows::Win32::Foundation::HGLOBAL;
-use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard,
-};
+use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 
 const CF_DIB: u32 = 8;
 const CF_DIBV5: u32 = 17;
-
-/// 清空剪贴板（失败静默——剪贴板被其它进程占用时无可操作空间）。
-pub fn clear() {
-    unsafe {
-        if OpenClipboard(None).is_ok() {
-            let _ = EmptyClipboard();
-            let _ = CloseClipboard();
-        }
-    }
-}
 
 /// 读取剪贴板位图，返回 (RGBA, 宽, 高)（自上而下）；非位图或解析失败返回 None。
 pub fn read_image_rgba() -> Option<(Vec<u8>, u32, u32)> {

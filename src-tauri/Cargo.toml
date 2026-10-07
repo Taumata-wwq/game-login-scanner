@@ -82,6 +82,11 @@ codegen-units = 1
 [profile.release.package.openh264-sys2]
 opt-level = 2
 
+# 本 crate 用 "z"（体积优先）：解码/转换热点在 openh264 C 代码（已单独 O2），
+# QR 解码在 rqrr/zedbar（独立 crate），Rust 侧主要是 IPC 与整数转换。
+[profile.release.package.game-login-scanner]
+opt-level = "z"
+
 # 体积再裁剪：事件驱动 / 低频路径的 crate 用 "z"（性能不敏感）。
 [profile.release.package.tauri]
 opt-level = "z"

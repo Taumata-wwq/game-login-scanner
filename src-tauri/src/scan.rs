@@ -367,12 +367,7 @@ fn friendly_error(raw: &str) -> String {
 /// 扫码命中后的收尾（三条命中路径共用）。
 /// 触发成功频率限制时：服务端已确认、游戏已登录，但不再执行「成功后动作」，
 /// 提示后直接停止扫描；正常路径执行清剪贴板 / 自动退出。两条路径都结束扫描。
-async fn finish_success(
-    app: &tauri::AppHandle,
-    st: &LoopState,
-    clear_clipboard: bool,
-    auto_close: bool,
-) {
+async fn finish_success(app: &tauri::AppHandle, st: &LoopState, auto_close: bool) {
     if st.throttle_stop {
         emit(
             app,
@@ -382,7 +377,7 @@ async fn finish_success(
         return;
     }
     emit(app, "success", "扫码成功");
-    finalize_success(app, clear_clipboard, auto_close).await;
+    finalize_success(app, auto_close).await;
 }
 
 /// 处理一个候选登录码：确认成功返回 true；失败/未登录/忽略按去重与退避策略记录。
@@ -480,7 +475,6 @@ pub struct ScanArgs {
     pub bili: BiliToken,
     pub official: OfficialToken,
     pub device_id: String,
-    pub clear_clipboard: bool,
     pub auto_close: bool,
     pub stop: Arc<AtomicBool>,
     /// 游戏内显示的账号名（B 服 confirm 用）。
@@ -496,7 +490,6 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         bili,
         official,
         device_id,
-        clear_clipboard,
         auto_close,
         stop,
         display_name,
@@ -547,7 +540,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         if let Some(text) = qr::decode_rgb(&rgb, w, h) {
             if let Some(qrc) = qr::extract(&text) {
                 if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
-                    finish_success(&app, &st, clear_clipboard, auto_close).await;
+                    finish_success(&app, &st, auto_close).await;
                     return;
                 }
                 if st.stopped {
@@ -592,7 +585,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                             if st.stopped {
                                 emit(&app, "stopped", "已停止扫描");
                             } else {
-                                finish_success(&app, &st, clear_clipboard, auto_close).await;
+                                finish_success(&app, &st, auto_close).await;
                             }
                             return;
                         }
@@ -618,21 +611,11 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match region {
                 Some(rect) => {
-                    if process_screen(
-                        &app,
-                        &mut ctx,
-                        &mut st,
-                        0,
-                        rect,
-                        clear_clipboard,
-                        auto_close,
-                    )
-                    .await
-                    {
+                    if process_screen(&app, &mut ctx, &mut st, 0, rect, auto_close).await {
                         if st.stopped {
                             emit(&app, "stopped", "已停止扫描");
                         } else {
-                            finish_success(&app, &st, clear_clipboard, auto_close).await;
+                            finish_success(&app, &st, auto_close).await;
                         }
                         return;
                     }
@@ -652,21 +635,11 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                             emit(&app, "stopped", "已停止扫描");
                             return;
                         }
-                        if process_screen(
-                            &app,
-                            &mut ctx,
-                            &mut st,
-                            idx,
-                            *rect,
-                            clear_clipboard,
-                            auto_close,
-                        )
-                        .await
-                        {
+                        if process_screen(&app, &mut ctx, &mut st, idx, *rect, auto_close).await {
                             if st.stopped {
                                 emit(&app, "stopped", "已停止扫描");
                             } else {
-                                finish_success(&app, &st, clear_clipboard, auto_close).await;
+                                finish_success(&app, &st, auto_close).await;
                             }
                             return;
                         }
@@ -693,7 +666,6 @@ async fn process_screen(
     st: &mut LoopState,
     idx: usize,
     rect: (i32, i32, i32, i32),
-    clear_clipboard: bool,
     auto_close: bool,
 ) -> bool {
     // 0) 取帧：桌面复制只在画面变化时给出帧，静止屏幕在此近零成本跳过。
@@ -730,7 +702,7 @@ async fn process_screen(
             if let Some(text) = qr::decode_rgb(&roi, rw, rh) {
                 if let Some(qrc) = qr::extract(&text) {
                     if try_confirm(app, ctx, &qrc, st).await {
-                        finish_success(app, st, clear_clipboard, auto_close).await;
+                        finish_success(app, st, auto_close).await;
                         return true;
                     }
                     return st.stopped;
@@ -750,20 +722,20 @@ async fn process_screen(
         }
         st.last_fullres = Some(now);
         qr::decode_rgb_fullres(&frame.rgb, frame.w, frame.h)
-        // 5) zedbar 兜底（最贵路径，独立节流）：ZBar 算法识别率高于 rqrr，
-        //    且 retry_undecoded_regions 自动对检测到 finder 的小二维码区域
-        //    裁剪+放大重试（实测识别下限 ~130px → ~100px，覆盖全屏小码场景）。
-        //    仅在整图未命中时跑，避免拖慢高频循环。
-        .or_else(|| {
-            let now2 = tokio::time::Instant::now();
-            if let Some(t) = st.last_tiled {
-                if now2 - t < TILED_MIN_INTERVAL {
-                    return None;
+            // 5) zedbar 兜底（最贵路径，独立节流）：ZBar 算法识别率高于 rqrr，
+            //    且 retry_undecoded_regions 自动对检测到 finder 的小二维码区域
+            //    裁剪+放大重试（实测识别下限 ~130px → ~100px，覆盖全屏小码场景）。
+            //    仅在整图未命中时跑，避免拖慢高频循环。
+            .or_else(|| {
+                let now2 = tokio::time::Instant::now();
+                if let Some(t) = st.last_tiled {
+                    if now2 - t < TILED_MIN_INTERVAL {
+                        return None;
+                    }
                 }
-            }
-            st.last_tiled = Some(now2);
-            qr::decode_rgb_zedbar(&frame.rgb, frame.w, frame.h)
-        })
+                st.last_tiled = Some(now2);
+                qr::decode_rgb_zedbar(&frame.rgb, frame.w, frame.h)
+            })
     });
     let Some((text, loc)) = located else {
         return false;
@@ -785,19 +757,16 @@ async fn process_screen(
         st.last_hit = Some((idx, bx));
     }
     if try_confirm(app, ctx, &qrc, st).await {
-        finish_success(app, st, clear_clipboard, auto_close).await;
+        finish_success(app, st, auto_close).await;
         return true;
     }
     st.stopped
 }
 
-/// 成功后续动作：按配置清空剪贴板 / 自动退出。
+/// 成功后续动作：按配置自动退出。
 /// 退出前统一走 `crate::save_window_position`，避免自动退出时丢失窗口位置
 /// （`CloseRequested` 事件不会在 `app.exit()` 路径上触发）。
-async fn finalize_success(app: &tauri::AppHandle, clear_clipboard: bool, auto_close: bool) {
-    if clear_clipboard {
-        crate::clipboard::clear();
-    }
+async fn finalize_success(app: &tauri::AppHandle, auto_close: bool) {
     if auto_close {
         tokio::time::sleep(Duration::from_millis(500)).await;
         log::info!("扫码成功，按配置自动退出");

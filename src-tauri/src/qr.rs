@@ -319,7 +319,11 @@ pub fn decode_rgb_zedbar(rgb: &[u8], width: u32, height: u32) -> Option<(String,
         .retry_undecoded_regions(true);
     let mut scanner = zedbar::Scanner::with_config(config);
     let result = scanner.scan(&mut img);
-    let text = result.symbols().first().and_then(|s| s.data_string())?.to_string();
+    let text = result
+        .symbols()
+        .first()
+        .and_then(|s| s.data_string())?
+        .to_string();
     // 位置：第一个 finder 区域（若有），仅用于 ROI 加速。
     let loc = result.finder_regions().first().map(|r| QrBox {
         x: r.x,

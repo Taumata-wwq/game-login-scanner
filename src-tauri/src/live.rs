@@ -394,8 +394,7 @@ fn find_sps_vui_flag_pos(rbsp: &[u8]) -> Option<usize> {
     r.bits(8)?; // constraint_set_flags + reserved_zero_2bits
     r.bits(8)?; // level_idc
     r.ue()?; // seq_parameter_set_id
-    const HIGH_PROFILES: [u32; 13] =
-        [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135];
+    const HIGH_PROFILES: [u32; 13] = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135];
     if HIGH_PROFILES.contains(&profile) {
         let chroma = r.ue()?;
         if chroma == 3 {
@@ -845,9 +844,15 @@ pub fn scan_output_size(cw: u32, ch: u32) -> (u32, u32) {
     }
     let lim = SCAN_MAX_LONG_SIDE as u64;
     if cw >= ch {
-        (SCAN_MAX_LONG_SIDE, ((ch as u64 * lim) / cw as u64).max(1) as u32)
+        (
+            SCAN_MAX_LONG_SIDE,
+            ((ch as u64 * lim) / cw as u64).max(1) as u32,
+        )
     } else {
-        (((cw as u64 * lim) / ch as u64).max(1) as u32, SCAN_MAX_LONG_SIDE)
+        (
+            ((cw as u64 * lim) / ch as u64).max(1) as u32,
+            SCAN_MAX_LONG_SIDE,
+        )
     }
 }
 
@@ -951,9 +956,9 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
     if f.queue.is_empty() {
         return FrameOut::Empty;
     }
-    // 弹出节拍 = 显示节拍（前端 30fps 轮询）：每轮询至多弹出一个最旧帧，
-    // 队列空时复用队首帧。显示间隔完全由轮询时钟决定（均匀 30fps），到达抖动
-    // 被缓冲吸收——「到达即弹出」会把抖动直接透传，缓冲再深也无济于事。
+    // 弹出节拍 = 显示节拍（前端按设置的 30/60/120fps 轮询）：每轮询至多弹出一个
+    // 最旧帧，队列空时复用队首帧。显示间隔由轮询时钟决定，到达抖动被缓冲吸收
+    // ——「到达即弹出」会把抖动直接透传，缓冲再深也无济于事。
     let popped = f.queue.pop_front();
     let f = match &popped {
         Some(fr) => fr,

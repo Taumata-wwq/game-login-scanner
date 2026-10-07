@@ -232,7 +232,9 @@
   .dsec::after { content: ""; flex: 1; height: 1px; background: var(--line); }
   .dsec .btn { margin-left: auto; }
   .opt-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .opt-row .lbl { font-size: 11px; }
+  .opt-row .lbl { font-size: 11px; flex: 0 0 auto; }
+  /* 设置区内的登入名输入框：占据行内剩余空间。 */
+  .opt-row #displayName { flex: 1 1 auto; min-width: 0; max-width: 170px; height: 24px; }
   .opt-row .lbl small { display: block; color: var(--faint); font-size: 9.5px; margin-top: 1px; }
   .switch { position: relative; width: 30px; height: 17px; flex: none; }
   .switch input { opacity: 0; width: 0; height: 0; }
@@ -352,7 +354,7 @@
     <h1><button class="game-btn" id="btnGame" title="切换游戏">崩坏3</button> 扫码器</h1>
     <span class="spacer"></span>
     <div class="hbtns">
-      <button class="ibtn" id="btnTools" title="选项与日志">
+      <button class="ibtn" id="btnTools" title="设置与日志">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
           <path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="3"/>
         </svg>
@@ -521,17 +523,18 @@
   <div class="overlay" id="toolsOverlay" hidden>
     <div class="dialog">
       <div class="dhead">
-        选项与日志
+        设置与日志
         <span class="spacer"></span>
         <button class="ibtn" data-close="toolsOverlay" title="关闭">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </div>
       <div class="dbody">
-        <div class="dsec">登入名</div>
-        <input class="txtin full" id="displayName" type="text" maxlength="20" placeholder="游戏扫码器用户" autocomplete="off" />
-
-        <div class="dsec">启动</div>
+        <div class="dsec">设置</div>
+        <div class="opt-row">
+          <span class="lbl">登入名</span>
+          <input class="txtin" id="displayName" type="text" maxlength="20" placeholder="游戏扫码器用户" autocomplete="off" />
+        </div>
         <div class="opt-row">
           <span class="lbl">启动时自动开启扫码</span>
           <label class="switch"><input type="checkbox" id="autoLoginLast" /><span class="track"></span></label>
@@ -540,15 +543,17 @@
           <span class="lbl">窗口置顶</span>
           <label class="switch"><input type="checkbox" id="alwaysOnTop" /><span class="track"></span></label>
         </div>
-
-        <div class="dsec">扫码成功后</div>
         <div class="opt-row">
           <span class="lbl">扫码成功后自动退出</span>
           <label class="switch"><input type="checkbox" id="autoClose" /><span class="track"></span></label>
         </div>
         <div class="opt-row">
-          <span class="lbl">扫码成功后清空剪贴板</span>
-          <label class="switch"><input type="checkbox" id="clearClip" /><span class="track"></span></label>
+          <span class="lbl">显示区域帧率</span>
+          <div class="filter-seg" id="fpsSeg">
+            <button data-fps="30">30</button>
+            <button data-fps="60" class="on">60</button>
+            <button data-fps="120">120</button>
+          </div>
         </div>
 
         <div class="dsec">日志
@@ -1596,8 +1601,11 @@
     }
   }
 
-  const PREVIEW_INTERVAL = 16.7;   // 屏幕预览帧率上限 60fps
-  const LIVE_PREVIEW_INTERVAL = 33; // 直播预览固定 30fps（后端按此节拍弹出缓冲帧）
+  // 显示区域帧率（设置项 30/60/120，默认 60）：预览轮询间隔上限。
+  let fpsSetting = 60;
+  function previewIntervalMs() {
+    return 1000 / (fpsSetting || 60);
+  }
   const PREVIEW_IDLE_INTERVAL = 140;
   let idleFrames = 0;
   let previewActive = false;
@@ -1623,13 +1631,20 @@
     tickFps();
     if (!previewActive || gen !== previewGen) return;
     if (changed) idleFrames = 0; else idleFrames++;
+    // 直播：按设置帧率拉取（后端按同一节拍弹缓冲帧）。
     const interval = liveOn
-      ? LIVE_PREVIEW_INTERVAL
+      ? previewIntervalMs()
       : idleFrames > 2
         ? PREVIEW_IDLE_INTERVAL
-        : PREVIEW_INTERVAL;
+        : previewIntervalMs();
     const elapsed = performance.now() - t0;
     previewTimer = setTimeout(() => previewLoop(gen), Math.max(0, interval - elapsed));
+  }
+  /// 设置里切换显示帧率后调用：重启预览循环让新节拍立即生效。
+  function restartPreviewTiming() {
+    if (!previewActive) return;
+    stopPreview();
+    startPreview();
   }
   function startPreview() {
     if (previewActive || paused || dragging || baseMapActive) return;
@@ -1960,8 +1975,13 @@
     $('autoLoginLast').checked = !!config.auto_login_last;
     $('alwaysOnTop').checked = !!config.always_on_top;
     $('autoClose').checked = !!config.auto_close;
-    $('clearClip').checked = !!config.clear_clipboard;
     $('displayName').value = config.display_name || '';
+    // 显示帧率页签（30/60/120）。
+    const fps = config.display_fps || 60;
+    fpsSetting = fps;
+    document.querySelectorAll('#fpsSeg button').forEach((b) => {
+      b.classList.toggle('on', Number(b.dataset.fps) === fps);
+    });
   }
 
   function renderAll() {
@@ -1976,7 +1996,14 @@
     $('autoLoginLast').addEventListener('change', (e) => saveCfg({ auto_login_last: e.target.checked }));
     $('alwaysOnTop').addEventListener('change', (e) => saveCfg({ always_on_top: e.target.checked }));
     $('autoClose').addEventListener('change', (e) => saveCfg({ auto_close: e.target.checked }));
-    $('clearClip').addEventListener('change', (e) => saveCfg({ clear_clipboard: e.target.checked }));
+    document.querySelectorAll('#fpsSeg button').forEach((b) => {
+      b.addEventListener('click', () => {
+        fpsSetting = Number(b.dataset.fps) || 60;
+        document.querySelectorAll('#fpsSeg button').forEach((x) => x.classList.toggle('on', x === b));
+        saveCfg({ display_fps: fpsSetting });
+        restartPreviewTiming();
+      });
+    });
     const dn = $('displayName');
     dn.addEventListener('change', () => saveCfg({ display_name: dn.value.trim() }));
     dn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dn.blur(); } });

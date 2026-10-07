@@ -1285,7 +1285,6 @@ fn try_start_scan(app: &tauri::AppHandle, state: &AppState) -> Result<(), String
                 bili,
                 official,
                 device_id: cfg.device_id,
-                clear_clipboard: cfg.clear_clipboard,
                 auto_close: cfg.auto_close,
                 stop,
                 display_name,

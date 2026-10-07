@@ -169,7 +169,9 @@ pub struct AppConfig {
     /// 窗口置顶。
     pub always_on_top: bool,
     pub auto_close: bool,
-    pub clear_clipboard: bool,
+    /// 显示区域（预览）目标帧率：30 / 60 / 120。默认 60。
+    #[serde(default = "default_display_fps")]
+    pub display_fps: u32,
     pub win_x: Option<i32>,
     pub win_y: Option<i32>,
     pub device_id: String,
@@ -181,6 +183,19 @@ pub struct AppConfig {
     pub fp_seed_id: String,
     #[serde(default)]
     pub fp_seed_time: String,
+}
+
+/// display_fps 的 serde 默认值（旧配置无此字段时用 60）。
+fn default_display_fps() -> u32 {
+    60
+}
+
+/// 显示帧率白名单（设置项仅 30/60/120；配置被手改时收敛到 60）。
+pub fn normalize_display_fps(v: u32) -> u32 {
+    match v {
+        30 | 60 | 120 => v,
+        _ => 60,
+    }
 }
 
 impl Default for AppConfig {
@@ -198,7 +213,7 @@ impl Default for AppConfig {
             auto_login_last: false,
             always_on_top: false,
             auto_close: false,
-            clear_clipboard: false,
+            display_fps: default_display_fps(),
             win_x: None,
             win_y: None,
             device_id: String::new(),
@@ -463,6 +478,7 @@ impl AppConfig {
             Ok(text) => match serde_json::from_str::<AppConfig>(&text) {
                 Ok(mut cfg) => {
                     cfg.decrypt_secrets();
+                    cfg.display_fps = normalize_display_fps(cfg.display_fps);
                     cfg
                 }
                 Err(_) => {

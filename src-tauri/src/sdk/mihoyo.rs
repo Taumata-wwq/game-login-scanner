@@ -177,7 +177,10 @@ pub async fn get_oa_server(openid: &str) -> Result<String, String> {
 async fn fetch_oa_hellocraft(bh_ver: &str, openid: &str) -> Result<String, String> {
     let ver_tag = format!("{bh_ver}_gf_android_bilibili");
     let ts = now_sec();
-    let url = format!("{}?version={ver_tag}&t={ts}", constants::BH3_OA_DISPATCH_URL);
+    let url = format!(
+        "{}?version={ver_tag}&t={ts}",
+        constants::BH3_OA_DISPATCH_URL
+    );
     let sign_param = format!(
         "x-req-code=80&x-req-name=pc-1.4.7:80&x-req-openid={openid}&x-req-version={ver_tag}"
     );
@@ -192,10 +195,17 @@ async fn fetch_oa_hellocraft(bh_ver: &str, openid: &str) -> Result<String, Strin
     let resp = crate::http::get(&url, headers)
         .await
         .map_err(|e| format!("hellocraft 请求失败: {e}"))?;
-    let v: Value = serde_json::from_str(&resp.body)
-        .map_err(|_| format!("hellocraft 响应非 JSON: {}", &resp.body[..resp.body.len().min(120)]))?;
+    let v: Value = serde_json::from_str(&resp.body).map_err(|_| {
+        format!(
+            "hellocraft 响应非 JSON: {}",
+            &resp.body[..resp.body.len().min(120)]
+        )
+    })?;
     if v.get("retcode").and_then(|x| x.as_i64()) != Some(0) {
-        let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+        let msg = v
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("未知错误");
         return Err(format!("hellocraft 返回错误: {msg}"));
     }
     v.get("data")
