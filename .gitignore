@@ -24,6 +24,8 @@ node_modules/
 *.tmp
 *.json.tmp
 *.json.corrupt.*
+*.log
+/clippy.err
 
 # 参考项目（只读，不纳入版本控制）
 /reference/
