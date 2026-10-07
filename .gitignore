@@ -28,6 +28,10 @@ node_modules/
 # 参考项目（只读，不纳入版本控制）
 /reference/
 
+# 第三方 PC 扫码器（参照对比用，不纳入版本控制）
+/\[仅B服\]PC扫码器v1.4.7/
+/\[仅B服\]PC扫码器v1.4.7.exe_extracted/
+
 # GitHub Actions（token 缺 workflow scope，暂不推送）
 /.github/workflows/
 

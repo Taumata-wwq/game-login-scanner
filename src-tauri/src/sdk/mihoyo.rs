@@ -291,13 +291,6 @@ pub async fn scan_confirm(
 
     // scanConfirm
     let dispatch = get_oa_server(&bh_info.open_id).await?;
-    // 调试：记录 dispatch 来源特征（长度 + 首尾），用于排查资源下载问题。
-    log::info!(
-        "OA dispatch: len={} head={} tail={}",
-        dispatch.len(),
-        &dispatch[..dispatch.len().min(32)],
-        &dispatch[dispatch.len().saturating_sub(16)..]
-    );
 
     // 载荷对齐参考实现（scannerHelper / bh3_login_simulation）：
     // ext.data.accountID = open_id（**不要**留空，也不要用 MHY_Scanner 的 `c` 字段，
@@ -337,8 +330,6 @@ pub async fn scan_confirm(
     });
     make_sign(&mut result);
     let confirm_body = result.to_string().replace(' ', "");
-    // 调试：记录实际发出的 confirm 请求体（排查游戏端资源下载问题）。
-    log::info!("scanConfirm 请求体: {confirm_body}");
     let fb = send_post_json_str(&constants::panda_confirm_url(biz_key), &confirm_body).await?;
     if fb.get("retcode").and_then(|v| v.as_i64()) != Some(0) {
         let msg = fb
