@@ -117,11 +117,15 @@ async fn get_bh_ver() -> Result<String, String> {
 
 /// 获取 OA 分发信息（返回 dispatch 原始文本）。
 ///
-/// 优先实时接口（MHY_Scanner 同款 api.v6qbb.cloud/get_bh3_bilibili_oa）。
-/// 关键：固化的预置串是旧游戏版本的数据，游戏资源更新后即过期，会导致游戏端
-/// 资源版本不匹配、每次登录下载数百 MB 差异资源。实时接口返回与当前游戏版本
-/// 匹配的分发串，避免下载。回退链：实时接口 -> 预置串 -> query_gameserver。
-pub async fn get_oa_server() -> Result<String, String> {
+/// 首选 hellocraft v3 接口（[仅B服]PC扫码器 v1.4.7 同款）：返回与当前游戏版本
+/// 实时匹配的 dispatch。固化的预置串是旧游戏版本数据，游戏资源更新后即过期，
+/// 会导致游戏端资源版本不匹配、每次登录下载数百 MB 差异资源。
+/// 回退链：hellocraft v3 -> 预置串 -> query_gameserver。
+///
+/// 请求格式（逆向 v1.4.7 得到）：URL 带 version 与 t 查询参数，头部带
+/// x-req-code/x-req-name/x-req-openid/x-req-version，以及 x-req-sign =
+/// HMAC-SHA256(MIHOYO_SIGN_KEY, signParam)，signParam 见 fetch_oa_hellocraft。
+pub async fn get_oa_server(openid: &str) -> Result<String, String> {
     let bh_ver = match get_bh_ver().await {
         Ok(v) => v,
         Err(e) => return Err(format!("获取崩坏3版本号失败: {e}")),
@@ -134,17 +138,19 @@ pub async fn get_oa_server() -> Result<String, String> {
             }
         }
     }
-    // 方式一（首选）：实时接口（MHY_Scanner 同款），返回当前版本的分发串。
-    if let Ok(dispatch) = send_get_raw(constants::BH3_OA_REALTIME_URL).await {
-        if dispatch.trim().chars().count() >= 100 {
-            let dispatch = dispatch.trim().to_string();
+    // 方式一（首选）：hellocraft v3 接口。
+    match fetch_oa_hellocraft(&bh_ver, openid).await {
+        Ok(d) if d.chars().count() >= 100 => {
+            log::info!("使用 hellocraft OA dispatch: len={}", d.len());
             if let Ok(mut c) = OA_DISPATCH_CACHE.write() {
-                *c = Some((bh_ver, dispatch.clone()));
+                *c = Some((bh_ver.clone(), d.clone()));
             }
-            return Ok(dispatch);
+            return Ok(d);
         }
+        Ok(d) => log::warn!("hellocraft OA 返回过短（{}），回退", d.chars().count()),
+        Err(e) => log::warn!("hellocraft OA 调用失败: {e}，回退"),
     }
-    // 方式二（回退）：按版本预置的分发串（可能过期，仅实时接口不可用时用）。
+    // 方式二（回退）：按版本预置的分发串（可能过期）。
     if let Some(dispatch) = constants::preset_dispatch(&bh_ver) {
         if let Ok(mut c) = OA_DISPATCH_CACHE.write() {
             *c = Some((bh_ver, dispatch.to_string()));
@@ -158,7 +164,6 @@ pub async fn get_oa_server() -> Result<String, String> {
         constants::OA_TOKEN_DEFAULT
     );
     let dispatch = send_get_raw(&url).await?;
-    // dispatch 是 base64 分发串；过短（如空串/错误页）视为获取失败。
     if dispatch.trim().chars().count() < 10 {
         return Err("获取 OA 服务器信息失败，请检查网络后重试".to_string());
     }
@@ -166,6 +171,37 @@ pub async fn get_oa_server() -> Result<String, String> {
         *c = Some((bh_ver, dispatch.clone()));
     }
     Ok(dispatch)
+}
+
+/// hellocraft v3 OA 查询（v1.4.7 同款）。返回 JSON 的 data 字段（dispatch 原文）。
+async fn fetch_oa_hellocraft(bh_ver: &str, openid: &str) -> Result<String, String> {
+    let ver_tag = format!("{bh_ver}_gf_android_bilibili");
+    let ts = now_sec();
+    let url = format!("{}?version={ver_tag}&t={ts}", constants::BH3_OA_DISPATCH_URL);
+    let sign_param = format!(
+        "x-req-code=80&x-req-name=pc-1.4.7:80&x-req-openid={openid}&x-req-version={ver_tag}"
+    );
+    let sign = bh3_sign(&sign_param);
+    let headers: crate::http::Headers = vec![
+        ("x-req-code".to_string(), "80".to_string()),
+        ("x-req-name".to_string(), "pc-1.4.7:80".to_string()),
+        ("x-req-openid".to_string(), openid.to_string()),
+        ("x-req-version".to_string(), ver_tag.clone()),
+        ("x-req-sign".to_string(), sign),
+    ];
+    let resp = crate::http::get(&url, headers)
+        .await
+        .map_err(|e| format!("hellocraft 请求失败: {e}"))?;
+    let v: Value = serde_json::from_str(&resp.body)
+        .map_err(|_| format!("hellocraft 响应非 JSON: {}", &resp.body[..resp.body.len().min(120)]))?;
+    if v.get("retcode").and_then(|x| x.as_i64()) != Some(0) {
+        let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+        return Err(format!("hellocraft 返回错误: {msg}"));
+    }
+    v.get("data")
+        .and_then(|d| d.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "hellocraft 响应缺少 data".to_string())
 }
 
 /// B 服 bh_info（由 verify 得到）。
@@ -254,7 +290,14 @@ pub async fn scan_confirm(
     }
 
     // scanConfirm
-    let dispatch = get_oa_server().await?;
+    let dispatch = get_oa_server(&bh_info.open_id).await?;
+    // 调试：记录 dispatch 来源特征（长度 + 首尾），用于排查资源下载问题。
+    log::info!(
+        "OA dispatch: len={} head={} tail={}",
+        dispatch.len(),
+        &dispatch[..dispatch.len().min(32)],
+        &dispatch[dispatch.len().saturating_sub(16)..]
+    );
 
     // 载荷对齐参考实现（scannerHelper / bh3_login_simulation）：
     // ext.data.accountID = open_id（**不要**留空，也不要用 MHY_Scanner 的 `c` 字段，
@@ -294,6 +337,8 @@ pub async fn scan_confirm(
     });
     make_sign(&mut result);
     let confirm_body = result.to_string().replace(' ', "");
+    // 调试：记录实际发出的 confirm 请求体（排查游戏端资源下载问题）。
+    log::info!("scanConfirm 请求体: {confirm_body}");
     let fb = send_post_json_str(&constants::panda_confirm_url(biz_key), &confirm_body).await?;
     if fb.get("retcode").and_then(|v| v.as_i64()) != Some(0) {
         let msg = fb

@@ -26,9 +26,10 @@ pub const MIHOYO_SIGN_KEY: &str = "0ebc517adb1b62c6b408df153331f9aa";
 /// 崩坏3 B 服版本接口
 pub const BH3_VERSION_URL: &str = "https://api-v2.scanner.hellocraft.xyz/v4/hi3_version";
 
-/// B 服 OA 分发实时接口（MHY_Scanner 同款）。返回与当前游戏版本匹配的 dispatch，
-/// 避免使用固化旧串导致的游戏端资源版本不匹配（每次登录下载数百 MB）。
-pub const BH3_OA_REALTIME_URL: &str = "https://api.v6qbb.cloud/get_bh3_bilibili_oa";
+/// B 服 OA 分发查询接口（hellocraft v3，[仅B服]PC扫码器 v1.4.7 同款）。
+/// 返回与当前游戏版本匹配的 dispatch，避免固化旧串导致的游戏端资源版本不匹配
+/// （每次登录下载数百 MB 差异资源）。需带 x-req-* 签名头（见 sdk::mihoyo::get_oa_server）。
+pub const BH3_OA_DISPATCH_URL: &str = "https://dispatch.scanner.hellocraft.xyz/v3/query_dispatch/";
 
 /// 默认 OA token
 pub const OA_TOKEN_DEFAULT: &str = "ebdda08dce6feb6bc552d393bae58c81";
