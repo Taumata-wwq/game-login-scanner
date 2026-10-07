@@ -36,8 +36,8 @@ const STOP_MARKER: &str = "__stopped__";
 const ROI_MARGIN: u32 = 96;
 /// 全分辨率整屏解码的最小间隔（最贵路径，节流用）。
 const FULLRES_MIN_INTERVAL: Duration = Duration::from_millis(400);
-/// 分块解码的最小间隔：单次遍历全屏分块约 100~400ms，必须节流（最贵路径）。
-const TILED_MIN_INTERVAL: Duration = Duration::from_millis(600);
+/// zedbar 兜底解码的最小间隔：单次全屏约 40~100ms，节流避免拖慢高频循环。
+const TILED_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// 缩略图抽样步长（像素）。
 const THUMB_STRIDE: u32 = 16;
 /// 「非登录码」诊断提示的最大次数。
@@ -271,7 +271,7 @@ struct LoopState {
     last_thumbs: Vec<Option<Vec<u8>>>,
     /// 上次全分辨率整屏解码时间（节流）。
     last_fullres: Option<tokio::time::Instant>,
-    /// 上次分块解码时间（最贵路径，独立节流）。
+    /// 上次 zedbar 兜底解码时间（最贵路径，独立节流）。
     last_tiled: Option<tokio::time::Instant>,
     unknown_qr_reported: u32,
     /// 每个票据的失败次数（超过上限后跳过，避免无限重试同一失效码）。
@@ -575,7 +575,18 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         if crate::live::active() {
             if let Some((rgb, w, h)) = crate::live::take_scan_frame() {
                 live_seen = true;
-                if let Some(text) = qr::decode_rgb(&rgb, w, h) {
+                // rqrr 解码失败时用 zedbar 兜底（小二维码识别率更高，独立节流）。
+                let decoded = qr::decode_rgb(&rgb, w, h).or_else(|| {
+                    let now = tokio::time::Instant::now();
+                    if let Some(t) = st.last_tiled {
+                        if now - t < TILED_MIN_INTERVAL {
+                            return None;
+                        }
+                    }
+                    st.last_tiled = Some(now);
+                    qr::decode_rgb_zedbar(&rgb, w, h).map(|(text, _)| text)
+                });
+                if let Some(text) = decoded {
                     if let Some(qrc) = qr::extract(&text) {
                         if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
                             if st.stopped {
@@ -739,9 +750,10 @@ async fn process_screen(
         }
         st.last_fullres = Some(now);
         qr::decode_rgb_fullres(&frame.rgb, frame.w, frame.h)
-        // 5) 分块全分辨率解码（最贵路径，独立节流）：全屏小二维码在整图中
-        //    占比过小、整图网格检测易失败，切重叠块后等价放大，识别率更高。
-        //    仅在整图未命中时兜底，不做每轮都跑（耗时与画面尺寸成正比）。
+        // 5) zedbar 兜底（最贵路径，独立节流）：ZBar 算法识别率高于 rqrr，
+        //    且 retry_undecoded_regions 自动对检测到 finder 的小二维码区域
+        //    裁剪+放大重试（实测识别下限 ~130px → ~100px，覆盖全屏小码场景）。
+        //    仅在整图未命中时跑，避免拖慢高频循环。
         .or_else(|| {
             let now2 = tokio::time::Instant::now();
             if let Some(t) = st.last_tiled {
@@ -750,7 +762,7 @@ async fn process_screen(
                 }
             }
             st.last_tiled = Some(now2);
-            qr::decode_rgb_tiled(&frame.rgb, frame.w, frame.h)
+            qr::decode_rgb_zedbar(&frame.rgb, frame.w, frame.h)
         })
     });
     let Some((text, loc)) = located else {

@@ -295,40 +295,37 @@ pub fn decode_rgb_fullres(rgb: &[u8], width: u32, height: u32) -> Option<(String
     None
 }
 
-/// 分块全分辨率解码（全屏小二维码兜底）。
+/// zedbar（ZBar 算法）解码：rqrr 失败后的兜底，小二维码识别率更高。
 ///
-/// 全屏扫描时二维码在整图中占比很小，rqrr 直接对整图检测网格易失败；切成
-/// 重叠块后二维码在块内占比显著增大（等价「放大到二维码附近」），识别率提升。
-/// 命中即返回，最坏（无码）才遍历全部块。调用方应先试过全图解码。
-pub fn decode_rgb_tiled(rgb: &[u8], width: u32, height: u32) -> Option<(String, Option<QrBox>)> {
-    const TILE: u32 = 384;
-    const STEP: u32 = 256; // 重叠 128px：小二维码不会被块边界切断
-    if width <= TILE && height <= TILE {
+/// 开启 retry_undecoded_regions：对检测到 finder 但未解出的区域自动裁剪+放大
+/// 重试（等价「放大到二维码附近」）。返回 (文本, 位置)；位置来自 finder 区域，
+/// 仅供 ROI 加速参考（无 finder 记录时为 None）。
+pub fn decode_rgb_zedbar(rgb: &[u8], width: u32, height: u32) -> Option<(String, Option<QrBox>)> {
+    if width == 0 || height == 0 {
         return None;
     }
-    let mut y = 0u32;
-    loop {
-        let mut x = 0u32;
-        loop {
-            let tw = TILE.min(width - x);
-            let th = TILE.min(height - y);
-            if let Some((sub, sw, sh)) = crop_rgb(rgb, width, height, QrBox { x, y, w: tw, h: th }) {
-                if let Some((text, loc)) = decode_rgb_fullres(&sub, sw, sh) {
-                    let loc = loc.map(|b| QrBox { x: b.x + x, y: b.y + y, w: b.w, h: b.h });
-                    return Some((text, loc));
-                }
-            }
-            if x + TILE >= width {
-                break;
-            }
-            x += STEP;
-        }
-        if y + TILE >= height {
-            break;
-        }
-        y += STEP;
-    }
-    None
+    // zedbar 只吃灰度：BT.601 亮度。
+    let gray: Vec<u8> = rgb
+        .chunks_exact(3)
+        .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 151 + p[2] as u32 * 28) >> 8) as u8)
+        .collect();
+    let mut img = zedbar::Image::from_gray(&gray, width, height).ok()?;
+    let config = zedbar::DecoderConfig::new()
+        .disable_all()
+        .enable(zedbar::config::QrCode)
+        .test_inverted(true) // 游戏登录码常见反色（白码黑底）
+        .retry_undecoded_regions(true);
+    let mut scanner = zedbar::Scanner::with_config(config);
+    let result = scanner.scan(&mut img);
+    let text = result.symbols().first().and_then(|s| s.data_string())?.to_string();
+    // 位置：第一个 finder 区域（若有），仅用于 ROI 加速。
+    let loc = result.finder_regions().first().map(|r| QrBox {
+        x: r.x,
+        y: r.y,
+        w: r.width,
+        h: r.height,
+    });
+    Some((text, loc))
 }
 
 /// 解码 RGB 图片，返回文本。

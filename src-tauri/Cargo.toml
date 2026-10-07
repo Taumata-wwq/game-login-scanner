@@ -41,6 +41,9 @@ base64 = "0.22"
 # encoding 合计约 1.7MB）；生成 qrcodegen（零依赖）。反色码由解码层翻转重试支持。
 rqrr = { version = "0.11", default-features = false }
 qrcodegen = "1.8"
+# zedbar：ZBar 算法的纯 Rust 移植，识别率高于 quirc/rqrr 系；仅启用 QR 解码器。
+# 注意：LGPL-3.0-or-later（与 rqrr 的 MIT/Apache 不同，商用分发需评估）。
+zedbar = { version = "0.2", default-features = false, features = ["qrcode"] }
 
 # 加密与编码
 sha2 = "0.10"
