@@ -115,6 +115,14 @@ opt-level = "z"
 opt-level = "z"
 [profile.release.package.dirs]
 opt-level = "z"
+[profile.release.package.windows]
+opt-level = "z"
+[profile.release.package.windows-core]
+opt-level = "z"
+[profile.release.package.windows-strings]
+opt-level = "z"
+[profile.release.package.webview2-com-sys]
+opt-level = "z"
 
 [target.'cfg(windows)'.dependencies]
 # 截屏（GDI 兜底）、剪贴板（读图/清空）替代 screenshots / arboard 两个重依赖
@@ -131,3 +139,6 @@ windows = { version = "0.61", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
 ] }
+
+[patch.crates-io]
+openh264-sys2 = { path = "vendor/openh264-sys2" }

@@ -825,6 +825,11 @@ fn fetch_qn_chain(room: &str) -> Vec<u32> {
         None => vec![10000],
     }
 }
+/// 直播追帧阈值（毫秒）：输出帧媒体时间戳落后「应有值」超过此值即追帧。
+/// asm 生效后解码吞吐充足（1080p 实测平均 ~10ms/帧 ≪ 33ms 帧间隔），正常流滞后
+/// 恒为 0 不触发；仅当码率提升/机器性能不足导致解码跟不上时作为安全网兜底。
+const CATCHUP_LAG_MS: i64 = 1200;
+
 /// 解码持续失败的容忍次数：超过则降级清晰度重试。
 const DECODE_FAIL_LIMIT: u32 = 40;
 
@@ -838,16 +843,6 @@ fn decode_config() -> openh264::decoder::DecoderConfig {
     openh264::decoder::DecoderConfig::new().flush_after_decode(openh264::decoder::Flush::NoFlush)
 }
 
-/// 直播追帧阈值（毫秒）：输出帧媒体时间戳落后「应有值」超过此值进入快进态。
-/// 权衡：过小会因解码偶发波动频繁快进（顿挫），过大则延迟偏高；
-/// 1.2s 远低于浏览器端 2~4s，且给解码留缓冲余量。
-const CATCHUP_LAG_MS: i64 = 1200;
-/// 快进追不动的严重积压阈值：落后超过 3×CATCHUP 时跳到关键帧硬追
-/// （解码吞吐不足以支撑快进时的兜底）。
-const SEVERE_LAG_MS: i64 = 3 * CATCHUP_LAG_MS;
-/// 快进视为追上的滞后余量。
-const CATCHUP_DONE_MS: i64 = 300;
-
 /// 持续追帧上限：连续快速追帧（间隔 < 4s）达到此次数，判为解码吞吐持续不足，
 /// 降级清晰度换低码率流。仅「持续跟不上」才降级，偶发追帧不触发。
 const CATCHUP_LIMIT: u32 = 4;
@@ -855,14 +850,6 @@ const CATCHUP_LIMIT: u32 = 4;
 /// 解码线程向 start() 回报的致命失败原因（未开播 / 解码不支持 / 连续重连失败）。
 /// start() 轮询它以便快速返回明确错误，而非干等 15 秒首帧超时。
 type FailFlag = Arc<Mutex<Option<String>>>;
-
-/// 当前输出帧相对墙钟锚点的滞后量（ms）。
-fn out_lag_ms(anchor: Option<(u32, std::time::Instant)>, media_ts: u32) -> i64 {
-    match anchor {
-        Some((a_ts, a_at)) => a_ts as i64 + a_at.elapsed().as_millis() as i64 - media_ts as i64,
-        None => 0,
-    }
-}
 
 /// 记录致命失败并让解码线程返回。
 fn set_fail(fail: &FailFlag, reason: &str) {
@@ -1203,6 +1190,8 @@ fn decode_session(
     let (mut out_ok, mut out_none, mut out_err) = (0u32, 0u32, 0u32);
 
     let mut tag = Vec::new();
+    // 解码耗时统计（吞吐诊断：总耗时 / 出帧数）。
+    let mut decode_ns_total: u128 = 0;
     // 慢流检测：某节点推流过慢（CDN 故障/限流）时返回错误，上层换节点。
     let mut last_data_at = std::time::Instant::now();
     // 统计窗口：6 秒内视频帧不足 30（≈5fps）判节点劣化——视频 tag 稀疏
@@ -1217,10 +1206,6 @@ fn decode_session(
     let mut skipping = false;
     // 追帧开始时刻（用于超时保护：异常流长时间无关键帧时强制重连，避免假死）。
     let mut skip_since: Option<std::time::Instant> = None;
-    // 快进态：Some((倍率, 起始时刻))。解码持续进行（参考链完整、无跳变），
-    // 仅按 1/倍率 入队——画面平滑快进追上直播边缘。倍率 2 起，4 秒未追上升 4。
-    let mut ff: Option<(u32, std::time::Instant)> = None;
-    let mut ff_tick: u32 = 0;
     // 本会话累计追帧次数。健康流几乎不需要追帧；某会话追帧达 CATCHUP_LIMIT 即判
     // 解码吞吐不足 → 降级清晰度（新会话计数从 0 起，自然沿 qn 链逐级下探）。
     let mut catchup_count = 0u32;
@@ -1269,9 +1254,10 @@ fn decode_session(
             continue; // 非 AVC
         }
 
-        // ---- 直播追帧 ----
+        // ---- 直播追帧（安全网）----
         // 落后量 = 应有媒体时间戳（锚点 + 已过墙钟）− 当前 tag 媒体时间戳。
-        // 超阈值说明解码吞吐跟不上码率、socket 缓冲持续积压（延迟单调增长）。
+        // 解码吞吐不足时 socket 缓冲持续积压、落后量单调增长 → 触发追帧；
+        // 追帧后锚点重置。asm 生效后正常流落后量恒 0（实测 35 秒零触发）。
         let now = std::time::Instant::now();
         match anchor {
             None => anchor = Some((media_ts, now)),
@@ -1350,8 +1336,10 @@ fn decode_session(
                 }
                 // 组合时间（body[2..5]）忽略——显示延迟可接受。
                 // 解码错误不静默：持续失败（编码不兼容等）由上层降级清晰度。
+                let decode_t = std::time::Instant::now();
                 match decoder.decode(&annexb) {
                     Ok(Some(yuv)) => {
+                        decode_ns_total += decode_t.elapsed().as_nanos();
                         out_ok += 1;
                         let (w, h) = yuv.dimensions();
                         if w == 0 || h == 0 {
@@ -1372,35 +1360,7 @@ fn decode_session(
                             strides.1,
                         ));
                         f.latest = Some(frame.clone());
-                        // 快进态：按 1/倍率 入队（解码不中断，参考链完整）。
-                        let push = match &mut ff {
-                            Some((factor, start)) => {
-                                ff_tick += 1;
-                                if out_lag_ms(anchor, media_ts) < CATCHUP_DONE_MS {
-                                    log::info!("直播追帧：快进完成，恢复正常输出");
-                                    ff = None;
-                                    true
-                                } else if start.elapsed() > Duration::from_secs(4) && *factor < 4 {
-                                    *factor = 4;
-                                    *start = std::time::Instant::now();
-                                    log::info!("直播追帧：4 秒未追上，快进倍率升至 4×");
-                                    ff_tick.is_multiple_of(4)
-                                } else if start.elapsed() > Duration::from_secs(10) {
-                                    // 快进 10 秒仍严重落后：转跳帧模式。
-                                    skipping = true;
-                                    skip_since = Some(std::time::Instant::now());
-                                    ff = None;
-                                    log::info!("直播追帧：快进超时，转丢弃至下一关键帧");
-                                    true
-                                } else {
-                                    ff_tick.is_multiple_of(*factor)
-                                }
-                            }
-                            None => true,
-                        };
-                        if push {
-                            f.queue.push_back(frame);
-                        }
+                        f.queue.push_back(frame);
                         while f.queue.len() > FRAME_BUFFER_MAX {
                             f.queue.pop_front();
                         }
@@ -1445,50 +1405,13 @@ fn decode_session(
                             let uv_len = info.iHeight as usize * us / 2;
                             let u = std::slice::from_raw_parts(dst[1] as *const u8, uv_len);
                             let v = std::slice::from_raw_parts(dst[2] as *const u8, uv_len);
-                            // 输出侧追帧（NULL 取回路径）。
-                            if let Some((a_ts, a_at)) = anchor {
-                                let expected = a_ts as i64 + a_at.elapsed().as_millis() as i64;
-                                let out_lag = expected - media_ts as i64;
-                                if out_lag > SEVERE_LAG_MS && !skipping {
-                                    // 严重积压：快进也追不上，跳到关键帧硬追。
-                                    skipping = true;
-                                    skip_since = Some(std::time::Instant::now());
-                                    ff = None;
-                                    catchup_count += 1;
-                                    log::info!(
-                                        "直播追帧（严重积压 {out_lag}ms，第 {catchup_count} 次）：丢弃至下一关键帧"
-                                    );
-                                } else if out_lag > CATCHUP_LAG_MS && ff.is_none() && !skipping {
-                                    ff = Some((2, std::time::Instant::now()));
-                                    ff_tick = 0;
-                                    catchup_count += 1;
-                                    log::info!(
-                                        "直播追帧（快进 2×，落后 {out_lag}ms，第 {catchup_count} 次）"
-                                    );
-                                }
-                            }
                             let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
                             f.next_seq += 1;
                             let frame = Arc::new(frame_from_yuv(
                                 f.next_seq, media_ts, w, h, y, u, v, ys, us,
                             ));
                             f.latest = Some(frame.clone());
-                            // 快进态入队门控（与 decode() 路径一致）。
-                            let push = match &mut ff {
-                                Some((factor, _start)) => {
-                                    ff_tick += 1;
-                                    if out_lag_ms(anchor, media_ts) < CATCHUP_DONE_MS {
-                                        ff = None;
-                                        true
-                                    } else {
-                                        ff_tick.is_multiple_of(*factor)
-                                    }
-                                }
-                                None => true,
-                            };
-                            if push {
-                                f.queue.push_back(frame);
-                            }
+                            f.queue.push_back(frame);
                             while f.queue.len() > FRAME_BUFFER_MAX {
                                 f.queue.pop_front();
                             }
@@ -1507,8 +1430,13 @@ fn decode_session(
                     let out_lag = anchor.as_ref().map_or(0, |(a_ts, a_at)| {
                         *a_ts as i64 + a_at.elapsed().as_millis() as i64 - out_ts as i64
                     });
+                    let avg_ms = if out_ok > 0 {
+                        decode_ns_total as f64 / out_ok as f64 / 1.0e6
+                    } else {
+                        0.0
+                    };
                     log::info!(
-                        "解码心跳: 出帧 {out_ok} / 无输出 {out_none} / 错误 {out_err}，队列 {qlen}，输入滞后 {in_lag}ms，输出滞后 {out_lag}ms"
+                        "解码心跳: 出帧 {out_ok} / 无输出 {out_none} / 错误 {out_err}，队列 {qlen}，输入滞后 {in_lag}ms，输出滞后 {out_lag}ms，平均单帧解码 {avg_ms:.2}ms"
                     );
                 }
                 // 每 300 个视频 tag（约 5 秒）摘要一次解码结果分布（诊断用）。
