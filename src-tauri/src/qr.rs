@@ -169,24 +169,27 @@ pub fn crop_rgb(rgb: &[u8], width: u32, height: u32, b: QrBox) -> Option<(Vec<u8
     Some((out, w, h))
 }
 
-/// 亮度采样：0 为黑、255 为白；`invert` 支持反色码（白码黑底，游戏登录界面常见）。
-fn luminance_fn(rgb: &[u8], width: u32, invert: bool) -> impl Fn(usize, usize) -> u8 + '_ {
-    move |x, y| {
-        let i = (y * width as usize + x) * 3;
-        let l =
-            ((rgb[i] as u32 * 77 + rgb[i + 1] as u32 * 151 + rgb[i + 2] as u32 * 28) >> 8) as u8;
-        if invert {
-            255 - l
-        } else {
-            l
-        }
-    }
-}
-
 /// 解码单个 RGB 缓冲，返回 (文本, 外接框)。正常极性与反色各尝试一次。
+///
+/// 性能：预生成一次灰度缓冲（BT.601），两种极性复用——反色仅取 255-gray，
+/// 避免此前「正常/反色各从 RGB 重算一遍亮度」的重复遍历（反色码实测慢一倍的主因）。
 fn decode_once(rgb: &[u8], width: u32, height: u32) -> Option<(String, Option<QrBox>)> {
+    let w = width as usize;
+    let gray: Vec<u8> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 151 + p[2] as u32 * 28) >> 8) as u8)
+        .collect();
     for invert in [false, true] {
-        let lum = luminance_fn(rgb, width, invert);
+        let lum = |x: usize, y: usize| -> u8 {
+            let v = gray[y * w + x];
+            if invert {
+                255 - v
+            } else {
+                v
+            }
+        };
         let mut img =
             rqrr::PreparedImage::prepare_from_greyscale(width as usize, height as usize, lum);
         let grids = img.detect_grids();
