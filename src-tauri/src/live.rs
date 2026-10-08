@@ -227,6 +227,7 @@ pub fn parse_accept_qn(v: &Value) -> Vec<u32> {
 /// B站 API 有新旧两种结构：
 /// - 新：`url_info[{host, extra}]`——完整 URL = host + base_url + extra。
 /// - 旧：`url_list[host]`——完整 URL = host + base_url。
+///
 /// 实测新结构下 url_list 为 null，旧代码只读 url_list 会解析失败。
 pub fn codec_url(codec: &Value) -> Option<String> {
     let base = codec["base_url"].as_str()?;

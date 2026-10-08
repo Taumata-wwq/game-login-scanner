@@ -37,12 +37,10 @@ env_logger = { version = "0.11", default-features = false }
 base64 = "0.22"
 
 
-# 二维码解码 rqrr（纯 QR，依赖仅 g2p+lru；替代 rxing——其拖 regex/chrono-tz/
-# encoding 合计约 1.7MB）；生成 qrcodegen（零依赖）。反色码由解码层翻转重试支持。
-rqrr = { version = "0.11", default-features = false }
+# 二维码解码 zedbar（ZBar 算法纯 Rust 移植，真实游戏截图实测最快最准）；
+# 生成 qrcodegen（零依赖）。
+# 注意：zedbar 为 LGPL-3.0-or-later（与其余 MIT/Apache 依赖不同，商用分发需评估）。
 qrcodegen = "1.8"
-# zedbar：ZBar 算法的纯 Rust 移植，识别率高于 quirc/rqrr 系；仅启用 QR 解码器。
-# 注意：LGPL-3.0-or-later（与 rqrr 的 MIT/Apache 不同，商用分发需评估）。
 zedbar = { version = "0.2", default-features = false, features = ["qrcode"] }
 
 # 加密与编码
@@ -83,7 +81,7 @@ codegen-units = 1
 opt-level = 2
 
 # 本 crate 用 "z"（体积优先）：解码/转换热点在 openh264 C 代码（已单独 O2），
-# QR 解码在 rqrr/zedbar（独立 crate），Rust 侧主要是 IPC 与整数转换。
+# QR 解码在 zedbar（独立 crate），Rust 侧主要是 IPC 与整数转换。
 [profile.release.package.game-login-scanner]
 opt-level = "z"
 

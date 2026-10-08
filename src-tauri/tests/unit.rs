@@ -70,19 +70,18 @@ fn decode_rgb_empty() {
 }
 
 /// 用 qrcodegen 把文本渲染为 size×size 的灰度 RGB 画布（模块最近邻放大），
-/// 供解码链路测试使用；inverted=true 渲染反色码（白码黑底）。
-fn render_qr_rgb(text: &str, size: usize, inverted: bool) -> Vec<u8> {
+/// 供解码链路测试使用。白底黑码（所有游戏登录码均为正常极性）。
+fn render_qr_rgb(text: &str, size: usize) -> Vec<u8> {
     let qrcode =
         qrcodegen::QrCode::encode_text(text, qrcodegen::QrCodeEcc::Low).expect("编码二维码失败");
     let n = qrcode.size() as usize;
     let px = (size / n).max(1);
     let q = px * n;
     let off = (size - q) / 2;
-    // inverted: 模块白、背景黑；否则模块黑、背景白。
-    let mut rgb = vec![if inverted { 0u8 } else { 255u8 }; size * size * 3];
+    let mut rgb = vec![255u8; size * size * 3];
     for my in 0..n {
         for mx in 0..n {
-            let dark = qrcode.get_module(mx as i32, my as i32) != inverted;
+            let dark = qrcode.get_module(mx as i32, my as i32);
             let v = if dark { 0u8 } else { 255u8 };
             for yy in 0..px {
                 for xx in 0..px {
@@ -102,7 +101,7 @@ fn render_qr_rgb(text: &str, size: usize, inverted: bool) -> Vec<u8> {
 fn decode_rgb_roundtrip() {
     let text = "https://webstatic.mihoyo.com/bh3/event/mobile.html?tk=TESTTK123";
     let size = 200usize;
-    let rgb = render_qr_rgb(text, size, false);
+    let rgb = render_qr_rgb(text, size);
     let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("解码二维码失败");
     assert_eq!(decoded, text);
 }
@@ -112,7 +111,7 @@ fn decode_rgb_roundtrip() {
 fn decode_rgb_small_image_roundtrip() {
     let text = "https://x/qr_code_in_game.html?ticket=SMALL";
     let size = 120usize; // < 300，触发放大重试分支
-    let rgb = render_qr_rgb(text, size, false);
+    let rgb = render_qr_rgb(text, size);
     let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("解码二维码失败");
     assert_eq!(decoded, text);
 }
@@ -122,30 +121,19 @@ fn decode_rgb_small_image_roundtrip() {
 fn decode_rgb_large_image_roundtrip() {
     let text = "https://x/qr_code_in_game.html?ticket=BIG";
     let size = 1600usize; // ≥ 1600 触发降采样
-    let rgb = render_qr_rgb(text, size, false);
+    let rgb = render_qr_rgb(text, size);
     let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("解码二维码失败");
     assert_eq!(decoded, text);
 }
 
-/// 反色二维码（白码黑底，游戏登录界面常见）应通过翻转重试解出。
+/// 二维码在画布中偏移放置，仍应能整图解码。
 #[test]
-fn decode_rgb_inverted_roundtrip() {
-    let text = "https://x/qr_code_in_game.html?ticket=INVERTED";
-    let size = 200usize;
-    let rgb = render_qr_rgb(text, size, true);
-    let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("反色二维码解码失败");
-    assert_eq!(decoded, text);
-}
-
-/// 解码附带位置信息，且位置外接框落在二维码区域内。
-#[test]
-fn decode_rgb_located_returns_bbox() {
+fn decode_rgb_offset_qr() {
     let text = "https://x/qr_code_in_game.html?ticket=LOC";
     let qr_size = 200usize;
-    let qr_rgb = render_qr_rgb(text, qr_size, false);
+    let qr_rgb = render_qr_rgb(text, qr_size);
     let size = 800usize;
-    let off_x = 300usize;
-    let off_y = 200usize;
+    let (off_x, off_y) = (300usize, 200usize);
     let mut rgb = vec![255u8; size * size * 3];
     for y in 0..qr_size {
         for x in 0..qr_size {
@@ -156,45 +144,8 @@ fn decode_rgb_located_returns_bbox() {
             rgb[i + 2] = qr_rgb[i0 + 2];
         }
     }
-    let (decoded, loc) = qr::decode_rgb_located(&rgb, size as u32, size as u32).expect("解码失败");
+    let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("解码失败");
     assert_eq!(decoded, text);
-    let b = loc.expect("应返回二维码位置");
-    // 外接框中心应大致落在二维码区域内（ROI 用途足够）。
-    let cx = b.x as i32 + b.w as i32 / 2;
-    let cy = b.y as i32 + b.h as i32 / 2;
-    let pad = (qr_size / 2) as i32;
-    assert!(cx >= off_x as i32 - pad && cx <= (off_x + qr_size) as i32 + pad);
-    assert!(cy >= off_y as i32 - pad && cy <= (off_y + qr_size) as i32 + pad);
-
-    // 从外接框外扩后裁剪，再解码应得到同一文本（ROI 链路）
-    let padded = qr::expand_box(b, 96, size as u32, size as u32);
-    let (roi, rw, rh) = qr::crop_rgb(&rgb, size as u32, size as u32, padded).expect("裁剪失败");
-    let roi_text = qr::decode_rgb(&roi, rw, rh).expect("ROI 解码失败");
-    assert_eq!(roi_text, text);
-}
-
-/// expand_box 夹紧到图像边界。
-#[test]
-fn expand_box_clamps_to_bounds() {
-    let b = qr::QrBox {
-        x: 10,
-        y: 20,
-        w: 100,
-        h: 100,
-    };
-    let out = qr::expand_box(b, 96, 200, 300);
-    assert_eq!(out.x, 0);
-    assert_eq!(out.y, 0);
-    assert_eq!(out.x + out.w, 200);
-    let c = qr::QrBox {
-        x: 190,
-        y: 290,
-        w: 5,
-        h: 5,
-    };
-    let out2 = qr::expand_box(c, 96, 200, 300);
-    assert!(out2.x + out2.w <= 200);
-    assert!(out2.y + out2.h <= 300);
 }
 
 // ---------- qr_svg ----------
@@ -803,15 +754,15 @@ fn scan_output_size_caps_4k() {
     assert!(w < h);
 }
 
-// ---------- 分块扫码解码（全屏小二维码兜底）----------
+// ---------- 扫码解码（zedbar）----------
 
 #[test]
-fn decode_rgb_zedbar_rejects_blank() {
+fn decode_rgb_rejects_blank() {
     // 纯色图无二维码，应返回 None（不 panic）。
     let rgb = vec![255u8; 200 * 200 * 3];
-    assert!(game_login_scanner_lib::qr::decode_rgb_zedbar(&rgb, 200, 200).is_none());
+    assert!(game_login_scanner_lib::qr::decode_rgb(&rgb, 200, 200).is_none());
     // 空尺寸安全返回。
-    assert!(game_login_scanner_lib::qr::decode_rgb_zedbar(&rgb, 0, 0).is_none());
+    assert!(game_login_scanner_lib::qr::decode_rgb(&rgb, 0, 0).is_none());
 }
 
 // ---------- config::display_fps（显示区域帧率设置）----------

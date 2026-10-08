@@ -54,7 +54,7 @@ src-tauri/src/
   scan.rs               扫码主流程（剪贴板 → 屏幕/直播帧 → 确认登录）
   live.rs               直播流捕获（接口解析 → FLV/HLS 解复用 → openh264 解码）
   hls.rs                HLS（LL-HLS + fMP4）解析（HLS-only 房间回退路径）
-  qr.rs                 二维码识别（rqrr 为主，zedbar 兜底）与生成
+  qr.rs                 二维码识别（zedbar）与生成（qrcodegen）
   screenshot.rs         GDI 截屏（兜底路径）
   duplication.rs        DXGI 桌面复制（低开销取帧）
   clipboard.rs          剪贴板读图

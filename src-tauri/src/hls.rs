@@ -6,6 +6,7 @@
 //! 结构：LL-HLS 用 1 秒分片、fMP4（CMAF）格式：
 //! - init 段（EXT-X-MAP）：ftyp+moov，含 avcC（SPS/PPS）与 mdhd（timescale）；
 //! - 媒体段：moof（tfhd/tfdt/trun 描述样本）+ mdat（AVCC 长度前缀 NALU）。
+//!
 //! 逐样本取出 AVCC 转 Annex-B（复用 live::avcc_to_annexb）再解码。
 
 use serde_json::Value;

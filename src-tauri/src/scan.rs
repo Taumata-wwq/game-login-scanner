@@ -8,12 +8,11 @@
 //! 对同一张已失败的二维码做退避与日志去重，避免向服务器高频轰炸同一失效码。
 //!
 //! 性能策略：
-//! - 上一轮解码出登录码的位置会被记住（按显示器），下一轮先只解码该位置
-//!   外扩后的 ROI 小图，未命中再整屏解码；
-//! - 整屏先走 2×2 降采样快路径，全分辨率解码按最小间隔节流（最贵路径）；
-//! - 画面内容未变化的屏幕（抽样指纹一致）整帧跳过解码。
+//! - 解码用 zedbar（唯一解码器），整屏单次解码（真实 2K 截图 ~160ms）；
+//! - 画面内容未变化的屏幕（抽样指纹一致）整帧跳过解码；
+//! - 桌面复制「无新帧零成本跳过」。
 //!
-//! 稳态下 CPU 占用集中在极小的 ROI 解码上，可维持高频检测。
+//! 稳态下 CPU 占用集中在变化的屏幕解码上，可维持高频检测。
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,19 +24,13 @@ use tauri::Emitter;
 use tauri::Manager;
 
 use crate::config::{BiliToken, Channel, Game, OfficialToken};
-use crate::qr::{self, QrBox, QrCode, QrKind};
+use crate::qr::{self, QrCode, QrKind};
 use crate::sdk::{hypergryph, mihoyo, official};
 
 /// 同一失败票据的重试退避间隔。
 const FAILED_TICKET_BACKOFF: Duration = Duration::from_millis(1500);
 /// 「用户请求停止」标记：confirm 经 select! 被取消时返回，上层据此终止扫描。
 const STOP_MARKER: &str = "__stopped__";
-/// ROI 外扩边距（像素），容忍画面轻微变动。
-const ROI_MARGIN: u32 = 96;
-/// 全分辨率整屏解码的最小间隔（最贵路径，节流用）。
-const FULLRES_MIN_INTERVAL: Duration = Duration::from_millis(400);
-/// zedbar 兜底解码的最小间隔：单次全屏约 40~100ms，节流避免拖慢高频循环。
-const TILED_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// 缩略图抽样步长（像素）。
 const THUMB_STRIDE: u32 = 16;
 /// 「非登录码」诊断提示的最大次数。
@@ -261,18 +254,12 @@ async fn wait_for_stop(stop: &Arc<AtomicBool>) {
 
 /// 扫描循环内的去重/退避/记忆状态。
 struct LoopState {
-    /// 上一轮解码出登录码的 (显示器索引, 位置)，供 ROI 优先解码。
-    last_hit: Option<(usize, QrBox)>,
     last_failed_ticket: Option<String>,
     backoff_until: tokio::time::Instant,
     reported_tickets: HashSet<String>,
     screens_empty_reported: bool,
     /// 各显示器上一帧的抽样指纹（用于跳过未变化的屏幕）。
     last_thumbs: Vec<Option<Vec<u8>>>,
-    /// 上次全分辨率整屏解码时间（节流）。
-    last_fullres: Option<tokio::time::Instant>,
-    /// 上次 zedbar 兜底解码时间（最贵路径，独立节流）。
-    last_tiled: Option<tokio::time::Instant>,
     unknown_qr_reported: u32,
     /// 每个票据的失败次数（超过上限后跳过，避免无限重试同一失效码）。
     failed_count: std::collections::HashMap<String, u32>,
@@ -292,14 +279,11 @@ const REPORTED_TICKETS_MAX: usize = 1024;
 impl LoopState {
     fn new() -> Self {
         Self {
-            last_hit: None,
             last_failed_ticket: None,
             backoff_until: tokio::time::Instant::now(),
             reported_tickets: HashSet::new(),
             screens_empty_reported: false,
             last_thumbs: Vec::new(),
-            last_fullres: None,
-            last_tiled: None,
             unknown_qr_reported: 0,
             failed_count: std::collections::HashMap::new(),
             throttle_stop: false,
@@ -495,7 +479,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         display_name,
     } = args;
     // 扫码循环固定 60Hz：扫码期间无论画面是否静止，检测频率不低于 60fps。
-    // 静止屏幕由桌面复制「无新帧零成本跳过」+ 指纹去重兜底，60Hz 轮询近零开销。
+    // 静止屏幕由桌面复制「无新帧零成本跳过」+ 指纹去重，60Hz 轮询近零开销。
     let interval = Duration::from_millis(16);
     let ch_desc = if current_game.is_hypergryph() {
         "鹰角".to_string()
@@ -554,8 +538,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
     emit(&app, "info", "全屏搜索登录二维码中…");
 
     // 2) 全屏/指定区域检测：
-    //    桌面复制「无新帧即零成本跳过」→ 指纹去重 → ROI 优先 →
-    //    降采样快路径 → 节流的全分辨率解码。
+    //    桌面复制「无新帧即零成本跳过」→ 指纹去重 → zedbar 整屏解码。
     //    直播会话激活时改为扫直播帧（断流自动回退屏幕扫描）。
     let mut live_seen = false;
     loop {
@@ -568,19 +551,8 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         if crate::live::active() {
             if let Some((rgb, w, h)) = crate::live::take_scan_frame() {
                 live_seen = true;
-                // zedbar 优先（真实截图实测最快最准）；rqrr 兜底（节流）保留边缘场景。
-                let decoded = qr::decode_rgb_zedbar(&rgb, w, h)
-                    .map(|(text, _)| text)
-                    .or_else(|| {
-                        let now = tokio::time::Instant::now();
-                        if let Some(t) = st.last_tiled {
-                            if now - t < TILED_MIN_INTERVAL {
-                                return None;
-                            }
-                        }
-                        st.last_tiled = Some(now);
-                        qr::decode_rgb(&rgb, w, h)
-                    });
+                // zedbar 解码（唯一解码器，真实截图实测最快最准）。
+                let decoded = qr::decode_rgb(&rgb, w, h);
                 if let Some(text) = decoded {
                     if let Some(qrc) = qr::extract(&text) {
                         if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
@@ -661,7 +633,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
 }
 
 /// 处理一块屏幕/区域：取帧（桌面复制优先，画面无新帧直接跳过；不可用走 GDI）
-/// → 指纹去重 → ROI 优先 → 降采样 → 全分辨率。返回 true 表示扫描应结束。
+/// → 指纹去重 → zedbar 整屏解码。返回 true 表示扫描应结束。
 async fn process_screen(
     app: &tauri::AppHandle,
     ctx: &mut ScanContext,
@@ -697,37 +669,9 @@ async fn process_screen(
     }
     st.last_thumbs[idx] = Some(thumb);
 
-    // 2) ROI 优先：上轮命中位置外扩后先解（zedbar 更快），命中即省去整屏解码。
-    if let Some((_, bx)) = st.last_hit.filter(|(m, _)| *m == idx) {
-        let padded = qr::expand_box(bx, ROI_MARGIN, frame.w, frame.h);
-        if let Some((roi, rw, rh)) = qr::crop_rgb(&frame.rgb, frame.w, frame.h, padded) {
-            if let Some((text, _)) = qr::decode_rgb_zedbar(&roi, rw, rh) {
-                if let Some(qrc) = qr::extract(&text) {
-                    if try_confirm(app, ctx, &qrc, st).await {
-                        finish_success(app, st, auto_close).await;
-                        return true;
-                    }
-                    return st.stopped;
-                }
-            }
-        }
-    }
-
-    // 3) zedbar 优先（真实游戏截图实测：全屏 2K 最快 157ms 且 100% 命中；
-    //    而 rqrr 降采样 + 全分辨率在此类图上 0 命中却耗 ~510ms）。
-    let located = qr::decode_rgb_zedbar(&frame.rgb, frame.w, frame.h).or_else(|| {
-        // 4) rqrr 兜底（降采样 → 全分辨率，节流）：仅 zedbar 失败时跑，保留边缘
-        //    场景（zedbar 难解）的识别能力，识别率不退化（= zedbar ∪ rqrr）。
-        let now = tokio::time::Instant::now();
-        if let Some(t) = st.last_fullres {
-            if now - t < FULLRES_MIN_INTERVAL {
-                return None;
-            }
-        }
-        st.last_fullres = Some(now);
-        qr::decode_rgb_located(&frame.rgb, frame.w, frame.h)
-    });
-    let Some((text, loc)) = located else {
+    // 2) zedbar 解码（唯一解码器）：真实 2560x1440 游戏登录截图实测全屏 ~157ms
+    //    且 100% 命中。
+    let Some(text) = qr::decode_rgb(&frame.rgb, frame.w, frame.h) else {
         return false;
     };
     let Some(qrc) = qr::extract(&text) else {
@@ -743,9 +687,6 @@ async fn process_screen(
         }
         return false;
     };
-    if let Some(bx) = loc {
-        st.last_hit = Some((idx, bx));
-    }
     if try_confirm(app, ctx, &qrc, st).await {
         finish_success(app, st, auto_close).await;
         return true;
