@@ -104,25 +104,60 @@ pub struct InitInfo {
     pub track_id: u32,
 }
 
-/// 解析 init 段（ftyp+moov）：提取 avcC（SPS/PPS）与视频轨 timescale。
+/// 解析 init 段（ftyp+moov）：提取 avcC（SPS/PPS）与视频轨的 track_id/timescale。
+///
+/// 关键：**视频轨的 track_id 不固定**（实测有房间视频轨为 1、音频轨为 2；
+/// 也有房间反之）。必须从含 avc1 的那条 trak 里读 tkhd 取 track_id，
+/// 否则 media segment 会按错误的 id 取到音频轨、解码 0 帧。
 pub fn parse_init(data: &[u8]) -> Option<InitInfo> {
     let avcc = find_boxes(data, b"avcC").into_iter().next()?;
-    // find_boxes 返回的 size 含 8 字节 box header，body 需跳过 header。
     let body = box_body(data, avcc)?;
     let params = crate::live::avcc_config_to_annexb(body);
     if params.is_empty() {
         return None;
     }
-    let mdhd = find_boxes(data, b"mdhd").into_iter().next();
-    let timescale = mdhd
-        .and_then(|d| box_body(data, d))
-        .map(parse_mdhd_timescale)
-        .unwrap_or(1000);
+    // 遍历所有 trak，找含 avc1 的视频轨，取其 track_id 与 timescale。
+    let mut track_id = 1u32;
+    let mut timescale = 1000u32;
+    for trak in find_boxes(data, b"trak") {
+        let Some(tb) = box_body(data, trak) else {
+            continue;
+        };
+        // 只处理含 avc1 的视频轨。
+        if find_boxes(tb, b"avc1").is_empty() {
+            continue;
+        }
+        if let Some(tk) = find_boxes(tb, b"tkhd").into_iter().next() {
+            if let Some(t) = box_body(tb, tk) {
+                track_id = parse_tkhd_track_id(t);
+            }
+        }
+        if let Some(md) = find_boxes(tb, b"mdhd").into_iter().next() {
+            if let Some(m) = box_body(tb, md) {
+                timescale = parse_mdhd_timescale(m);
+            }
+        }
+        break;
+    }
     Some(InitInfo {
         params,
         timescale,
-        track_id: 1,
+        track_id,
     })
+}
+
+/// tkhd box 体 → track_id（version 0: [12..16]，version 1: [20..24]）。
+fn parse_tkhd_track_id(body: &[u8]) -> u32 {
+    if body.len() < 4 {
+        return 1;
+    }
+    let version = body[0];
+    let off = if version == 1 { 20 } else { 12 };
+    if body.len() >= off + 4 {
+        u32::from_be_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]])
+    } else {
+        1
+    }
 }
 
 /// mdhd box 体转 timescale（version 0: [12..16]，version 1: [20..24]）。
