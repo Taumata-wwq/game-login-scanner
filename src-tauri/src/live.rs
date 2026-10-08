@@ -62,6 +62,11 @@ async fn resolve_stream(room: &str, qn: u32) -> Result<(String, String), String>
             if let Some(u) = parse_bili_flv(&v) {
                 return Ok((u, format!("https://live.bilibili.com/{room}")));
             }
+            // 无 FLV（HLS-only 房间）：回退 HLS。否则会走旧 playUrl 接口，
+            // 该接口对 HLS-only 房间报「调用bvc-play-url-one出错」。
+            if let Some(u) = crate::hls::parse_bili_hls(&v) {
+                return Ok((u, format!("https://live.bilibili.com/{room}")));
+            }
             // 回退：旧版 playUrl 接口 durl 直出完整 FLV 地址（免登录场景下
             // v2 的 url_list 常被服务端置空，旧接口反而稳定可用）。
             let real_room = v["data"]["room_id"]
