@@ -121,6 +121,12 @@ pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>,
     if let Some(u) = parse_bili_flv(&v) {
         return Ok(vec![(u, referer_owned.clone())]);
     }
+    // 无 FLV（部分房间服务端只提供 HLS）：回退 HLS（m3u8）。
+    // decode_loop 按 URL 含 .m3u8 走 HLS 解码路径。
+    if let Some(u) = crate::hls::parse_bili_hls(&v) {
+        log::info!("房间 {room} 仅提供 HLS 流，使用 LL-HLS 拉流");
+        return Ok(vec![(u, referer_owned.clone())]);
+    }
     let real_room = v["data"]["room_id"]
         .as_i64()
         .map(|x| x.to_string())
@@ -217,7 +223,7 @@ pub fn parse_accept_qn(v: &Value) -> Vec<u32> {
 /// - 新：`url_info[{host, extra}]`——完整 URL = host + base_url + extra。
 /// - 旧：`url_list[host]`——完整 URL = host + base_url。
 /// 实测新结构下 url_list 为 null，旧代码只读 url_list 会解析失败。
-fn codec_url(codec: &Value) -> Option<String> {
+pub fn codec_url(codec: &Value) -> Option<String> {
     let base = codec["base_url"].as_str()?;
     if let Some(info) = codec["url_info"].as_array().and_then(|a| a.first()) {
         let host = info["host"].as_str()?;
@@ -1147,9 +1153,19 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
         }
         let (url, referer) = candidates[cand_used].clone();
         cand_used += 1;
-        log::info!("连接直播流节点 {cand_used}/{} …", candidates.len());
+        let is_hls = url.contains(".m3u8");
+        log::info!(
+            "连接直播流节点 {cand_used}/{}（{}）…",
+            candidates.len(),
+            if is_hls { "HLS" } else { "FLV" }
+        );
         let allow_degrade = qn_idx + 1 < qn_chain.len();
-        match decode_session(&url, &referer, &stop, &frames, allow_degrade) {
+        let session_result = if is_hls {
+            decode_hls_session(&url, &referer, &stop, &frames)
+        } else {
+            decode_session(&url, &referer, &stop, &frames, allow_degrade)
+        };
+        match session_result {
             Ok(()) => return, // 收到停止信号
             // 解码器持续失败（编码不兼容/解码跟不上）：降级清晰度换低码率流重试。
             Err(e) if e.starts_with("H.264 解码持续失败") => {
@@ -1216,6 +1232,205 @@ fn remove_session_if(frames: &Arc<Mutex<Frames>>) {
         }
     }
 }
+
+/// HLS 会话：拉 m3u8 -> init 段取 SPS/PPS -> 循环拉媒体段解码。
+///
+/// 低延迟策略：LL-HLS 1 秒分片，每轮取 seq 比上次新的分片；首次或积压时跳到
+/// 最近的关键帧段（丢弃中间积压），把延迟压在 1~2 个分片内。
+fn decode_hls_session(
+    m3u8_url: &str,
+    referer: &str,
+    stop: &AtomicBool,
+    frames: &Arc<Mutex<Frames>>,
+) -> Result<(), String> {
+    let headers = vec![("User-Agent".to_string(), BROWSER_UA.to_string())];
+
+    // 1) 拉 m3u8 播放列表。
+    let m3u8_bytes = crate::http::get_bytes_sync(m3u8_url, &headers, referer)?;
+    let m3u8_text = String::from_utf8_lossy(&m3u8_bytes);
+    let playlist =
+        crate::hls::parse_m3u8(&m3u8_text, m3u8_url).ok_or_else(|| "m3u8 解析失败".to_string())?;
+    let init_url = playlist
+        .init_url
+        .clone()
+        .ok_or_else(|| "m3u8 缺少 init 段".to_string())?;
+
+    // 2) 拉 init 段，取 SPS/PPS 与 timescale。
+    let init_bytes = crate::http::get_bytes_sync(&init_url, &headers, referer)?;
+    let init_info = crate::hls::parse_init(&init_bytes)
+        .ok_or_else(|| "init 段解析失败（无 avcC）".to_string())?;
+    let timescale = init_info.timescale.max(1) as u64;
+    let track_id = init_info.track_id;
+    log::info!(
+        "HLS: init 段 OK（timescale={timescale}，参数集 {} 字节）",
+        init_info.params.len()
+    );
+
+    // 3) 解码器（NoFlush 保留参考链，与 FLV 路径一致）。
+    let mut decoder = openh264::decoder::Decoder::with_api_config(
+        openh264::OpenH264API::from_source(),
+        decode_config(),
+    )
+    .map_err(|e| format!("解码器初始化失败: {e}"))?;
+    // 喂 SPS/PPS（清 VUI 兼容 openh264）。
+    let (params, _) = strip_sps_vui(&init_info.params);
+    if let Err(e) = decoder.decode(&params) {
+        log::warn!("HLS 参数集解码失败: {e:?}");
+    }
+
+    let mut last_seq = playlist.media_sequence.saturating_sub(1);
+    let mut skipped_first = false;
+    let mut fail_streak = 0u32;
+
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        // 拉最新 m3u8。
+        let text = match crate::http::get_bytes_sync(m3u8_url, &headers, referer) {
+            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+            Err(e) => {
+                log::warn!("HLS: 拉取 m3u8 失败: {e}");
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        };
+        let Some(pl) = crate::hls::parse_m3u8(&text, m3u8_url) else {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        };
+        // 收集新分片。
+        let fresh: Vec<&crate::hls::Segment> = pl
+            .segments
+            .iter()
+            .filter(|s| s.seq > last_seq)
+            .collect();
+        if fresh.is_empty() {
+            std::thread::sleep(Duration::from_millis(300));
+            continue;
+        }
+        // 首次或积压：从最近的关键帧段开始（保证解码器有随机访问点）。
+        let start = if !skipped_first || fresh.len() > 3 {
+            skipped_first = true;
+            fresh.iter().rposition(|s| s.keyframe).unwrap_or(0)
+        } else {
+            0
+        };
+        if start > 0 {
+            log::info!("HLS: 追帧，跳过 {} 个积压分片", start);
+        }
+        for seg in &fresh[start..] {
+            if stop.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            let seg_bytes = match crate::http::get_bytes_sync(&seg.url, &headers, referer) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!("HLS: 分片 {} 下载失败: {e}", seg.seq);
+                    fail_streak += 1;
+                    if fail_streak >= 5 {
+                        return Err(format!("HLS 分片连续下载失败: {e}"));
+                    }
+                    last_seq = seg.seq;
+                    continue;
+                }
+            };
+            fail_streak = 0;
+            last_seq = seg.seq;
+            let samples = crate::hls::parse_segment(&seg_bytes, track_id);
+            for s in samples {
+                if s.offset + s.size > seg_bytes.len() {
+                    continue;
+                }
+                let annexb = avcc_to_annexb(&seg_bytes[s.offset..s.offset + s.size]);
+                if annexb.is_empty() {
+                    continue;
+                }
+                let media_ts = (s.time * 1000 / timescale) as u32;
+                decode_and_push(&mut decoder, &annexb, media_ts, frames);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+
+/// 解码一个 Annex-B 帧并把产出的 YUV 推入帧总线（HLS 路径用）。
+/// NoFlush 下 decode() 可能直接返回帧，也需用 decode_frame2 显式取回。
+/// 单帧错误静默（持续失败由上层重连兜底）。
+fn decode_and_push(
+    decoder: &mut openh264::decoder::Decoder,
+    annexb: &[u8],
+    media_ts: u32,
+    frames: &Arc<Mutex<Frames>>,
+) {
+    match decoder.decode(annexb) {
+        Ok(Some(yuv)) => {
+            let (w, h) = yuv.dimensions();
+            if w != 0 && h != 0 {
+                let strides = yuv.strides();
+                push_frame(
+                    frames,
+                    media_ts,
+                    w as u32,
+                    h as u32,
+                    yuv.y(),
+                    yuv.u(),
+                    yuv.v(),
+                    strides.0,
+                    strides.1,
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(_) => return,
+    }
+    // NoFlush 下帧可能留在解码器内部缓冲：用 DecodeFrame2(NULL) 显式取回。
+    unsafe {
+        let mut dst = [std::ptr::null_mut::<u8>(); 3];
+        let mut bi = openh264_sys2::SBufferInfo::default();
+        let state = decoder
+            .raw_api()
+            .decode_frame2(std::ptr::null(), 0, dst.as_mut_ptr().cast(), &mut bi);
+        if state == 0 && bi.iBufferStatus != 0 && !dst[0].is_null() {
+            let info = bi.UsrData.sSystemBuffer;
+            let (w, h) = (info.iWidth as u32, info.iHeight as u32);
+            if w != 0 && h != 0 {
+                let (ys, us) = (info.iStride[0] as usize, info.iStride[1] as usize);
+                let y =
+                    std::slice::from_raw_parts(dst[0] as *const u8, info.iHeight as usize * ys);
+                let uv_len = info.iHeight as usize * us / 2;
+                let u = std::slice::from_raw_parts(dst[1] as *const u8, uv_len);
+                let v = std::slice::from_raw_parts(dst[2] as *const u8, uv_len);
+                push_frame(frames, media_ts, w, h, y, u, v, ys, us);
+            }
+        }
+    }
+}
+
+/// 把一帧 YUV 推入帧总线（HLS 路径用）。
+#[allow(clippy::too_many_arguments)]
+fn push_frame(
+    frames: &Arc<Mutex<Frames>>,
+    media_ts: u32,
+    w: u32,
+    h: u32,
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    ys: usize,
+    us: usize,
+) {
+    let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
+    f.next_seq += 1;
+    let frame = Arc::new(frame_from_yuv(f.next_seq, media_ts, w, h, y, u, v, ys, us));
+    f.latest = Some(frame.clone());
+    f.queue.push_back(frame);
+    while f.queue.len() > FRAME_BUFFER_MAX {
+        f.queue.pop_front();
+    }
+}
+
 
 /// 慢流判定读超时：CDN 节点 3 秒不推数据 → read 超时 → 换节点。
 const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(3);

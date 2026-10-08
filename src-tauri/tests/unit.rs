@@ -550,6 +550,25 @@ fn extract_hypergryph_scan_login() {
     assert_eq!(qr.ticket, "SCAN123");
 }
 
+// ---------- hls（LL-HLS 解析纯函数） ----------
+
+#[test]
+fn parse_m3u8_reads_segments_and_keyframe() {
+    let m3u8 = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-MAP:URI=\"init.m4s\"\n#EXT-BILI-AUX:1|K|100|aa\n#EXTINF:1.0,\nseg1.m4s\n#EXT-BILI-AUX:2|N|100|bb\n#EXTINF:1.0,\nseg2.m4s\n";
+    let pl = game_login_scanner_lib::hls::parse_m3u8(m3u8, "https://h/live/index.m3u8?x=1")
+        .expect("m3u8 应解析成功");
+    assert_eq!(pl.media_sequence, 100);
+    assert_eq!(pl.segments.len(), 2);
+    assert_eq!(pl.segments[0].seq, 100);
+    assert!(pl.segments[0].keyframe, "首段应为关键帧");
+    assert!(!pl.segments[1].keyframe);
+    assert_eq!(
+        pl.init_url.as_deref(),
+        Some("https://h/live/init.m4s?x=1"),
+        "相对 URI 应解析为绝对 URL 且保留 query"
+    );
+}
+
 // ---------- live（直播流解析纯函数） ----------
 
 #[test]

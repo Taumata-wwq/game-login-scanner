@@ -328,6 +328,21 @@ pub(crate) fn request_sync(
     headers: &Headers,
     body: Option<&str>,
 ) -> Result<Response, String> {
+    let (status, headers, bytes) = request_bytes_sync(method, url, headers, body)?;
+    Ok(Response {
+        status,
+        headers,
+        body: String::from_utf8_lossy(&bytes).into_owned(),
+    })
+}
+
+/// 同步请求（二进制响应体版）：HLS 分片/m3u8 等非 UTF-8 内容用。
+pub(crate) fn request_bytes_sync(
+    method: &str,
+    url: &str,
+    headers: &Headers,
+    body: Option<&str>,
+) -> Result<(u16, Headers, Vec<u8>), String> {
     let mut current = url.to_string();
     for _ in 0..MAX_REDIRECTS {
         let (https, host, port, path) = split_url(&current)?;
@@ -376,11 +391,7 @@ pub(crate) fn request_sync(
             continue;
         }
         let resp_body = read_body(&mut tls, &resp_headers, prefix)?;
-        return Ok(Response {
-            status,
-            headers: resp_headers,
-            body: String::from_utf8_lossy(&resp_body).into_owned(),
-        });
+        return Ok((status, resp_headers, resp_body));
     }
     Err("重定向次数过多".to_string())
 }
@@ -391,6 +402,19 @@ pub async fn get(url: &str, headers: Headers) -> Result<Response, String> {
     tokio::task::spawn_blocking(move || request_sync("GET", &url, &headers, None))
         .await
         .map_err(|e| format!("HTTP 任务失败: {e}"))?
+}
+
+/// GET 请求返回原始字节（HLS 分片/m3u8 等二进制内容）。
+pub(crate) fn get_bytes_sync(
+    url: &str,
+    headers: &Headers,
+    referer: &str,
+) -> Result<Vec<u8>, String> {
+    let mut h = headers.clone();
+    if !referer.is_empty() {
+        h.push(("Referer".to_string(), referer.to_string()));
+    }
+    request_bytes_sync("GET", url, &h, None).map(|(_, _, b)| b)
 }
 
 /// POST 请求（body 为原始字符串）。
