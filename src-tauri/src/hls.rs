@@ -24,6 +24,8 @@ pub struct Playlist {
     pub init_url: Option<String>,
     pub segments: Vec<Segment>,
     pub media_sequence: u64,
+    /// 目标分片时长（秒），来自 EXT-X-TARGETDURATION。用于拉流循环按分片边界调度。
+    pub target_duration: u64,
 }
 
 /// 解析 m3u8 文本；base_url 用于把相对 URI 解析为绝对 URL。
@@ -31,6 +33,7 @@ pub fn parse_m3u8(text: &str, base_url: &str) -> Option<Playlist> {
     let mut init_uri: Option<String> = None;
     let mut segments: Vec<Segment> = Vec::new();
     let mut media_sequence: u64 = 0;
+    let mut target_duration: u64 = 1;
     let mut next_keyframe = false;
     for line in text.lines() {
         let line = line.trim();
@@ -43,6 +46,8 @@ pub fn parse_m3u8(text: &str, base_url: &str) -> Option<Playlist> {
             }
         } else if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
             media_sequence = rest.trim().parse().unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
+            target_duration = rest.trim().parse().unwrap_or(1).max(1);
         } else if let Some(rest) = line.strip_prefix("#EXT-BILI-AUX:") {
             // 格式 <hex>|K或N|<size>|<hash>；K 表示该段以关键帧开始。
             next_keyframe = rest.split('|').nth(1).map(|s| s == "K").unwrap_or(false);
@@ -63,6 +68,7 @@ pub fn parse_m3u8(text: &str, base_url: &str) -> Option<Playlist> {
         init_url: init_uri,
         segments,
         media_sequence,
+        target_duration,
     })
 }
 

@@ -1249,9 +1249,12 @@ fn decode_hls_session(
     frames: &Arc<Mutex<Frames>>,
 ) -> Result<(), String> {
     let headers = vec![("User-Agent".to_string(), BROWSER_UA.to_string())];
+    // P0：HLS 拉流全程复用同一 TCP+TLS 连接（实测 m3u8 150→30ms，且避免 CDN
+    // 对快速重连的拒绝）。host 变化时 KeepAliveConn 自动重连。
+    let mut conn = crate::http::KeepAliveConn::new();
 
     // 1) 拉 m3u8 播放列表。
-    let m3u8_bytes = crate::http::get_bytes_sync(m3u8_url, &headers, referer)?;
+    let m3u8_bytes = conn.get(m3u8_url, &headers, referer)?;
     let m3u8_text = String::from_utf8_lossy(&m3u8_bytes);
     let playlist =
         crate::hls::parse_m3u8(&m3u8_text, m3u8_url).ok_or_else(|| "m3u8 解析失败".to_string())?;
@@ -1261,7 +1264,7 @@ fn decode_hls_session(
         .ok_or_else(|| "m3u8 缺少 init 段".to_string())?;
 
     // 2) 拉 init 段，取 SPS/PPS 与 timescale。
-    let init_bytes = crate::http::get_bytes_sync(&init_url, &headers, referer)?;
+    let init_bytes = conn.get(&init_url, &headers, referer)?;
     let init_info = crate::hls::parse_init(&init_bytes)
         .ok_or_else(|| "init 段解析失败（无 avcC）".to_string())?;
     let timescale = init_info.timescale.max(1) as u64;
@@ -1286,13 +1289,22 @@ fn decode_hls_session(
     let mut last_seq = playlist.media_sequence.saturating_sub(1);
     let mut skipped_first = false;
     let mut fail_streak = 0u32;
+    // P1/P3：按分片边界调度轮询——无新分片时轮询间隔取 target_duration/4
+    // （1 秒分片 → 250ms），夹在 [150, 400]ms；不再用固定 300ms。
+    let poll_ms = (playlist.target_duration * 1000 / 4).clamp(150, 400);
+    // 延迟统计：用「积压分片数」作为代理——服务端最新分片 seq − 已消费 seq。
+    // （HLS 是整片下载后批量解码，样本级墙钟锚点法不适用，会得负值。）
+    // 积压 × target_duration ≈ 端到端延迟。每 5 秒输出一次。
+    let mut backlog_sum: u64 = 0;
+    let mut backlog_n: u32 = 0;
+    let mut lag_window = std::time::Instant::now();
 
     loop {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
         }
         // 拉最新 m3u8。
-        let text = match crate::http::get_bytes_sync(m3u8_url, &headers, referer) {
+        let text = match conn.get(m3u8_url, &headers, referer) {
             Ok(b) => String::from_utf8_lossy(&b).into_owned(),
             Err(e) => {
                 log::warn!("HLS: 拉取 m3u8 失败: {e}");
@@ -1304,6 +1316,11 @@ fn decode_hls_session(
             std::thread::sleep(Duration::from_millis(500));
             continue;
         };
+        // 延迟统计：积压分片数 = 服务端最新 seq − 已消费 seq。
+        if let Some(latest) = pl.segments.last() {
+            backlog_sum += latest.seq.saturating_sub(last_seq);
+            backlog_n += 1;
+        }
         // 收集新分片。
         let fresh: Vec<&crate::hls::Segment> = pl
             .segments
@@ -1311,7 +1328,8 @@ fn decode_hls_session(
             .filter(|s| s.seq > last_seq)
             .collect();
         if fresh.is_empty() {
-            std::thread::sleep(Duration::from_millis(300));
+            // P3：按分片边界节奏轮询，尽快发现新分片。
+            std::thread::sleep(Duration::from_millis(poll_ms));
             continue;
         }
         // 首次或积压：从最近的关键帧段开始（保证解码器有随机访问点）。
@@ -1328,7 +1346,7 @@ fn decode_hls_session(
             if stop.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            let seg_bytes = match crate::http::get_bytes_sync(&seg.url, &headers, referer) {
+            let seg_bytes = match conn.get(&seg.url, &headers, referer) {
                 Ok(b) => b,
                 Err(e) => {
                     log::warn!("HLS: 分片 {} 下载失败: {e}", seg.seq);
@@ -1355,7 +1373,20 @@ fn decode_hls_session(
                 decode_and_push(&mut decoder, &annexb, media_ts, frames);
             }
         }
-        std::thread::sleep(Duration::from_millis(200));
+        if lag_window.elapsed() >= Duration::from_secs(5) && backlog_n > 0 {
+            let avg_backlog = backlog_sum as f64 / backlog_n as f64;
+            log::info!(
+                "HLS 延迟: 平均积压 {:.1} 分片 ≈ {:.0}ms",
+                avg_backlog,
+                avg_backlog * playlist.target_duration as f64 * 1000.0
+            );
+            backlog_sum = 0;
+            backlog_n = 0;
+            lag_window = std::time::Instant::now();
+        }
+        // P2：消费后立即重新轮询（仅 15ms 让步避免空转）——下载+解码期间
+        // 可能已有新分片就绪，立即捕获可省去一个完整轮询间隔的等待。
+        std::thread::sleep(Duration::from_millis(15));
     }
 }
 

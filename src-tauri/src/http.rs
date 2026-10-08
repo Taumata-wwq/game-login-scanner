@@ -396,25 +396,114 @@ pub(crate) fn request_bytes_sync(
     Err("重定向次数过多".to_string())
 }
 
+/// HLS 持久连接：对同一 host 复用 TCP+TLS，避免每分片/每轮 m3u8 重建连接。
+///
+/// 动机（2026-10-08 实测，房间 1673630）：
+/// - 新建连接拉 m3u8 142~209ms，复用仅 29~31ms（省 ~120ms/次）；
+/// - CDN 对快速重复新建 TCP+TLS 直接拒绝（SSL: UNEXPECTED_EOF_WHILE_READING）。
+///
+/// 仅供 HLS 拉流循环使用（同 host 连续请求）；低频 API 调用仍走 request_bytes_sync。
+pub(crate) struct KeepAliveConn {
+    stream: Option<Box<dyn ReadWrite>>,
+    host: String,
+    port: u16,
+}
+
+impl Default for KeepAliveConn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KeepAliveConn {
+    pub fn new() -> Self {
+        Self {
+            stream: None,
+            host: String::new(),
+            port: 0,
+        }
+    }
+
+    /// GET 并复用连接。连接被服务端关闭/超时则丢弃并重连重试一次（GET 幂等）。
+    pub fn get(&mut self, url: &str, headers: &Headers, referer: &str) -> Result<Vec<u8>, String> {
+        let (_, host, port, path) = split_url(url)?;
+        if self.stream.is_none() || self.host != host || self.port != port {
+            self.stream = Some(api_tls_connect(&host, port)?);
+            self.host = host.clone();
+            self.port = port;
+        }
+        match self.try_get(&path, &host, headers, referer) {
+            Ok(body) => Ok(body),
+            Err(e) => {
+                // 连接可能已被服务端（空闲/复用上限）关闭：重连重试一次。
+                self.stream = Some(api_tls_connect(&host, port)?);
+                self.try_get(&path, &host, headers, referer)
+                    .map_err(|e2| format!("{e}；重连后仍失败: {e2}"))
+            }
+        }
+    }
+
+    fn try_get(
+        &mut self,
+        path: &str,
+        host: &str,
+        headers: &Headers,
+        referer: &str,
+    ) -> Result<Vec<u8>, String> {
+        let close;
+        let body = {
+            let stream = self
+                .stream
+                .as_mut()
+                .ok_or_else(|| "连接未建立".to_string())?;
+            let mut req = format!(
+                "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\nConnection: keep-alive\r\n"
+            );
+            let mut has_ua = false;
+            for (k, v) in headers {
+                if k.eq_ignore_ascii_case("host") || k.eq_ignore_ascii_case("referer") {
+                    continue;
+                }
+                if k.eq_ignore_ascii_case("user-agent") {
+                    has_ua = true;
+                }
+                req.push_str(&format!("{k}: {}\r\n", header_utf8(v)));
+            }
+            if !has_ua {
+                req.push_str(&format!("User-Agent: {DEFAULT_UA}\r\n"));
+            }
+            if !referer.is_empty() {
+                req.push_str(&format!("Referer: {}\r\n", header_utf8(referer)));
+            }
+            req.push_str("\r\n");
+            stream
+                .write_all(req.as_bytes())
+                .map_err(|e| format!("发送请求失败: {e}"))?;
+            stream
+                .flush()
+                .map_err(|e| format!("发送请求失败(flush): {e}"))?;
+            let (raw_headers, prefix) = read_headers(stream)?;
+            let (status, resp_headers) = parse_response(&raw_headers)?;
+            if !(200..300).contains(&status) {
+                return Err(format!("HLS HTTP {status}"));
+            }
+            close = header_find(&resp_headers, "connection")
+                .is_some_and(|v| v.eq_ignore_ascii_case("close"));
+            read_body(stream, &resp_headers, prefix)?
+        };
+        if close {
+            self.stream = None; // 服务端要求关闭，下次重连
+        }
+        Ok(body)
+    }
+}
+
 /// GET 请求（async 包装）。
 pub async fn get(url: &str, headers: Headers) -> Result<Response, String> {
     let url = url.to_string();
     tokio::task::spawn_blocking(move || request_sync("GET", &url, &headers, None))
         .await
         .map_err(|e| format!("HTTP 任务失败: {e}"))?
-}
-
-/// GET 请求返回原始字节（HLS 分片/m3u8 等二进制内容）。
-pub(crate) fn get_bytes_sync(
-    url: &str,
-    headers: &Headers,
-    referer: &str,
-) -> Result<Vec<u8>, String> {
-    let mut h = headers.clone();
-    if !referer.is_empty() {
-        h.push(("Referer".to_string(), referer.to_string()));
-    }
-    request_bytes_sync("GET", url, &h, None).map(|(_, _, b)| b)
 }
 
 /// POST 请求（body 为原始字符串）。
