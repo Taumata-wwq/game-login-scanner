@@ -1475,7 +1475,12 @@
         return;
       }
       liveOn = true;
-      preview = null;                 // mon 切换为流尺寸，视口重置
+      // 用流尺寸立即占位 preview（而非置 null）：live_start 已阻塞到首帧，但首帧
+      // 仍要等 refreshLiveFrame 下一轮才写入 srcCanvas。若此处 preview=null，
+      // 这段时间 mousedown/wheel 会因守卫 `if (!preview)` 全部失效、无法拖拽缩放。
+      // 占位后即可交互（画面未到显示黑底）；refreshLiveFrame 会用相同流尺寸重建，
+      // 不重置视图，用户此时的拖拽/缩放位置得以保留。
+      preview = { mon: { x: 0, y: 0, w, h } };
       view = { scale: 1, fx: 0.5, fy: 0.5 };
       viewT = { scale: 1, fx: 0.5, fy: 0.5 };
       srcCanvas = null;
