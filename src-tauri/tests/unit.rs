@@ -647,18 +647,6 @@ fn avcc_config_extracts_sps_pps() {
 }
 
 #[test]
-fn yuv420_to_rgba_gray_and_clamp() {
-    // 2x2 YUV：全 Y=0（黑）与 Y=255（白）；U/V=128（无色度）。
-    let y = [0u8, 0, 0, 0];
-    let yw = [255u8, 255, 255, 255];
-    let uv = [128u8];
-    let black = game_login_scanner_lib::live::yuv420_to_rgba(&y, &uv, &uv, 2, 1, 2, 2);
-    assert!(black.iter().step_by(4).all(|&p| p <= 16));
-    let white = game_login_scanner_lib::live::yuv420_to_rgba(&yw, &uv, &uv, 2, 1, 2, 2);
-    assert!(white.iter().step_by(4).all(|&p| p >= 235));
-}
-
-#[test]
 fn parse_bili_durl_extracts_legacy_url() {
     let v: serde_json::Value = serde_json::json!({
         "code": 0,

@@ -530,38 +530,6 @@ pub fn strip_sps_vui(annexb: &[u8]) -> (Vec<u8>, bool) {
     (out, changed)
 }
 
-/// YUV420 平面（BT.601 有限色域）→ RGBA。
-/// 保留作为测试基准（生产路径已改按需转换，见 yuv_crop_to_rgb/rgba）。
-pub fn yuv420_to_rgba(
-    y: &[u8],
-    u: &[u8],
-    v: &[u8],
-    y_stride: usize,
-    uv_stride: usize,
-    width: u32,
-    height: u32,
-) -> Vec<u8> {
-    let (w, h) = (width as usize, height as usize);
-    let mut out = Vec::with_capacity(w * h * 4);
-    for row in 0..h {
-        let uv_row = row / 2;
-        for col in 0..w {
-            let yv = y[row * y_stride + col] as i32;
-            let uv = u[uv_row * uv_stride + col / 2] as i32 - 128;
-            let vv = v[uv_row * uv_stride + col / 2] as i32 - 128;
-            let yy = yv - 16;
-            let r = (1192 * yy + 1634 * vv) >> 10;
-            let g = (1192 * yy - 400 * uv - 833 * vv) >> 10;
-            let b = (1192 * yy + 2066 * uv) >> 10;
-            out.push(r.clamp(0, 255) as u8);
-            out.push(g.clamp(0, 255) as u8);
-            out.push(b.clamp(0, 255) as u8);
-            out.push(255);
-        }
-    }
-    out
-}
-
 /// 紧凑 YUV420 裁剪区 → RGB（3 字节/像素），面积平均降采样到 tw×th。
 ///
 /// **只转换输出像素所需的源区域**（对比早先「全帧转 RGBA 再降采样」），

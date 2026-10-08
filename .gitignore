@@ -15,7 +15,6 @@ node_modules/
 
 # 参考项目与第三方工具（只读参照，不入库）
 /reference/
-/[仅B服]PC扫码器v1.4.7*
 
 # GitHub Actions（token 缺 workflow scope，暂不推送）
 /.github/workflows/
