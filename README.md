@@ -41,7 +41,7 @@ Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账
 ```powershell
 cd src-tauri
 cargo run                 # 调试运行
-cargo build --release     # 产物：target\release\game-login-scanner.exe（约 4.6 MB）
+cargo build --release     # 产物：target\release\game-login-scanner.exe（约 4.5 MB）
 ```
 
 代码结构：
