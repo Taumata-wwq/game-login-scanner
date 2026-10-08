@@ -574,6 +574,42 @@ fn parse_bili_flv_extracts_stream_url() {
 }
 
 #[test]
+fn parse_bili_flv_reads_url_info() {
+    // B站现行 API：url_list 为 null，改用 url_info[{host, extra}]。
+    // 完整 URL = host + base_url + extra。
+    let v: serde_json::Value = serde_json::json!({
+        "data": { "playurl_info": { "playurl": { "stream": [
+            {
+                "protocol_name": "http_stream",
+                "format": [{ "format_name": "flv", "codec": [{
+                    "codec_name": "avc",
+                    "base_url": "/live.flv?",
+                    "url_list": serde_json::Value::Null,
+                    "url_info": [{ "host": "https://d1--cn.bilivideo.com", "extra": "expires=123&qn=250" }]
+                }] }]
+            }
+        ] } } } });
+    let url = game_login_scanner_lib::live::parse_bili_flv(&v).expect("应提取到 flv");
+    assert_eq!(url, "https://d1--cn.bilivideo.com/live.flv?expires=123&qn=250");
+}
+
+#[test]
+fn parse_bili_flv_ignores_hls_only() {
+    // 仅有 HLS 流的房间（无 http_stream/flv）：返回 None，由上层回退/报错。
+    let v: serde_json::Value = serde_json::json!({
+        "data": { "playurl_info": { "playurl": { "stream": [
+            {
+                "protocol_name": "http_hls",
+                "format": [{ "format_name": "fmp4", "codec": [{
+                    "codec_name": "avc", "base_url": "/index.m3u8?",
+                    "url_info": [{ "host": "https://h", "extra": "e=1" }]
+                }] }]
+            }
+        ] } } } });
+    assert!(game_login_scanner_lib::live::parse_bili_flv(&v).is_none());
+}
+
+#[test]
 fn parse_accept_qn_reads_codec_levels() {
     // 混合 hls/http_stream、hevc/avc：只取 http_stream/flv/avc 的 accept_qn，
     // 降序去重。

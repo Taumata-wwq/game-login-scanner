@@ -211,6 +211,23 @@ pub fn parse_accept_qn(v: &Value) -> Vec<u32> {
     Vec::new()
 }
 
+/// 从 codec 对象拼出可拉流的完整 URL。
+///
+/// B站 API 有新旧两种结构：
+/// - 新：`url_info[{host, extra}]`——完整 URL = host + base_url + extra。
+/// - 旧：`url_list[host]`——完整 URL = host + base_url。
+/// 实测新结构下 url_list 为 null，旧代码只读 url_list 会解析失败。
+fn codec_url(codec: &Value) -> Option<String> {
+    let base = codec["base_url"].as_str()?;
+    if let Some(info) = codec["url_info"].as_array().and_then(|a| a.first()) {
+        let host = info["host"].as_str()?;
+        let extra = info["extra"].as_str().unwrap_or("");
+        return Some(format!("{host}{base}{extra}"));
+    }
+    let host = codec["url_list"].as_array()?.first()?.as_str()?;
+    Some(format!("{host}{base}"))
+}
+
 /// 从 getRoomPlayInfo 响应提取 http_stream / flv / avc 拉流地址（base_url + host）。
 pub fn parse_bili_flv(v: &Value) -> Option<String> {
     let streams = v["data"]["playurl_info"]["playurl"]["stream"].as_array()?;
@@ -224,9 +241,9 @@ pub fn parse_bili_flv(v: &Value) -> Option<String> {
             }
             for codec in fmt["codec"].as_array()? {
                 if codec["codec_name"].as_str() == Some("avc") {
-                    let base = codec["base_url"].as_str()?;
-                    let host = codec["url_list"].as_array()?.first()?.as_str()?;
-                    return Some(format!("{host}{base}"));
+                    if let Some(u) = codec_url(codec) {
+                        return Some(u);
+                    }
                 }
             }
         }
