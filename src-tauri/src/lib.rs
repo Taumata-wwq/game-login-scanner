@@ -103,6 +103,49 @@ fn save_config(
     Ok(())
 }
 
+/// 字段级更新设置项（不触碰账号列表）。
+///
+/// 前端设置项（自动登录/置顶/自动退出/显示帧率/登入名）此前走 save_config 整份回写，
+/// 其 payload 是可能已过时的前端快照 → 与后端 select/delete 等账号命令并发时会互相
+/// 覆盖（后到的旧快照抹掉账号改动）。改为只提交本次变更的字段，从根上消除该竞态。
+#[tauri::command]
+fn set_options(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    auto_login_last: Option<bool>,
+    always_on_top: Option<bool>,
+    auto_close: Option<bool>,
+    display_fps: Option<u32>,
+    display_name: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(v) = auto_login_last {
+        cfg.auto_login_last = v;
+    }
+    if let Some(v) = auto_close {
+        cfg.auto_close = v;
+    }
+    if let Some(v) = display_fps {
+        cfg.display_fps = config::normalize_display_fps(v);
+    }
+    if let Some(v) = display_name {
+        cfg.display_name = v;
+    }
+    let on_top_changed = always_on_top.filter(|v| *v != cfg.always_on_top);
+    if let Some(v) = always_on_top {
+        cfg.always_on_top = v;
+    }
+    cfg.save().map_err(|e| e.to_string())?;
+    drop(cfg);
+    if let Some(v) = on_top_changed {
+        apply_always_on_top(&app, v);
+    }
+    Ok(())
+}
+
 /// 前端日志落盘：窗口操作失败等前端异常写入日志文件，便于远程排查。
 #[tauri::command]
 fn frontend_log(level: String, msg: String) {
@@ -344,6 +387,30 @@ fn game_key(g: Game) -> String {
         Game::Arknights => "arknights",
     }
     .to_string()
+}
+
+/// 重排鹰角账号：仅重排当前游戏的账号，其它游戏保持原相对顺序
+/// （与 reorder_accounts 的米哈游账号处理一致）。
+#[tauri::command]
+fn hypergryph_reorder(
+    state: tauri::State<'_, AppState>,
+    game: String,
+    order: Vec<String>,
+) -> Result<(), String> {
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let idx = |phone: &str| order.iter().position(|p| p == phone).unwrap_or(usize::MAX);
+    cfg.hypergryph_accounts.sort_by_key(|t| {
+        if t.game == game {
+            idx(&t.phone)
+        } else {
+            usize::MAX
+        }
+    });
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ---------- 鹰角账号管理 ----------
@@ -1457,6 +1524,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
+            set_options,
             frontend_log,
             refresh_official_unames,
             select_account,
@@ -1475,6 +1543,7 @@ pub fn run() {
             hypergryph_select,
             hypergryph_delete,
             hypergryph_set_meta,
+            hypergryph_reorder,
             start_scan,
             stop_scan,
             open_captcha_window,
@@ -1500,6 +1569,19 @@ pub fn run() {
             //（表现为标题栏按钮/拖拽一时失灵）。窗口获得焦点时主动回焦 webview。
             tauri::WindowEvent::Focused(true) if window.label() == "main" => {
                 let _ = window.set_focus();
+            }
+            // 验证窗口被用户直接关闭（未通过 captcha_result 回传）时写入空结果，
+            // 否则前端轮询 take_captcha_result 永远拿不到值。正常提交已先写结果，
+            // 此处仅在仍为空时补写，不覆盖。
+            tauri::WindowEvent::CloseRequested { .. } if window.label() == "captcha" => {
+                let st = window.app_handle().state::<AppState>();
+                let mut r = st
+                    .captcha_result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if r.is_none() {
+                    *r = Some(String::new());
+                }
             }
             // 仅允许上下调节高度：锁定宽度 300（逻辑像素），高度下限 400。
             tauri::WindowEvent::Resized { .. } if window.label() == "main" => {

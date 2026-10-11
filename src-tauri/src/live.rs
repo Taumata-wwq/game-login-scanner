@@ -949,38 +949,47 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
         Some(s) => s,
         None => return FrameOut::NoSession,
     };
-    let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
-    if f.queue.is_empty() {
-        return FrameOut::Empty;
-    }
-    // 弹出节拍 = 显示节拍（前端按设置的 30/60/120fps 轮询）：每轮询至多弹出一个
-    // 最旧帧，队列空时复用队首帧。显示间隔由轮询时钟决定，到达抖动被缓冲吸收
-    // ——「到达即弹出」会把抖动直接透传，缓冲再深也无济于事。
-    let popped = f.queue.pop_front();
-    let f = match &popped {
-        Some(fr) => fr,
-        None => f.queue.front().unwrap(),
+    // 锁内只做：弹帧、计算裁剪/输出尺寸、克隆 Arc。YUV→RGBA 转换**在锁外**进行，
+    // 避免长时间持有 frames 锁阻塞解码线程 push_frame（与 take_scan_frame 的
+    // 「锁外转换」原则一致；此前 guard 被遮蔽未 drop，转换全程持锁）。
+    let (frame, cx, cy, cw, ch, tw, th, step) = {
+        let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        if f.queue.is_empty() {
+            return FrameOut::Empty;
+        }
+        // 弹出节拍 = 显示节拍（前端按设置的 30/60/120fps 轮询）：每轮询至多弹出一个
+        // 最旧帧，队列空时复用队首帧。显示间隔由轮询时钟决定，到达抖动被缓冲吸收
+        // ——「到达即弹出」会把抖动直接透传，缓冲再深也无济于事。
+        let popped = f.queue.pop_front();
+        let fref = match &popped {
+            Some(fr) => fr,
+            None => f.queue.front().unwrap(),
+        };
+        if fref.w == 0 || fref.h == 0 {
+            return FrameOut::Empty;
+        }
+        let frame = fref.clone();
+        let (fw, fh) = (frame.w as i32, frame.h as i32);
+        let (cx, cy, cw, ch) = if w > 0 && h > 0 {
+            let x0 = x.clamp(0, fw - 1);
+            let y0 = y.clamp(0, fh - 1);
+            let cw0 = (w.min(fw - x0)).max(1) as u32;
+            let ch0 = (h.min(fh - y0)).max(1) as u32;
+            (x0 as u32, y0 as u32, cw0, ch0)
+        } else {
+            (0, 0, frame.w, frame.h)
+        };
+        // 输出宽度不超过裁剪区实际像素数（禁上采样，避免黑网格）。
+        let tw = max_width.min(cw).clamp(1, 4096);
+        let th = (((ch as u64) * tw as u64) / cw as u64).max(1) as u32;
+        // 预览允许采样：步长与旧 downsample_rgba 一致（cv/tw 后再折半），
+        // 保证预览转换量约为全帧的 1/4~1/16。
+        let step = (cw.div_ceil(tw).max(1).div_ceil(2).max(1)) as usize;
+        (frame, cx, cy, cw, ch, tw, th, step)
     };
-    if f.w == 0 || f.h == 0 {
-        return FrameOut::Empty;
-    }
-    let f = f.clone();
-    let (fw, fh) = (f.w as i32, f.h as i32);
-    let (cx, cy, cw, ch) = if w > 0 && h > 0 {
-        let x0 = x.clamp(0, fw - 1);
-        let y0 = y.clamp(0, fh - 1);
-        let cw0 = (w.min(fw - x0)).max(1) as u32;
-        let ch0 = (h.min(fh - y0)).max(1) as u32;
-        (x0 as u32, y0 as u32, cw0, ch0)
-    } else {
-        (0, 0, f.w, f.h)
-    };
-    // 输出宽度不超过裁剪区实际像素数（禁上采样，避免黑网格）。
-    let tw = max_width.min(cw).clamp(1, 4096);
-    let th = (((ch as u64) * tw as u64) / cw as u64).max(1) as u32;
     // 帧未变（seq 相同）且视口/宽度未变：24 字节短响应，前端沿用上一帧
     // （复用屏幕预览协议），消除重复帧的降采样与 IPC。
-    let key = (f.seq, (cx, cy, cw, ch), tw);
+    let key = (frame.seq, (cx, cy, cw, ch), tw);
     {
         let mut last = LAST_SENT.lock().unwrap_or_else(PoisonError::into_inner);
         if *last == Some(key) {
@@ -988,15 +997,13 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
         }
         *last = Some(key);
     }
-    // 预览允许采样：步长与旧 downsample_rgba 一致（cv/tw 后再折半），
-    // 保证预览转换量约为全帧的 1/4~1/16。
-    let step = (cw.div_ceil(tw).max(1).div_ceil(2).max(1)) as usize;
+    // 锁外转换：只转换输出像素所需的源区域。
     let rgba = yuv_crop_to_rgba(
-        &f.y,
-        &f.u,
-        &f.v,
-        f.w as usize,
-        f.h as usize,
+        &frame.y,
+        &frame.u,
+        &frame.v,
+        frame.w as usize,
+        frame.h as usize,
         (cx, cy, cw, ch),
         tw as usize,
         th as usize,
@@ -1007,8 +1014,8 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
     out.extend_from_slice(&th.to_le_bytes());
     out.extend_from_slice(&0i32.to_le_bytes());
     out.extend_from_slice(&0i32.to_le_bytes());
-    out.extend_from_slice(&f.w.to_le_bytes());
-    out.extend_from_slice(&f.h.to_le_bytes());
+    out.extend_from_slice(&frame.w.to_le_bytes());
+    out.extend_from_slice(&frame.h.to_le_bytes());
     out.extend_from_slice(&rgba);
     FrameOut::Frame(out)
 }
@@ -1070,6 +1077,9 @@ fn decode_config() -> openh264::decoder::DecoderConfig {
 /// 持续追帧上限：连续快速追帧（间隔 < 4s）达到此次数，判为解码吞吐持续不足，
 /// 降级清晰度换低码率流。仅「持续跟不上」才降级，偶发追帧不触发。
 const CATCHUP_LIMIT: u32 = 4;
+
+/// 「连续追帧」判定的时间窗口：两次追帧间隔超过此值即视为偶发，不累计。
+const CATCHUP_WINDOW_MS: u64 = 4000;
 
 /// 解码线程向 start() 回报的致命失败原因（未开播 / 解码不支持 / 连续重连失败）。
 /// start() 轮询它以便快速返回明确错误，而非干等 15 秒首帧超时。
@@ -1291,11 +1301,8 @@ fn decode_hls_session(
             backlog_n += 1;
         }
         // 收集新分片。
-        let fresh: Vec<&crate::hls::Segment> = pl
-            .segments
-            .iter()
-            .filter(|s| s.seq > last_seq)
-            .collect();
+        let fresh: Vec<&crate::hls::Segment> =
+            pl.segments.iter().filter(|s| s.seq > last_seq).collect();
         if fresh.is_empty() {
             // P3：按分片边界节奏轮询，尽快发现新分片。
             std::thread::sleep(Duration::from_millis(poll_ms));
@@ -1368,6 +1375,7 @@ fn decode_and_push(
     media_ts: u32,
     frames: &Arc<Mutex<Frames>>,
 ) {
+    let mut pushed_this_tag = false;
     match decoder.decode(annexb) {
         Ok(Some(yuv)) => {
             let (w, h) = yuv.dimensions();
@@ -1384,25 +1392,27 @@ fn decode_and_push(
                     strides.0,
                     strides.1,
                 );
+                pushed_this_tag = true;
             }
         }
         Ok(None) => {}
         Err(_) => return,
     }
     // NoFlush 下帧可能留在解码器内部缓冲：用 DecodeFrame2(NULL) 显式取回。
+    // 同一 tag 内 decode() 已推出帧时跳过，避免重复推送同 ts 帧。
     unsafe {
         let mut dst = [std::ptr::null_mut::<u8>(); 3];
         let mut bi = openh264_sys2::SBufferInfo::default();
-        let state = decoder
-            .raw_api()
-            .decode_frame2(std::ptr::null(), 0, dst.as_mut_ptr().cast(), &mut bi);
-        if state == 0 && bi.iBufferStatus != 0 && !dst[0].is_null() {
+        let state =
+            decoder
+                .raw_api()
+                .decode_frame2(std::ptr::null(), 0, dst.as_mut_ptr().cast(), &mut bi);
+        if state == 0 && bi.iBufferStatus != 0 && !dst[0].is_null() && !pushed_this_tag {
             let info = bi.UsrData.sSystemBuffer;
             let (w, h) = (info.iWidth as u32, info.iHeight as u32);
             if w != 0 && h != 0 {
                 let (ys, us) = (info.iStride[0] as usize, info.iStride[1] as usize);
-                let y =
-                    std::slice::from_raw_parts(dst[0] as *const u8, info.iHeight as usize * ys);
+                let y = std::slice::from_raw_parts(dst[0] as *const u8, info.iHeight as usize * ys);
                 let uv_len = info.iHeight as usize * us / 2;
                 let u = std::slice::from_raw_parts(dst[1] as *const u8, uv_len);
                 let v = std::slice::from_raw_parts(dst[2] as *const u8, uv_len);
@@ -1685,9 +1695,10 @@ fn decode_session(
     let mut skipping = false;
     // 追帧开始时刻（用于超时保护：异常流长时间无关键帧时强制重连，避免假死）。
     let mut skip_since: Option<std::time::Instant> = None;
-    // 本会话累计追帧次数。健康流几乎不需要追帧；某会话追帧达 CATCHUP_LIMIT 即判
-    // 解码吞吐不足 → 降级清晰度（新会话计数从 0 起，自然沿 qn 链逐级下探）。
+    // 连续快速追帧计数（间隔 < CATCHUP_WINDOW_MS 才累加；偶发追帧不复位也不累加）。
+    // 达 CATCHUP_LIMIT 判为解码吞吐持续不足 → 降级清晰度（新会话计数从 0 起）。
     let mut catchup_count = 0u32;
+    let mut last_catchup_at: Option<std::time::Instant> = None;
     // 缓存的 SPS/PPS（追帧重建解码器后需重喂）。
     let mut param_sets: Vec<u8> = Vec::new();
     loop {
@@ -1746,9 +1757,19 @@ fn decode_session(
                 if !skipping && lag > CATCHUP_LAG_MS {
                     skipping = true;
                     skip_since = Some(now);
-                    catchup_count += 1;
+                    // 仅「连续快速」追帧才累加：与上次追帧间隔 < CATCHUP_WINDOW_MS
+                    // 视为持续跟不上；间隔过长的偶发追帧不累加（否则长健康会话会误降级）。
+                    let rapid = last_catchup_at.is_some_and(|t| {
+                        now.duration_since(t) < Duration::from_millis(CATCHUP_WINDOW_MS)
+                    });
+                    if rapid {
+                        catchup_count += 1;
+                    } else {
+                        catchup_count = 1;
+                    }
+                    last_catchup_at = Some(now);
                     log::info!(
-                        "直播追帧：落后 {lag}ms（本会话第 {catchup_count} 次），丢弃至下一关键帧"
+                        "直播追帧：落后 {lag}ms（连续第 {catchup_count} 次），丢弃至下一关键帧"
                     );
                 }
             }
@@ -1840,14 +1861,19 @@ fn decode_session(
                 // 组合时间（body[2..5]）忽略——显示延迟可接受。
                 // 解码错误不静默：持续失败（编码不兼容等）由上层降级清晰度。
                 let decode_t = std::time::Instant::now();
+                // 本 tag 内 decode() 是否已推出一帧：若已推出，则同一 tag 的
+                // decode_frame2(NULL) 若再吐帧且 media_ts 相同，即为重复帧，跳过。
+                let mut pushed_this_tag = false;
                 match decoder.decode(&annexb) {
                     Ok(Some(yuv)) => {
                         decode_ns_total += decode_t.elapsed().as_nanos();
                         out_ok += 1;
+                        dec_fails = 0; // 成功即复位：dec_fails 是「连续失败」计数
                         let (w, h) = yuv.dimensions();
                         if w == 0 || h == 0 {
                             continue;
                         }
+                        pushed_this_tag = true;
                         let strides = yuv.strides();
                         let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
                         f.next_seq += 1;
@@ -1869,7 +1895,10 @@ fn decode_session(
                         }
                         drop(f);
                     }
-                    Ok(None) => out_none += 1,
+                    Ok(None) => {
+                        dec_fails = 0;
+                        out_none += 1;
+                    }
                     Err(e) => {
                         out_err += 1;
                         dec_fails += 1;
@@ -1896,7 +1925,9 @@ fn decode_session(
                         dst.as_mut_ptr().cast(),
                         &mut bi,
                     );
-                    if state == 0 && bi.iBufferStatus != 0 && !dst[0].is_null() {
+                    // 同一 tag 内 decode() 已推出帧、且此处再吐同 ts 帧 → 重复，跳过。
+                    if state == 0 && bi.iBufferStatus != 0 && !dst[0].is_null() && !pushed_this_tag
+                    {
                         let info = bi.UsrData.sSystemBuffer;
                         let (w, h) = (info.iWidth as u32, info.iHeight as u32);
                         if w != 0 && h != 0 {

@@ -125,6 +125,21 @@ struct MonitorDup {
     tile_want: bool,
 }
 
+/// staging 的只读 Map 守卫：Drop 时 Unmap（持有 COM 引用计数，不借 MonitorDup）。
+/// 异常展开时也能 Unmap，避免 staging 停在已 Map 状态导致后续 Map 恒失败。
+struct MappedStaging {
+    context: ID3D11DeviceContext,
+    texture: ID3D11Texture2D,
+    ptr: *const u8,
+    pitch: usize,
+}
+
+impl Drop for MappedStaging {
+    fn drop(&mut self) {
+        unsafe { self.context.Unmap(&self.texture, 0) };
+    }
+}
+
 /// 两个关注区的并集（都为 None 时返回 None）。
 fn union_roi(a: Option<MonitorKey>, b: Option<MonitorKey>) -> Option<MonitorKey> {
     match (a, b) {
@@ -415,17 +430,26 @@ impl MonitorDup {
         }
     }
 
-    /// 消费者：Map staging 并执行 `f`（GPU 数据仅在此期间可读）。
-    fn with_mapped<R>(&mut self, f: impl FnOnce(*const u8, usize) -> R) -> Result<R, ()> {
+    /// Map staging 为只读并返回 RAII 守卫；Drop 时保证 Unmap（含 panic 展开路径）。
+    fn map_staging(&self) -> Result<MappedStaging, ()> {
         unsafe {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.context
                 .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .map_err(|_| ())?;
-            let r = f(mapped.pData as *const u8, mapped.RowPitch as usize);
-            self.context.Unmap(&self.staging, 0);
-            Ok(r)
+            Ok(MappedStaging {
+                context: self.context.clone(),
+                texture: self.staging.clone(),
+                ptr: mapped.pData as *const u8,
+                pitch: mapped.RowPitch as usize,
+            })
         }
+    }
+
+    /// 消费者：Map staging 并执行 `f`（GPU 数据仅在此期间可读）。
+    fn with_mapped<R>(&mut self, f: impl FnOnce(*const u8, usize) -> R) -> Result<R, ()> {
+        let m = self.map_staging()?;
+        Ok(f(m.ptr, m.pitch))
     }
 
     /// 扫码取帧：仅当出现新帧时转换，返回裁剪后的 RGB。
@@ -495,21 +519,9 @@ impl MonitorDup {
         // Map/Unmap 内联（闭包内还要可变借用 self 的累加缓冲，不能走 with_mapped）。
         // staging 是 CPU 可读纹理，Map 极快，无需 DO_NOT_WAIT（后者在 GPU 仍绘制时
         // 返回空帧，且异常路径会触发 GDI 回退，反而更慢）。
-        let rgba = unsafe {
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            self.context
-                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                .map_err(|_| ())?;
-            let r = self.area_average_rgba(
-                mapped.pData as *const u8,
-                mapped.RowPitch as usize,
-                (cx, cy, cw, ch),
-                tw,
-                th,
-            );
-            self.context.Unmap(&self.staging, 0);
-            r
-        };
+        let mapped = self.map_staging()?;
+        let rgba = self.area_average_rgba(mapped.ptr, mapped.pitch, (cx, cy, cw, ch), tw, th);
+        drop(mapped);
         // 裁剪区内容哈希去重：桌面其他位置变化（frame_id 递增）导致重算时，
         // 若本视口降采样结果与上次完全一致，则返回「无变化」，避免无谓的
         // IPC 传输与前端重绘（放大后看局部、而全局仍在动时尤为常见）。
@@ -611,13 +623,27 @@ impl MonitorDup {
         let mut remaining = vec![false; (cols * rows) as usize];
         let sums = &mut self.avg_sums;
         let counts = &mut self.avg_counts;
-        unsafe {
+        // Map staging（RAII：异常展开也保证 Unmap）；失败时回填脏标记——
+        // 否则本帧变化的瓦片永久丢失，底图停止更新且无恢复路径。
+        let mapped = unsafe {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            self.context
+            if self
+                .context
                 .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                .ok()?;
-            let src = mapped.pData as *const u8;
-            let pitch = mapped.RowPitch as usize;
+                .is_err()
+            {
+                self.tiles.dirty = dirty;
+                return None;
+            }
+            MappedStaging {
+                context: self.context.clone(),
+                texture: self.staging.clone(),
+                ptr: mapped.pData as *const u8,
+                pitch: mapped.RowPitch as usize,
+            }
+        };
+        let (src, pitch) = (mapped.ptr, mapped.pitch);
+        unsafe {
             for r in 0..rows {
                 for c in 0..cols {
                     let idx = (r * cols + c) as usize;
@@ -716,8 +742,8 @@ impl MonitorDup {
                     changed.push((c, r, dw, dh, tile_rgba));
                 }
             }
-            self.context.Unmap(&self.staging, 0);
         }
+        drop(mapped);
         // 只保留「落到 bbox 外、待下一帧处理」的脏标记；其余清除。
         self.tiles.dirty = remaining;
         if changed.is_empty() {
@@ -750,24 +776,44 @@ fn shared() -> &'static Mutex<Shared> {
 
 /// 取（或创建）某显示器的复制会话；首次调用会启动帧总线线程。
 fn get_or_create(key: MonitorKey) -> Result<Arc<Entry>, Unavailable> {
+    let now_secs = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    };
+
+    // 快路径：短锁内查已有会话（顺带惰性启动帧总线）。
+    {
+        let s = shared();
+        let mut s = s.lock().unwrap_or_else(PoisonError::into_inner);
+        if !s.bus_started {
+            s.bus_started = true;
+            let _ = std::thread::Builder::new()
+                .name("game-scanner-dup-bus".into())
+                .spawn(bus_loop);
+        }
+        if let Some(e) = s.monitors.get_mut(&key) {
+            e.accessed
+                .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+            return Ok(Arc::clone(e));
+        }
+    }
+
+    // 慢路径：**锁外**创建会话（D3D11 设备创建数十~数百 ms，不能占用全局锁，
+    // 否则会阻塞总线快照、其它显示器建会话与 clear_*_roi）。
+    let created = create_monitor(key).map_err(|_| Unavailable)?;
+
+    // 再抢锁插入；并发下可能已被他人创建，则复用已存在的（丢弃本次创建）。
     let s = shared();
     let mut s = s.lock().unwrap_or_else(PoisonError::into_inner);
-    if !s.bus_started {
-        s.bus_started = true;
-        let _ = std::thread::Builder::new()
-            .name("game-scanner-dup-bus".into())
-            .spawn(bus_loop);
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = now_secs();
     if let Some(e) = s.monitors.get_mut(&key) {
         e.accessed.store(now, std::sync::atomic::Ordering::Relaxed);
         return Ok(Arc::clone(e));
     }
     let entry = Arc::new(Entry {
-        dup: Mutex::new(create_monitor(key).map_err(|_| Unavailable)?),
+        dup: Mutex::new(created),
         accessed: std::sync::atomic::AtomicU64::new(now),
     });
     // 容量上限：超出时淘汰最久未用的（显示器热拔插后旧条目自然清理）。
@@ -798,9 +844,12 @@ fn bus_loop() {
                 .collect()
         };
         for (key, entry) in entries {
-            // try_lock：消费者正在 Map（如 4K 整帧转换）时跳过本轮，下轮补上。
-            let Ok(mut m) = entry.dup.try_lock() else {
-                continue;
+            // try_lock：消费者正在 Map（如 4K 整帧转换）时跳过本轮，下轮补上；
+            // 锁被毒化（消费者 panic）时取回内部值继续，否则该显示器总线永久停摆。
+            let mut m = match entry.dup.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+                Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
             };
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.grab_new()));
             match r.unwrap_or(Grab::Broken) {

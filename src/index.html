@@ -799,13 +799,8 @@
 
   function renderFilter() {
     const g = gameMeta(config ? (config.current_game || 'bh3') : 'bh3');
-    document.querySelectorAll('#filterSeg button').forEach((b) => {
-      const f = b.dataset.f;
-      const supported = f === 'bilibili' ? g.bili : (f === 'official' ? g.official : g.hyper);
-      b.hidden = !supported;
-      b.classList.toggle('on', f === filter && supported);
-    });
-    // 当前 filter 若该游戏不支持，回退到支持的渠道。
+    // 先回退 filter 到该游戏支持的渠道，再渲染高亮——否则切换游戏时高亮会先投给
+    // 即将被隐藏的旧渠道，导致当前无任何按钮高亮（直到下次渲染）。
     if (g.hyper) {
       if (filter !== 'hypergryph') filter = 'hypergryph';
     } else {
@@ -813,6 +808,12 @@
       if (filter === 'bilibili' && !g.bili) filter = 'official';
       if (filter === 'official' && !g.official) filter = 'bilibili';
     }
+    document.querySelectorAll('#filterSeg button').forEach((b) => {
+      const f = b.dataset.f;
+      const supported = f === 'bilibili' ? g.bili : (f === 'official' ? g.official : g.hyper);
+      b.hidden = !supported;
+      b.classList.toggle('on', f === filter && supported);
+    });
   }
 
   function renderAccounts() {
@@ -895,17 +896,18 @@
   let dragUid = null;
   async function reorderAccounts(ch, dragUid, targetUid) {
     if (ch === 'hypergryph') {
-      // 鹰角账号按 phone 重排（本地重排后保存整份配置）。
-      const arr = config.hypergryph_accounts || [];
-      const order = arr.map((a) => a.phone);
+      // 仅重排当前游戏的鹰角账号：交给后端（按 game 过滤），避免前端在混合全量
+      // 数组上重排而打乱其它游戏排序。
+      const game = curGameId();
+      const mine = (config.hypergryph_accounts || []).filter((a) => a.game === game);
+      const order = mine.map((a) => a.phone);
       const from = order.indexOf(dragUid);
       const to = order.indexOf(targetUid);
       if (from < 0 || to < 0) return;
       order.splice(from, 1);
       order.splice(to, 0, dragUid);
-      const map = new Map(arr.map((a) => [a.phone, a]));
-      config.hypergryph_accounts = order.map((p) => map.get(p)).filter(Boolean);
-      await saveCfg({});
+      await invoke('hypergryph_reorder', { game, order });
+      config = await invoke('get_config');
       renderAccounts();
       return;
     }
@@ -956,9 +958,17 @@
     } catch (e) { log('保存备注失败: ' + e, 'error'); }
   }
 
+  // 设置项更新：走字段级命令（不整份回写配置），避免与账号类命令并发互相覆盖。
+  // patch 的键名与 set_options 参数一致（蛇形→驼峰转换）。
   async function saveCfg(patch) {
     config = Object.assign({}, config, patch);
-    await invoke('save_config', { cfg: config });
+    const args = {};
+    if ('auto_login_last' in patch) args.autoLoginLast = patch.auto_login_last;
+    if ('always_on_top' in patch) args.alwaysOnTop = patch.always_on_top;
+    if ('auto_close' in patch) args.autoClose = patch.auto_close;
+    if ('display_fps' in patch) args.displayFps = patch.display_fps;
+    if ('display_name' in patch) args.displayName = patch.display_name;
+    await invoke('set_options', args);
   }
 
   async function selectAccount(ch, uid) {
@@ -1231,6 +1241,7 @@
   // 打开独立验证窗口（verify.html），窗口完成后经 captcha_result 命令写回，
   // 前端轮询 take_captcha_result 取回 "session_id;base64(getValidate())" 并重试。
   let captchaRetry = null;   // 验证完成后重试的回调
+  let captchaTimer = null;   // 轮询验证结果的 interval（模块级：防重复叠加）
   async function showCaptcha(aigis, retryFn) {
     let data = aigis && aigis.data !== undefined ? aigis.data : aigis;
     if (typeof data === 'string') {
@@ -1253,6 +1264,8 @@
       return;
     }
     captchaRetry = retryFn;
+    // 清理可能残留的旧轮询（重复调用时防止叠加多个 interval 与结果串扰）。
+    if (captchaTimer !== null) { clearInterval(captchaTimer); captchaTimer = null; }
     setCredStatus('请在弹出的验证窗口中完成验证…');
     try {
       await invoke('open_captcha_window', {
@@ -1267,11 +1280,27 @@
       return;
     }
     // 轮询取回验证结果（窗口通过 captcha_result 命令写回）。
-    const timer = setInterval(async () => {
+    // 注意：后端持续报错或用户直接关窗（不触发 captcha_result）时也必须终止轮询，
+    // 故 catch 分支累计失败次数、超上限即停止（此前 catch return 会永久轮询）。
+    let pollFails = 0;
+    captchaTimer = setInterval(async () => {
       let res;
-      try { res = await invoke('take_captcha_result'); } catch (e) { return; }
+      try {
+        res = await invoke('take_captcha_result');
+        pollFails = 0;
+      } catch (e) {
+        pollFails += 1;
+        if (pollFails >= 25) { // ~10s 无响应：视为窗口已关闭，停止轮询
+          clearInterval(captchaTimer);
+          captchaTimer = null;
+          captchaRetry = null;
+          setCredStatus('验证窗口无响应，已取消');
+        }
+        return;
+      }
       if (res === null || res === undefined) return;
-      clearInterval(timer);
+      clearInterval(captchaTimer);
+      captchaTimer = null;
       const fn = captchaRetry;
       captchaRetry = null;
       if (res) {
@@ -1663,8 +1692,15 @@
     if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
   }
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) stopPreview();
-    else startPreview();
+    if (document.hidden) {
+      // 隐藏时若正处于拖拽中，window 的 mouseup 可能不再触发 → dragging 永久为 true
+      // → 之后回前台 startPreview 被守卫挡住，预览永久死掉。此处显式复位拖拽态。
+      panStart = null;
+      if (dragging) { dragging = false; canvas.classList.remove('dragging'); }
+      stopPreview();
+    } else {
+      startPreview();
+    }
   });
 
   function contentRect() {

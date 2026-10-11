@@ -262,9 +262,8 @@ fn parse_tfhd(body: &[u8]) -> (u32, u32, Option<usize>) {
         i += 4;
     }
     if flags & 0x10 != 0 && body.len() >= i + 4 {
-        default_size = Some(u32::from_be_bytes([
-            body[i], body[i + 1], body[i + 2], body[i + 3],
-        ]) as usize);
+        default_size =
+            Some(u32::from_be_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize);
     }
     (flags, track, default_size)
 }

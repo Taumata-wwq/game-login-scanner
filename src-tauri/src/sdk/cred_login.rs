@@ -238,7 +238,7 @@ pub async fn mihoyo_login_sms(
     device_fp: &str,
     phone: &str,
     code: &str,
-    _aigis: &str,
+    aigis: &str,
 ) -> Result<CredOutcome, String> {
     let enc_mobile = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, phone)?;
     let enc_area = crypto::rsa_encrypt_b64(constants::MIYOUSHE_RSA_PUBLIC_KEY, "+86")?;
@@ -251,9 +251,15 @@ pub async fn mihoyo_login_sms(
     .to_string();
     // 登录步骤用 App 协议（与发短信的通行证 Web 协议不同）：App 版接口返回 body 中的
     // stoken（data.token.token），Web 版只返回 Cookie（无 stoken）。
-    // 参考 bh3_login_simulation：登录不传 aigis（aigis 仅用于发短信）。
+    // 触发极验时（下方 extract_aigis 返回 NeedCaptcha）由前端渲染极验、带 aigis 重试；
+    // 重试必须携带 x-rpc-aigis 头（与 mihoyo_login_pwd 一致），否则条件不变会无限
+    // 返回 NeedCaptcha（此前 _aigis 被丢弃，构成死循环）。
     let mut headers = dsprod_headers(device_id, device_fp);
     headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    if !aigis.is_empty() {
+        headers.push(("x-rpc-aigis".to_string(), aigis.to_string()));
+        headers.push(("x-rpc-aigis_v4".to_string(), "true".to_string()));
+    }
     let resp = crate::http::post(constants::MIYOUSHE_LOGIN_SMS_URL, headers, &body)
         .await
         .map_err(|e| format!("请求失败: {e}"))?;

@@ -17,24 +17,41 @@ static BH_VER_CACHE: RwLock<Option<String>> = RwLock::new(None);
 /// dispatch 是稳定的 base64 串，单次会话内几乎不变，缓存可省一个 RTT。
 static OA_DISPATCH_CACHE: RwLock<Option<(String, String)>> = RwLock::new(None);
 
-/// 进程内缓存：当前 B 服账号的 bh_info（uid 匹配才复用）。
-/// 启动 / 切换账号时预校验预热，扫描命中二维码后确认零等待。
-static BH_INFO_CACHE: RwLock<Option<(String, BhInfo)>> = RwLock::new(None);
+/// bh_info 缓存有效期（秒）。超过则强制重新 verify——凭据可能已过期。
+const BH_INFO_TTL_SEC: i64 = 600;
 
-/// 校验 B 服账号并换取 bh_info（带缓存：同一 uid 复用，直到切换账号）。
+/// 进程内缓存：当前 B 服账号的 bh_info。
+/// 键含 (uid, access_key)：任一变化（切号 / 重新授权）即失效，避免返回旧凭据对应的
+/// 旧 bh_info（combo_token/combo_id）。附过期时刻做 TTL 兜底（防凭据被服务端提前失效）。
+static BH_INFO_CACHE: RwLock<Option<(String, String, i64, BhInfo)>> = RwLock::new(None);
+
+/// 校验 B 服账号并换取 bh_info（带缓存：uid+access_key 匹配且未过期才复用）。
 pub async fn verify_cached(uid: &str, access_key: &str) -> Result<BhInfo, String> {
+    let now = now_sec();
     if let Ok(c) = BH_INFO_CACHE.read() {
-        if let Some((cached_uid, info)) = c.as_ref() {
-            if cached_uid == uid {
+        if let Some((cached_uid, cached_ak, expire_at, info)) = c.as_ref() {
+            if cached_uid == uid && cached_ak == access_key && now < *expire_at {
                 return Ok(info.clone());
             }
         }
     }
     let info = verify(uid, access_key).await?;
     if let Ok(mut c) = BH_INFO_CACHE.write() {
-        *c = Some((uid.to_string(), info.clone()));
+        *c = Some((
+            uid.to_string(),
+            access_key.to_string(),
+            now + BH_INFO_TTL_SEC,
+            info.clone(),
+        ));
     }
     Ok(info)
+}
+
+/// 清空 bh_info 缓存（登出 / 切换账号 / 令牌更新时调用）。
+pub fn clear_bh_info_cache() {
+    if let Ok(mut c) = BH_INFO_CACHE.write() {
+        *c = None;
+    }
 }
 
 fn now_sec() -> i64 {
