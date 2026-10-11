@@ -12,7 +12,9 @@
 
 ## 其余依赖
 
-均为 MIT / Apache-2.0 / BSD 等宽松许可（tauri / rustls / openh264 / windows 等）。
-openh264 的二进制分发另需注意 Cisco 的专利授权条款（本项目通过 openh264 crate 使用）。
+均为 MIT / Apache-2.0 / BSD 等宽松许可（tauri / rustls / windows 等）。
+
+> 视频解码使用 Windows 系统组件（Media Foundation H.264 解码器，随系统提供，
+> 不随本项目分发）；原 openh264 软解依赖已于 2026-10-12 移除。
 
 > 签名密钥 / 盐 / RSA 公钥均来自公开项目，非密码学安全，仅自用/开源惯例实现。

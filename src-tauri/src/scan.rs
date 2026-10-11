@@ -268,6 +268,10 @@ struct LoopState {
     unknown_qr_reported: u32,
     /// 每个票据的失败次数（超过上限后跳过，避免无限重试同一失效码）。
     failed_count: std::collections::HashMap<String, u32>,
+    /// 上次「全幅精确解码」（快路径失败后的兜底）时刻；None = 尚未跑过（视为可跑）。
+    /// 快路径（scan_density）对常见大码足够，但小码存在漏检可能——按节流间隔
+    /// 周期性跑一次保真解码，把识别率下限锚在历史行为（见 decode_full_with_fallback）。
+    last_exact_scan: Option<tokio::time::Instant>,
     /// 触发成功频率限制：终止扫描（服务端已确认成功，继续扫只会重复提交）。
     throttle_stop: bool,
     /// 用户请求停止且已取消挂起操作：立即终止扫描。
@@ -293,6 +297,7 @@ impl LoopState {
             roi_misses: Vec::new(),
             unknown_qr_reported: 0,
             failed_count: std::collections::HashMap::new(),
+            last_exact_scan: None,
             throttle_stop: false,
             stopped: false,
         }
@@ -320,6 +325,33 @@ const ROI_PAD: i32 = 24;
 const ROI_MAX_MISSES: u32 = 3;
 /// ROI 最小边长：位置或尺寸异常（过小）时放弃 ROI，走全屏。
 const ROI_MIN_SIDE: u32 = 32;
+
+/// 「快扫失败 → 精确兜底」的节流间隔。
+///
+/// 背景（2026-10-11 实测，tests/bench_qr.rs）：快路径（scan_density(2,2)）
+/// 无码帧耗时 2K ~73ms；保真扫描 ~128ms。若每帧都兜底，挂机 CPU 反而高于
+/// 优化前；按此间隔周期性兜底，既把小码识别率下限锚在历史行为，又把挂机
+/// 均值压在快路径水平（约每 10 轮多付一次精确扫描）。
+const EXACT_FALLBACK_INTERVAL: Duration = Duration::from_millis(800);
+
+/// 全幅解码（非 ROI 路径）：快路径优先，失败后按节流间隔用保真解码兜底。
+///
+/// 快路径 `scan_density(2,2)` 对模块尺寸较大的游戏登录码无识别损失（两张
+/// 真机验证截图均命中，提速 ~43%）；小码/低对比目标存在漏检可能，故保留
+/// 周期性精确兜底。兜底只在快路径**失败**后触发，命中路径零额外开销。
+fn decode_full_with_fallback(st: &mut LoopState, rgb: &[u8], w: u32, h: u32) -> Option<qr::QrHit> {
+    if let Some(hit) = qr::decode_rgb_hit_fast(rgb, w, h) {
+        return Some(hit);
+    }
+    let due = st
+        .last_exact_scan
+        .is_none_or(|t| t.elapsed() >= EXACT_FALLBACK_INTERVAL);
+    if !due {
+        return None;
+    }
+    st.last_exact_scan = Some(tokio::time::Instant::now());
+    qr::decode_rgb_hit(rgb, w, h)
+}
 
 /// 从整帧裁剪出 (x,y,w,h) 子图，返回 (子图 RGB, 宽, 高)。
 /// 坐标越界自动收敛到帧内；裁剪后过小返回 None（退回全屏解码）。
@@ -372,8 +404,11 @@ fn mark_roi_miss(st: &mut LoopState, idx: usize) {
 /// 解码一帧：优先在上次命中的 ROI 内解码，未命中回退全屏。
 ///
 /// 游戏登录二维码在同一会话中位置基本固定，命中后每轮只需解一块小区域，
-/// 解码耗时从整屏（~160ms）降到局部（通常 <40ms）。ROI 连续未命中达上限
+/// 解码耗时从整屏（~128ms）降到局部（通常 <40ms）。ROI 连续未命中达上限
 /// 即弃用（应对界面布局变化），下次全屏重新定位。
+///
+/// ROI 内用保真配置（区域小、耗时低，优先稳住「已定位码」的复现）；
+/// 全屏回退走快路径 + 周期性精确兜底（见 `decode_full_with_fallback`）。
 ///
 /// 返回值第二项标记命中是否来自 ROI 分支。**本函数不锁定 ROI 位置**——
 /// 屏幕上可能存在非目标二维码（如直播间关注码），若解出即锁定会永久错过
@@ -412,8 +447,9 @@ fn decode_with_roi(
         // ROI 内未解出：累计失败，达上限则弃用该 ROI（下次全屏重新定位）。
         mark_roi_miss(st, idx);
     }
-    // 2) 回退全屏：返回命中，是否锁定由调用方决定。
-    let hit = qr::decode_rgb_hit(rgb, w, h)?;
+    // 2) 回退全屏：快路径（scan_density）优先，失败后周期性精确兜底；
+    //    是否锁定 ROI 由调用方决定。
+    let hit = decode_full_with_fallback(st, rgb, w, h)?;
     Some((hit, false))
 }
 
@@ -661,8 +697,9 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         if crate::live::active() {
             if let Some((rgb, w, h)) = crate::live::take_scan_frame() {
                 live_seen = true;
-                // zedbar 解码（唯一解码器，真实截图实测最快最准）。
-                let decoded = qr::decode_rgb(&rgb, w, h);
+                // zedbar 解码（唯一解码器）：快路径 + 周期性精确兜底
+                // （与屏幕路径同一策略，快路径对直播 720p 帧提速 ~40%）。
+                let decoded = decode_full_with_fallback(&mut st, &rgb, w, h).map(|h| h.text);
                 if let Some(text) = decoded {
                     if let Some(qrc) = qr::extract(&text) {
                         if try_confirm(&app, &mut ctx, &qrc, &mut st).await {

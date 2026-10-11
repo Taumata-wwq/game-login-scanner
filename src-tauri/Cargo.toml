@@ -1,6 +1,6 @@
 [package]
 name = "game-login-scanner"
-version = "0.2.0"
+version = "0.3.0"
 description = "游戏扫码器"
 edition = "2021"
 
@@ -19,6 +19,13 @@ test = false
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 embed-resource = "3"
+# 显式激活 indexmap@1 的 std（feature 锚点）：tauri-build → tauri-utils(schema)
+# → schemars 开启 preserve_order（`Map = indexmap::IndexMap<K, V>`）。当前
+# cargo 1.98.1 解析出的 indexmap 1.9.3 单元缺少 std（IndexMap 第三个类型参数
+# 无默认值），导致 schemars 编译报 E0107（已实测修复：fastbench 构建恢复正常）。
+# indexmap 本就在 tauri-build 依赖树内（不新增链接物、零体积影响，仅修
+# feature 组合）；未来 cargo / tauri 上游修复后可移除，保留亦无害。
+indexmap = { version = "1.9", default-features = false, features = ["std"] }
 
 [dependencies]
 # 关闭默认特性：去掉 compression（内嵌资源 brotli）、common-controls-v6、dynamic-acl，
@@ -51,9 +58,9 @@ hex = "0.4"
 rand = "0.8"
 # 米哈游/B站 密码登录：RSA 公钥加密账号密码（PKCS1_v1_5）
 rsa = { version = "0.9", features = ["sha2"] }
-openh264 = "0.9.8"
-# openh264-sys2：解码取帧用 DecodeFrame2(NULL) 裸 API 的 SBufferInfo 类型
-openh264-sys2 = "0.9.8"
+# 视频解码：Windows Media Foundation H.264 硬解（系统组件；见 src/mf_decode.rs）。
+# 原 openh264 软解回退已于 2026-10-12 移除（300 间直播间零解码错误验证后，
+# 硬解稳定性充分；移除同时去掉 openh264 C 库的体积增量）。
 # 直播流拉取：rustls（纯 Rust TLS，Windows schannel 对 B站 CDN 长连接有读乱码/EOF）
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8.4"
@@ -74,13 +81,7 @@ strip = true
 lto = true
 codegen-units = 1
 
-# openh264 的 C 代码单独用 opt-level=3（速度优先）：全局 "s"（体积优先）会让
-# 1080p 软解码显著变慢（实测单线程跟不上 60fps 流）。仅此依赖提速，本 crate 仍 "s"。
-# O3→O2：解码吞吐足够（release 实测远超流帧率），体积省 ~40KB。
-[profile.release.package.openh264-sys2]
-opt-level = 2
-
-# 本 crate 用 "z"（体积优先）：解码/转换热点在 openh264 C 代码（已单独 O2），
+# 本 crate 用 "z"（体积优先）：热路径解码在系统 MF 组件（零体积），
 # QR 解码在 zedbar（独立 crate），Rust 侧主要是 IPC 与整数转换。
 [profile.release.package.game-login-scanner]
 opt-level = "z"
@@ -102,7 +103,7 @@ opt-level = "z"
 opt-level = "z"
 [profile.release.package.rustls]
 # rustls 在直播拉流热路径上做 TLS 解密，对指令级优化敏感；"z"（体积优先）会
-# 降低解密吞吐。与 openh264 单独提速同理，这里用 2（速度/体积折中）。
+# 降低解密吞吐。这里用 2（速度/体积折中），与 MF 解码路径的吞吐要求对齐。
 opt-level = 2
 [profile.release.package.serde_json]
 opt-level = "z"
@@ -131,6 +132,15 @@ opt-level = "z"
 [profile.release.package.webview2-com-sys]
 opt-level = "z"
 
+# 基准 / 快速迭代测试专用：继承 release 的优化配置、关闭 fat LTO。
+# 动机：release 的全量 LTO 构建约 12 分钟，基准「优化前后对比」不可接受。
+# 用法：cargo test --profile fastbench --test bench_qr -- --ignored --nocapture
+# 注：不配置 [profile.fastbench.package.*] 覆写（本 crate 用继承的 "s"）。
+[profile.fastbench]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 [target.'cfg(windows)'.dependencies]
 # 截屏（GDI 兜底）、剪贴板（读图/清空）替代 screenshots / arboard 两个重依赖
 # （二者各拖一份 image 全家桶 + 重复的 windows 绑定），全部走系统 API。
@@ -142,10 +152,11 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
     "Win32_Security_Cryptography",
+    "Win32_System_Com",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
 ] }
-
-[patch.crates-io]
-openh264-sys2 = { path = "vendor/openh264-sys2" }

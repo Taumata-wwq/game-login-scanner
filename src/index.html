@@ -1011,6 +1011,10 @@
   let pollFails = 0;
   let qrStartSeq = 0;
   let qrAutoRetry = 0;
+  // 扫码登录轮询间隔：等待扫码时 1.5s（保守，与官方前端同量级，控制风控面）；
+  // 检测到「已扫码」后提速到 450ms——手机随时可能点确认，固定 1.5s 会让
+  // 「确认 → 桌面显示成功」多等一个整间隔。自适应后该延迟最高省 ~1s。
+  let qrPollDelay = 1500;
 
   function qrChannelLabel(ch) {
     return ch === 'official' ? '官服 · 米游社 App 扫码' : 'B 服 · B 站 App 扫码';
@@ -1028,6 +1032,7 @@
     const seq = ++qrStartSeq;
     qrActive = true;
     pollFails = 0;
+    qrPollDelay = 1500;
     $qrLabel.textContent = qrChannelLabel(ch);
     $qrImg.innerHTML = '';
     setQrStatus('生成中…', '');
@@ -1072,9 +1077,11 @@
       const [status, channel, uid, name] = r;
       if (status === 'waiting') {
         setQrStatus($qrImg.innerHTML ? '等待扫码…' : '生成中…', '');
+        qrPollDelay = 1500;
         pollLoop();
       } else if (status === 'scanned') {
         setQrStatus('已扫码，请在手机上确认', 'scanned');
+        qrPollDelay = 450; // 已扫码：确认随时到达，提速轮询（见 qrPollDelay 注释）
         pollLoop();
       } else if (status === 'expired') {
         qrAutoRetry++;
@@ -1096,7 +1103,7 @@
         log(channelLabel(channel) + '扫码登录成功' + (name ? '：' + name : ''), 'success');
         setTimeout(() => { $('loginOverlay').hidden = true; }, 800);
       }
-    }, 1500);
+    }, qrPollDelay);
   }
 
   function cancelQr() {

@@ -1,8 +1,10 @@
-//! 直播流捕获：B站 http-flv → FLV 解复用 → openh264 H.264 解码 → RGBA 帧总线。
+//! 直播流捕获：B站 http-flv → FLV 解复用 → H.264 解码（MF 硬解，见 decode.rs）
+//! → YUV 帧总线。
 //!
 //! 低延迟链路：B站 API（免登录）解析出 http-flv 拉流地址 → 专用流式连接边下边解
 //! （逐 Tag 解复用，解码即存共享帧）。内置追帧机制（时间戳 vs 墙钟测积压，落后即丢弃
-//! 至关键帧），延迟稳定约 1.2 秒，长跑不漂移。
+//! 至关键帧）；2026-10-11 起 MF 硬解（低延迟模式）+ 队列上限收紧（4 帧），
+//! 端到端稳定在 0.3~0.4 秒量级。
 //! 共享帧供两条消费路径：
 //! - 预览：`crop_frame` 按前端视口裁剪降采样（等价屏幕预览协议）；
 //! - 扫码：`take_scan_frame` 取新帧走既有二维码识别管线（seq 去重）。
@@ -14,8 +16,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use openh264::formats::YUVSource;
-
+use crate::decode::{new_decoder, DecodedFrame, VideoDecoder};
 use crate::http::header_utf8;
 
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -325,7 +326,7 @@ pub fn avcc_config_to_annexb(data: &[u8]) -> Vec<u8> {
     out
 }
 
-// ---------- SPS VUI 清除（openh264 兼容性补丁） ----------
+// ---------- SPS VUI 清除（历史兼容保险） ----------
 
 /// 从 offset 起查找 Annex-B 起始码（00 00 01 / 00 00 00 01），返回首个 0 的位置。
 fn find_start_code(buf: &[u8], from: usize) -> Option<usize> {
@@ -485,11 +486,13 @@ fn find_sps_vui_flag_pos(rbsp: &[u8]) -> Option<usize> {
 
 /// 清除 Annex-B 中**所有** SPS NAL 的 vui_parameters_present_flag。
 ///
-/// openh264 对某些带 VUI（尤其 HRD 参数）的合法 SPS 解析失败（dsNoParamSets，
-/// 实测房间 11762420）；而 VUI 对解码/扫码无用。只翻转 flag 位（不重排数据）。
+/// 历史背景：原 openh264 软解对某些带 VUI（尤其 HRD 参数）的合法 SPS 解析失败
+/// （dsNoParamSets，实测房间 11762420）；而 VUI 对解码/扫码无用。MF 硬解路径
+/// 不需要此处理，但保留作为无害保险（仅翻转 flag 位、无数据重排；VUI 信息对
+/// 本工具的消费端无价值），且 300 间直播间批量测试即在此行为下验证通过。
 ///
 /// 必须遍历全部 NAL：sequence header 里的 SPS 之外，IDR 帧常内嵌一份重复 SPS，
-/// 若只清参数集里的，IDR 内嵌那份仍会让解码失败（实测帧 0 报 dsNoParamSets）。
+/// 若只清参数集里的，IDR 内嵌那份仍可能触发解码侧解析问题。
 /// 返回 (处理后的数据, 是否有 NAL 被修改)。
 pub fn strip_sps_vui(annexb: &[u8]) -> (Vec<u8>, bool) {
     let mut out = Vec::with_capacity(annexb.len());
@@ -681,47 +684,11 @@ struct Frames {
     next_seq: u64,
 }
 
-/// 从解码器输出的 Y/U/V 平面（可能带行跨距）拷贝为紧凑布局的 Frame。
-#[allow(clippy::too_many_arguments)]
-fn frame_from_yuv(
-    seq: u64,
-    ts: u32,
-    w: u32,
-    h: u32,
-    y: &[u8],
-    u: &[u8],
-    v: &[u8],
-    ys: usize,
-    us: usize,
-) -> Frame {
-    let (w, h) = (w as usize, h as usize);
-    let cw = w / 2;
-    let ch = h / 2;
-    let mut yc = Vec::with_capacity(w * h);
-    for row in 0..h {
-        let base = row * ys;
-        yc.extend_from_slice(&y[base..base + w]);
-    }
-    let mut uc = Vec::with_capacity(cw * ch);
-    let mut vc = Vec::with_capacity(cw * ch);
-    for row in 0..ch {
-        let base = row * us;
-        uc.extend_from_slice(&u[base..base + cw]);
-        vc.extend_from_slice(&v[base..base + cw]);
-    }
-    Frame {
-        seq,
-        ts,
-        w: w as u32,
-        h: h as u32,
-        y: yc,
-        u: uc,
-        v: vc,
-    }
-}
-
-/// 队列硬上限（≈200ms 显示缓冲；防极端突发撑爆内存，超出丢弃最旧帧）。
-const FRAME_BUFFER_MAX: usize = 6;
+/// 队列硬上限（≈133ms 显示缓冲；防极端突发撑爆内存，超出丢弃最旧帧）。
+/// 2026-10-11：由 6 降至 4——MF 硬解吞吐充分（远快于流帧率），不再需要
+/// 以深缓冲吸收解码抖动；队列深度直接叠加在端到端延迟上（每帧 16.7ms@60fps），
+/// 减 2 帧即省 ~33~67ms 延迟。
+const FRAME_BUFFER_MAX: usize = 4;
 
 /// 扫码 RGB 缓存：键为 (帧序号, 裁剪区)，视口不变且无新帧时直接复用。
 /// rgb 用 Arc：命中时只克隆指针（零拷贝），避免在持锁路径上复制整块图像。
@@ -1055,24 +1022,15 @@ fn fetch_qn_chain(room: &str) -> Vec<u32> {
 }
 /// 直播追帧阈值（毫秒）：输出帧媒体时间戳落后「应有值」超过此值即追帧。
 ///
-/// **主控参数，非安全网**：openh264 单线程解码耗时（~19-24ms/帧）略超部分流帧间隔，
-/// 客户端消费速度比推流慢约 6%，滞后单调累积（实测 ~60ms/s）。把阈值压到 400ms，
-/// 让追帧常态化工作，把端到端延迟钉在 ≤0.4s（代价：每 ~7s 追帧一次，画面跳 1 个 GOP）。
+/// 2026-10-11（MF 硬解落地后）：解码吞吐大幅改善（实测 720p 平均单帧
+/// 14.6ms、1080p 同量级，远低于典型帧间隔），追帧从「常态工作」退化为
+/// 安全网。阈值由 400ms 下调到 300ms：吞吐充分时追帧仍不触发，而偶发
+/// 卡顿/慢帧场景能更快把显示延迟收回来。
 /// 阈值越低延迟越低、跳帧越频繁；300-600ms 是「扫码抢码」场景的合理折中。
-const CATCHUP_LAG_MS: i64 = 400;
+const CATCHUP_LAG_MS: i64 = 300;
 
 /// 解码持续失败的容忍次数：超过则降级清晰度重试。
 const DECODE_FAIL_LIMIT: u32 = 40;
-
-/// 解码器配置：NoFlush（保留参考帧链）。
-///
-/// **不可启用多线程**：openh264 的 num_threads 在 Windows 上实测必崩
-/// （STATUS_ACCESS_VIOLATION / 0xc0000005），库方文档亦明确警告 "will probably
-/// segfault"。1080p 单线程解码跟不上码率的房间，改用「追帧维持低延迟 + 自动降清晰度」
-/// 处理（见 decode_session / decode_loop）。
-fn decode_config() -> openh264::decoder::DecoderConfig {
-    openh264::decoder::DecoderConfig::new().flush_after_decode(openh264::decoder::Flush::NoFlush)
-}
 
 /// 持续追帧上限：连续快速追帧（间隔 < 4s）达到此次数，判为解码吞吐持续不足，
 /// 降级清晰度换低码率流。仅「持续跟不上」才降级，偶发追帧不触发。
@@ -1163,7 +1121,7 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
                 log::error!("最低清晰度仍无法解码，会话关闭");
                 set_fail(
                     &fail,
-                    &format!("B站直播间 {room} 编码格式不受支持（openh264 解码失败）"),
+                    &format!("B站直播间 {room} 编码格式不受支持（H.264 解码失败）"),
                 );
                 remove_session_if(&frames);
                 return;
@@ -1253,16 +1211,13 @@ fn decode_hls_session(
         init_info.params.len()
     );
 
-    // 3) 解码器（NoFlush 保留参考链，与 FLV 路径一致）。
-    let mut decoder = openh264::decoder::Decoder::with_api_config(
-        openh264::OpenH264API::from_source(),
-        decode_config(),
-    )
-    .map_err(|e| format!("解码器初始化失败: {e}"))?;
-    // 喂 SPS/PPS（清 VUI 兼容 openh264）。
+    // 3) 解码器：Media Foundation H.264 硬解（系统组件，见 decode.rs）。
+    let mut decoder = new_decoder().map_err(|e| format!("解码器初始化失败: {e}"))?;
+    log::info!("HLS 解码器：{}", decoder.name());
+    // 喂 SPS/PPS（清 VUI 兼容旧软解路径；对 MF 无害）。
     let (params, _) = strip_sps_vui(&init_info.params);
-    if let Err(e) = decoder.decode(&params) {
-        log::warn!("HLS 参数集解码失败: {e:?}");
+    if let Err(e) = decoder.decode(&params, 0) {
+        log::warn!("HLS 参数集解码失败: {e}");
     }
 
     let mut last_seq = playlist.media_sequence.saturating_sub(1);
@@ -1366,78 +1321,34 @@ fn decode_hls_session(
     }
 }
 
-/// 解码一个 Annex-B 帧并把产出的 YUV 推入帧总线（HLS 路径用）。
-/// NoFlush 下 decode() 可能直接返回帧，也需用 decode_frame2 显式取回。
+/// 解码一个 Annex-B 访问单元并把产出的帧推入帧总线（HLS 路径用）。
 /// 单帧错误静默（持续失败由上层重连兜底）。
 fn decode_and_push(
-    decoder: &mut openh264::decoder::Decoder,
+    decoder: &mut dyn VideoDecoder,
     annexb: &[u8],
     media_ts: u32,
     frames: &Arc<Mutex<Frames>>,
 ) {
-    let mut pushed_this_tag = false;
-    match decoder.decode(annexb) {
-        Ok(Some(yuv)) => {
-            let (w, h) = yuv.dimensions();
-            if w != 0 && h != 0 {
-                let strides = yuv.strides();
-                push_frame(
-                    frames,
-                    media_ts,
-                    w as u32,
-                    h as u32,
-                    yuv.y(),
-                    yuv.u(),
-                    yuv.v(),
-                    strides.0,
-                    strides.1,
-                );
-                pushed_this_tag = true;
-            }
-        }
-        Ok(None) => {}
-        Err(_) => return,
-    }
-    // NoFlush 下帧可能留在解码器内部缓冲：用 DecodeFrame2(NULL) 显式取回。
-    // 同一 tag 内 decode() 已推出帧时跳过，避免重复推送同 ts 帧。
-    unsafe {
-        let mut dst = [std::ptr::null_mut::<u8>(); 3];
-        let mut bi = openh264_sys2::SBufferInfo::default();
-        let state =
-            decoder
-                .raw_api()
-                .decode_frame2(std::ptr::null(), 0, dst.as_mut_ptr().cast(), &mut bi);
-        if state == 0 && bi.iBufferStatus != 0 && !dst[0].is_null() && !pushed_this_tag {
-            let info = bi.UsrData.sSystemBuffer;
-            let (w, h) = (info.iWidth as u32, info.iHeight as u32);
-            if w != 0 && h != 0 {
-                let (ys, us) = (info.iStride[0] as usize, info.iStride[1] as usize);
-                let y = std::slice::from_raw_parts(dst[0] as *const u8, info.iHeight as usize * ys);
-                let uv_len = info.iHeight as usize * us / 2;
-                let u = std::slice::from_raw_parts(dst[1] as *const u8, uv_len);
-                let v = std::slice::from_raw_parts(dst[2] as *const u8, uv_len);
-                push_frame(frames, media_ts, w, h, y, u, v, ys, us);
-            }
+    if let Ok(list) = decoder.decode(annexb, media_ts) {
+        for of in list {
+            push_decoded(frames, media_ts, of);
         }
     }
 }
 
-/// 把一帧 YUV 推入帧总线（HLS 路径用）。
-#[allow(clippy::too_many_arguments)]
-fn push_frame(
-    frames: &Arc<Mutex<Frames>>,
-    media_ts: u32,
-    w: u32,
-    h: u32,
-    y: &[u8],
-    u: &[u8],
-    v: &[u8],
-    ys: usize,
-    us: usize,
-) {
+/// 把解码产出帧推入帧总线（HLS 与 FLV 路径共用）。
+fn push_decoded(frames: &Arc<Mutex<Frames>>, media_ts: u32, of: DecodedFrame) {
     let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
     f.next_seq += 1;
-    let frame = Arc::new(frame_from_yuv(f.next_seq, media_ts, w, h, y, u, v, ys, us));
+    let frame = Arc::new(Frame {
+        seq: f.next_seq,
+        ts: media_ts,
+        w: of.w,
+        h: of.h,
+        y: of.y,
+        u: of.u,
+        v: of.v,
+    });
     f.latest = Some(frame.clone());
     f.queue.push_back(frame);
     while f.queue.len() > FRAME_BUFFER_MAX {
@@ -1667,14 +1578,9 @@ fn decode_session(
         return Err("响应不是 FLV 流".to_string());
     }
 
-    // 关键：NoFlush 模式。默认每帧 decode 后强制 flush 会把参考帧链冲掉，
-    // P 帧全部因无参考失败（实测 1080p60 流仅解出 110/1261 帧）；NoFlush 保留
-    // 参考链，配合每 FLUSH_FRAME_INTERVAL 帧 flush_remaining 批量取帧（实测 1259/1261）。
-    let mut decoder = openh264::decoder::Decoder::with_api_config(
-        openh264::OpenH264API::from_source(),
-        decode_config(),
-    )
-    .map_err(|e| format!("解码器初始化失败: {e}"))?;
+    // 解码器：Media Foundation H.264 硬解（系统组件，见 decode.rs）。
+    let mut decoder = new_decoder().map_err(|e| format!("解码器初始化失败: {e}"))?;
+    log::info!("FLV 解码器：{}", decoder.name());
     let mut dec_fails = 0u32;
     let (mut out_ok, mut out_none, mut out_err) = (0u32, 0u32, 0u32);
 
@@ -1781,12 +1687,8 @@ fn decode_session(
             }
             // 只读不解码，快速排空 socket 缓冲；遇关键帧（IDR）重建解码器恢复。
             if frame_type == 1 && body[1] == 1 && !param_sets.is_empty() {
-                decoder = openh264::decoder::Decoder::with_api_config(
-                    openh264::OpenH264API::from_source(),
-                    decode_config(),
-                )
-                .map_err(|e| format!("解码器重建失败: {e}"))?;
-                let _ = decoder.decode(&param_sets);
+                decoder = new_decoder().map_err(|e| format!("解码器重建失败: {e}"))?;
+                let _ = decoder.decode(&param_sets, media_ts);
                 skipping = false;
                 skip_since = None;
                 anchor = Some((media_ts, std::time::Instant::now()));
@@ -1822,18 +1724,17 @@ fn decode_session(
                         "参数集前 16 字节: {:02x?}",
                         &param_sets[..param_sets.len().min(16)]
                     );
-                    // openh264 对某些合法但带 VUI（HRD 等）的 SPS 解析失败
-                    // （dsNoParamSets，实测房间 11762420）。VUI 对解码/扫码无用，
-                    // 先清除所有 SPS 的 vui_parameters_present_flag（仅翻转比特）。
+                    // 清除带 VUI 的 SPS（历史兼容保险，见 strip_sps_vui 文档；
+                    // VUI 对解码/扫码无用，仅翻转比特）。
                     let (stripped, did_strip) = strip_sps_vui(&param_sets);
                     let to_decode = if did_strip {
-                        log::info!("已清除 SPS VUI（openh264 兼容）");
+                        log::info!("已清除 SPS VUI（历史兼容保险）");
                         &stripped
                     } else {
                         &param_sets
                     };
-                    if let Err(e) = decoder.decode(to_decode) {
-                        log::warn!("参数集解码失败: {e:?}");
+                    if let Err(e) = decoder.decode(to_decode, media_ts) {
+                        log::warn!("参数集解码失败: {e}");
                     } else if did_strip {
                         param_sets = stripped;
                     }
@@ -1846,7 +1747,7 @@ fn decode_session(
                 if annexb.is_empty() {
                     continue;
                 }
-                // IDR 帧常内嵌一份带 VUI 的重复 SPS（openh264 会因此解析失败），
+                // IDR 帧常内嵌一份带 VUI 的重复 SPS（历史兼容保险，见 strip_sps_vui），
                 // 解码前清除。非 IDR 帧不含 SPS，跳过以免无谓遍历。
                 let annexb = if frame_type == 1 {
                     let (s, changed) = strip_sps_vui(&annexb);
@@ -1861,94 +1762,30 @@ fn decode_session(
                 // 组合时间（body[2..5]）忽略——显示延迟可接受。
                 // 解码错误不静默：持续失败（编码不兼容等）由上层降级清晰度。
                 let decode_t = std::time::Instant::now();
-                // 本 tag 内 decode() 是否已推出一帧：若已推出，则同一 tag 的
-                // decode_frame2(NULL) 若再吐帧且 media_ts 相同，即为重复帧，跳过。
-                let mut pushed_this_tag = false;
-                match decoder.decode(&annexb) {
-                    Ok(Some(yuv)) => {
+                match decoder.decode(&annexb, media_ts) {
+                    Ok(list) => {
                         decode_ns_total += decode_t.elapsed().as_nanos();
-                        out_ok += 1;
                         dec_fails = 0; // 成功即复位：dec_fails 是「连续失败」计数
-                        let (w, h) = yuv.dimensions();
-                        if w == 0 || h == 0 {
-                            continue;
+                        if list.is_empty() {
+                            out_none += 1;
+                        } else {
+                            out_ok += 1;
+                            for of in list {
+                                push_decoded(frames, media_ts, of);
+                            }
                         }
-                        pushed_this_tag = true;
-                        let strides = yuv.strides();
-                        let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
-                        f.next_seq += 1;
-                        let frame = Arc::new(frame_from_yuv(
-                            f.next_seq,
-                            media_ts,
-                            w as u32,
-                            h as u32,
-                            yuv.y(),
-                            yuv.u(),
-                            yuv.v(),
-                            strides.0,
-                            strides.1,
-                        ));
-                        f.latest = Some(frame.clone());
-                        f.queue.push_back(frame);
-                        while f.queue.len() > FRAME_BUFFER_MAX {
-                            f.queue.pop_front();
-                        }
-                        drop(f);
-                    }
-                    Ok(None) => {
-                        dec_fails = 0;
-                        out_none += 1;
                     }
                     Err(e) => {
                         out_err += 1;
                         dec_fails += 1;
                         if dec_fails == 1 || dec_fails.is_multiple_of(20) {
-                            log::warn!("H.264 解码失败（{dec_fails} 次）: {e:?}");
+                            log::warn!("H.264 解码失败（{dec_fails} 次）: {e}");
                         }
                         if dec_fails >= DECODE_FAIL_LIMIT {
                             return Err(
                                 "H.264 解码持续失败（编码不兼容或解码器能力不足），降级清晰度重试"
                                     .to_string(),
                             );
-                        }
-                    }
-                }
-                // NoFlush 下帧留在解码器内部缓冲：用官方推荐的 DecodeFrame2(NULL)
-                // 每帧显式取回（保留参考链——周期 flush_remaining 实测会破坏重排，
-                // 导致 P 帧大面积失败）。取回失败（无输出）属正常，继续下一帧。
-                unsafe {
-                    let mut dst = [std::ptr::null_mut::<u8>(); 3];
-                    let mut bi = openh264_sys2::SBufferInfo::default();
-                    let state = decoder.raw_api().decode_frame2(
-                        std::ptr::null(),
-                        0,
-                        dst.as_mut_ptr().cast(),
-                        &mut bi,
-                    );
-                    // 同一 tag 内 decode() 已推出帧、且此处再吐同 ts 帧 → 重复，跳过。
-                    if state == 0 && bi.iBufferStatus != 0 && !dst[0].is_null() && !pushed_this_tag
-                    {
-                        let info = bi.UsrData.sSystemBuffer;
-                        let (w, h) = (info.iWidth as u32, info.iHeight as u32);
-                        if w != 0 && h != 0 {
-                            let (ys, us) = (info.iStride[0] as usize, info.iStride[1] as usize);
-                            let y = std::slice::from_raw_parts(
-                                dst[0] as *const u8,
-                                info.iHeight as usize * ys,
-                            );
-                            let uv_len = info.iHeight as usize * us / 2;
-                            let u = std::slice::from_raw_parts(dst[1] as *const u8, uv_len);
-                            let v = std::slice::from_raw_parts(dst[2] as *const u8, uv_len);
-                            let mut f = frames.lock().unwrap_or_else(PoisonError::into_inner);
-                            f.next_seq += 1;
-                            let frame = Arc::new(frame_from_yuv(
-                                f.next_seq, media_ts, w, h, y, u, v, ys, us,
-                            ));
-                            f.latest = Some(frame.clone());
-                            f.queue.push_back(frame);
-                            while f.queue.len() > FRAME_BUFFER_MAX {
-                                f.queue.pop_front();
-                            }
                         }
                     }
                 }
@@ -1988,4 +1825,128 @@ fn decode_session(
             _ => {}
         }
     }
+}
+
+// ---------- 独立冒烟测试接口（诊断用，2026-10-12 加入） ----------
+
+/// 单直播间冒烟测试结果。
+#[derive(Debug, Clone)]
+pub struct ProbeRoomResult {
+    /// 是否 HLS-only 房间（false = FLV 流）。
+    pub is_hls: bool,
+    /// 完整成功（无错误信息且出帧 ≥ 1）。
+    pub ok: bool,
+    /// 出错信息（「未开播 / 解码失败 / 流传输过慢」等分类文本）。
+    pub error: Option<String>,
+    /// 出帧数。
+    pub frames: u32,
+    /// 出帧率（帧/秒，按测试时长计）。
+    pub fps: f64,
+    /// 输出分辨率（0×0 = 无帧）。
+    pub w: u32,
+    pub h: u32,
+    /// 总耗时（毫秒，含解析 + 连接 + 运行 + 停止收尾）。
+    pub elapsed_ms: u64,
+}
+
+/// 独立直播间解码冒烟测试（**不占用全局 LIVE 会话，多线程并行安全**）。
+///
+/// 用途：分区批量测试（tests/live_batch.rs）——完整复用生产解码链
+/// （resolve_stream_sync → decode_session / decode_hls_session），运行
+/// `secs` 秒后经 stop 信号停止并汇总统计。`allow_degrade=false`：测试中
+/// 不降清晰度重连，单次尝试的成功/失败即结论（生产由 decode_loop 负责降级）。
+pub fn probe_room(room: &str, secs: u64) -> ProbeRoomResult {
+    let t0 = std::time::Instant::now();
+    let mut res = ProbeRoomResult {
+        is_hls: false,
+        ok: false,
+        error: None,
+        frames: 0,
+        fps: 0.0,
+        w: 0,
+        h: 0,
+        elapsed_ms: 0,
+    };
+
+    // 1) 解析流地址（FLV 优先、HLS 回退；与生产同一函数）。
+    let candidates = match resolve_stream_sync(room, 10000) {
+        Ok(c) if !c.is_empty() => c,
+        Ok(_) => {
+            res.error = Some("无可用流地址".to_string());
+            res.elapsed_ms = t0.elapsed().as_millis() as u64;
+            return res;
+        }
+        Err(e) => {
+            res.error = Some(e);
+            res.elapsed_ms = t0.elapsed().as_millis() as u64;
+            return res;
+        }
+    };
+    let (url, referer) = candidates[0].clone();
+    res.is_hls = url.contains(".m3u8");
+
+    // 2) 独立会话：自建 stop 与帧总线（与 decode_loop 相同的组装方式）。
+    let stop = Arc::new(AtomicBool::new(false));
+    let frames = Arc::new(Mutex::new(Frames {
+        queue: std::collections::VecDeque::new(),
+        latest: None,
+        scan_cache: None,
+        next_seq: 0,
+    }));
+    let (s2, f2) = (stop.clone(), frames.clone());
+    let is_hls = res.is_hls;
+    let handle = std::thread::Builder::new()
+        .name("probe-decode".into())
+        .spawn(move || {
+            if is_hls {
+                decode_hls_session(&url, &referer, &s2, &f2)
+            } else {
+                decode_session(&url, &referer, &s2, &f2, false)
+            }
+        });
+    let handle = match handle {
+        Ok(h) => h,
+        Err(e) => {
+            res.error = Some(format!("解码线程启动失败: {e}"));
+            res.elapsed_ms = t0.elapsed().as_millis() as u64;
+            return res;
+        }
+    };
+
+    // 3) 运行指定时长后停止（解码循环在读超时边界检查 stop，最坏多等一个
+    //    读超时：FLV 3 秒 / HLS 单请求级）。
+    std::thread::sleep(Duration::from_secs(secs));
+    stop.store(true, Ordering::SeqCst);
+    let decode_result = handle
+        .join()
+        .unwrap_or_else(|_| Err("解码线程异常退出".to_string()));
+
+    // 4) 统计：帧总线 next_seq 即出帧数；latest 提供分辨率。
+    let (frames_n, w, h) = {
+        let f = frames.lock().unwrap_or_else(PoisonError::into_inner);
+        (
+            f.next_seq as u32,
+            f.latest.as_ref().map_or(0, |x| x.w),
+            f.latest.as_ref().map_or(0, |x| x.h),
+        )
+    };
+    res.frames = frames_n;
+    res.w = w;
+    res.h = h;
+    res.fps = frames_n as f64 / secs.max(1) as f64;
+    res.elapsed_ms = t0.elapsed().as_millis() as u64;
+    match decode_result {
+        Ok(()) => {
+            res.ok = frames_n > 0;
+            if !res.ok {
+                res.error = Some("测试时长内无视频帧".to_string());
+            }
+        }
+        Err(e) => {
+            // 中途错误：有帧则属「部分失败」（分析时按 frames 区分），保留 error。
+            res.ok = false;
+            res.error = Some(e);
+        }
+    }
+    res
 }

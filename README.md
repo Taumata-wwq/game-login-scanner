@@ -23,7 +23,7 @@ Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账
 
 ## 延迟说明
 
-直播抢码直接拉取直播流边下边解（主流 FLV，HLS-only 房间自动回退 HLS），不经过浏览器播放链路，延迟约 0.4 秒。若本机解码吞吐不足，自动逐级降低清晰度（原画 → 高清 → 标清 → 流畅）；扫码对清晰度要求不高。CDN 节点异常时自动切换节点重连。当前仅支持 B站直播间。
+直播抢码直接拉取直播流边下边解（主流 FLV，HLS-only 房间自动回退 HLS），不经过浏览器播放链路，延迟约 0.3~0.4 秒。视频解码走 Windows Media Foundation **H.264 硬解**（系统组件、DXVA 加速、零体积增量；Windows N/K 版需安装「媒体功能包」）。若本机解码吞吐不足，自动逐级降低清晰度（原画 → 高清 → 标清 → 流畅）；扫码对清晰度要求不高。CDN 节点异常时自动切换节点重连。当前仅支持 B站直播间。
 
 ## 数据位置
 
@@ -42,7 +42,7 @@ Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账
 ```powershell
 cd src-tauri
 cargo run                 # 调试运行
-cargo build --release     # 产物：target\release\game-login-scanner.exe（约 4.5 MB）
+cargo build --release     # 产物：target\release\game-login-scanner.exe（约 4.8 MB）
 ```
 
 代码结构：
@@ -53,7 +53,9 @@ src/verify.html         人机验证窗口
 src-tauri/src/
   lib.rs                Tauri 命令接线与运行时状态
   scan.rs               扫码主流程（剪贴板 → 屏幕/直播帧 → 确认登录）
-  live.rs               直播流捕获（接口解析 → FLV/HLS 解复用 → openh264 解码）
+  live.rs               直播流捕获（接口解析 → FLV/HLS 解复用 → 解码管线）
+  decode.rs             解码器抽象（Media Foundation H.264 硬解）
+  mf_decode.rs          Media Foundation H.264 硬解（MFT 封装，NV12→I420）
   hls.rs                HLS（LL-HLS + fMP4）解析（HLS-only 房间回退路径）
   qr.rs                 二维码识别（zedbar）与生成（qrcodegen）
   screenshot.rs         GDI 截屏（兜底路径）

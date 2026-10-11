@@ -3,9 +3,12 @@
 //! 为什么不用 ureq：本工具的 HTTP 调用面极窄（GET/POST + 头 + JSON 响应），
 //! ureq 会拖入 `url` → `idna` → `icu_*` 全套 Unicode 表（数百 KB）。而直播拉流
 //! 已手写 rustls + HTTP/1.1 管道（schannel 对 B站 CDN 长连接读乱码，故用纯 Rust
-//! TLS）——把同一管道泛化为请求/响应客户端，零额外依赖。API 调用低频
-//! （登录/轮询），每请求新建连接的握手开销可忽略。阻塞调用运行在 tokio
-//! blocking 线程池；停止扫描时 `select!` 丢弃 future，底层线程随超时自行结束。
+//! TLS）——把同一管道泛化为请求/响应客户端，零额外依赖。
+//! 连接策略（2026-10-11 起）：API/HLS 均复用 keep-alive 连接（进程级连接池，
+//! 见 `API_CONN_POOL`）——登录/轮询等 HTTPS 请求免除每次的 TCP+TLS 握手；
+//! TLS `ClientConfig` 亦为进程级单例（证书库只加载一次 + 会话恢复缓存生效）。
+//! 阻塞调用运行在 tokio blocking 线程池；停止扫描时 `select!` 丢弃 future，
+//! 底层线程随超时自行结束。
 
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
@@ -96,8 +99,38 @@ pub fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
     Ok((https, host, port, path.to_string()))
 }
 
-/// rustls TLS 流（加载系统根证书，ALPN 声明 http/1.1——rustls 默认不发 ALPN
-/// 扩展，B站 CDN（openresty）对无 ALPN 的 ClientHello 会拒绝，表现为乱码/EOF）。
+/// 进程级 TLS 配置单例。
+///
+/// 两个动机（2026-10-11）：
+/// 1. **证书库只加载一次**：原先每次连接都 `load_native_certs()` 重建
+///    `RootCertStore`——系统证书库读盘 + 解析链，每次请求白付毫秒级开销，
+///    且 100% 属于重复劳动。
+/// 2. **会话恢复（session resumption）生效**：rustls 的会话票据缓存挂在
+///    `ClientConfig` 上——每请求新建 config 会让缓存永远为空，同一主机
+///    每次都要完整 TLS 握手；单例后重连可命中缓存（省一次往返与密钥交换）。
+///
+/// 注：APLN 声明 http/1.1 必须在单例里保留（B站 CDN 对无 ALPN 的 ClientHello
+/// 直接拒绝，表现为乱码/EOF）。
+static TLS_CONFIG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> =
+    std::sync::OnceLock::new();
+
+fn tls_config() -> std::sync::Arc<rustls::ClientConfig> {
+    TLS_CONFIG
+        .get_or_init(|| {
+            let mut store = rustls::RootCertStore::empty();
+            for cert in rustls_native_certs::load_native_certs().certs {
+                let _ = store.add(cert);
+            }
+            let mut config = rustls::ClientConfig::builder()
+                .with_root_certificates(store)
+                .with_no_client_auth();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            std::sync::Arc::new(config)
+        })
+        .clone()
+}
+
+/// 建立 TLS 连接（同步）。证书库与 ClientConfig 走进程级单例（见 `tls_config`）。
 pub(crate) fn tls_connect(
     host: &str,
     port: u16,
@@ -113,16 +146,8 @@ pub(crate) fn tls_connect(
     tcp.set_nodelay(true).ok();
     tcp.set_read_timeout(Some(read_timeout))
         .map_err(|e| format!("设置读超时失败: {e}"))?;
-    let mut store = rustls::RootCertStore::empty();
-    for cert in rustls_native_certs::load_native_certs().certs {
-        let _ = store.add(cert);
-    }
-    let mut config = rustls::ClientConfig::builder()
-        .with_root_certificates(store)
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let conn = rustls::ClientConnection::new(
-        std::sync::Arc::new(config),
+        tls_config(),
         ServerName::try_from(host.to_string()).map_err(|_| "服务器名无效".to_string())?,
     )
     .map_err(|e| format!("TLS 初始化失败: {e}"))?;
@@ -318,8 +343,131 @@ fn tls_connect_schannel(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, Str
 }
 
 /// Read + Write 组合 trait（双 TLS 栈的统一流类型）。
-trait ReadWrite: Read + Write {}
-impl<T: Read + Write> ReadWrite for T {}
+/// 需要 Send：连接池为进程级 static（跨线程共享/归还）。
+trait ReadWrite: Read + Write + Send {}
+impl<T: Read + Write + Send> ReadWrite for T {}
+
+// ---------- API 连接池 ----------
+
+/// 空闲连接池条目。
+struct PooledConn {
+    stream: Box<dyn ReadWrite>,
+    /// 归还时刻：借出时按空闲超时判定是否仍可用。
+    idle_since: std::time::Instant,
+}
+
+/// API 连接池：按 (host, port) 缓存空闲 keep-alive 连接（借出-归还模型）。
+///
+/// 动机（2026-10-11）：HTTP/1.1 冷连接 = TCP + TLS 两次握手。登录/轮询/扫码
+/// 确认为 HTTPS 低频串行调用，原先每请求重建连接、重付握手（含证书链处理）。
+/// HLS 侧连接复用实测：新建拉取 142~209ms → 复用 29~31ms，收益明确。
+///
+/// 空闲超时 45s：低于常见 Nginx `keepalive_timeout`（65~75s），降低取出
+/// 「已被服务端单向关闭」连接的概率；即便取到，失效重试逻辑也会透明恢复
+/// （GET 幂等恒可重试；POST 仅当请求尚未写出时重试，见 `request_bytes_sync`）。
+///
+/// 并发安全：借出（remove）-归还（insert）保证同一连接不会被两个请求同时
+/// 持有；同 host 并发请求中后到者取不到空闲连接即新建，无阻塞。
+static API_CONN_POOL: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<(String, u16), PooledConn>>,
+> = std::sync::OnceLock::new();
+
+/// 空闲连接超时。
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+
+fn conn_pool() -> &'static std::sync::Mutex<std::collections::HashMap<(String, u16), PooledConn>> {
+    API_CONN_POOL.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 借出空闲连接（已过期则直接丢弃）。无可用返回 `None`。
+fn pool_take(host: &str, port: u16) -> Option<Box<dyn ReadWrite>> {
+    let mut pool = conn_pool()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match pool.remove(&(host.to_string(), port)) {
+        Some(c) if c.idle_since.elapsed() < POOL_IDLE_TIMEOUT => Some(c.stream),
+        _ => None,
+    }
+}
+
+/// 归还连接（仅当响应读取完整、有 framing 且服务端未要求 close）。
+fn pool_put(host: &str, port: u16, stream: Box<dyn ReadWrite>) {
+    let mut pool = conn_pool()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pool.insert(
+        (host.to_string(), port),
+        PooledConn {
+            stream,
+            idle_since: std::time::Instant::now(),
+        },
+    );
+}
+
+/// 单次「发送请求 + 读取完整响应」。
+///
+/// 成功返回 `(status, headers, body, reusable)`——`reusable` 表示该连接可归还
+/// 池中（有 content-length/chunked framing 结束、服务端未要求 close）。
+/// 失败返回 `(错误, request_fully_sent)`——第二项标记请求是否已完整写出
+/// （写失败 = false，读阶段失败 = true），供 POST 的重试安全判定。
+#[allow(clippy::type_complexity)]
+fn send_and_read(
+    tls: &mut Box<dyn ReadWrite>,
+    method: &str,
+    host: &str,
+    path: &str,
+    headers: &Headers,
+    body: Option<&str>,
+) -> Result<(u16, Headers, Vec<u8>, bool), (String, bool)> {
+    // Connection: keep-alive——复用是默认目标；服务端要求 close 时会在响应头
+    // 告知，连接随即丢弃（reusable=false）。
+    let mut req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\nConnection: keep-alive\r\n"
+    );
+    let mut has_ua = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        if k.eq_ignore_ascii_case("user-agent") {
+            has_ua = true;
+        }
+        req.push_str(&format!("{k}: {}\r\n", header_utf8(v)));
+    }
+    if !has_ua {
+        req.push_str(&format!("User-Agent: {DEFAULT_UA}\r\n"));
+    }
+    if let Some(b) = body {
+        req.push_str(&format!("Content-Length: {}\r\n", b.len()));
+    }
+    req.push_str("\r\n");
+    if let Some(b) = body {
+        req.push_str(b);
+    }
+
+    tls.write_all(req.as_bytes())
+        .map_err(|e| (format!("发送请求失败: {e}"), false))?;
+    // flush 失败时 write_all 已完整写入缓冲，保守视为「已发送」（不触发重试）。
+    tls.flush()
+        .map_err(|e| (format!("发送请求失败(flush): {e}"), true))?;
+
+    let (raw_headers, prefix) = read_headers(tls).map_err(|e| (e, true))?;
+    let (status, resp_headers) = parse_response(&raw_headers).map_err(|e| (e, true))?;
+
+    // 复用判定：必须有 framing（content-length / chunked）——否则响应以
+    // 连接关闭为结束标志，读完即废弃；且服务端未显式要求 close。
+    let has_framing = header_find(&resp_headers, "content-length").is_some()
+        || header_find(&resp_headers, "transfer-encoding").is_some();
+    let server_close =
+        header_find(&resp_headers, "connection").is_some_and(|v| v.eq_ignore_ascii_case("close"));
+    let resp_body = read_body(tls, &resp_headers, prefix).map_err(|e| (e, true))?;
+    Ok((
+        status,
+        resp_headers,
+        resp_body,
+        has_framing && !server_close,
+    ))
+}
 
 /// 同步请求：连接 → 发送 → 跟随重定向 → 读取响应（解码线程可直接调用）。
 pub(crate) fn request_sync(
@@ -336,7 +484,11 @@ pub(crate) fn request_sync(
     })
 }
 
-/// 同步请求（二进制响应体版）：HLS 分片/m3u8 等非 UTF-8 内容用。
+/// 同步请求（二进制响应体版）：HLS 分片/m3u8 等非 UTF-8 内容与全部 API 调用用。
+///
+/// 连接策略：优先复用连接池中的 keep-alive 连接（见 `API_CONN_POOL`）；
+/// 复用连接失效时透明重试一次——GET 幂等恒可重试；POST 仅当「请求尚未写出」
+/// （写阶段失败，服务端必然未处理）时重试，避免重复提交登录/确认类请求。
 pub(crate) fn request_bytes_sync(
     method: &str,
     url: &str,
@@ -349,36 +501,29 @@ pub(crate) fn request_bytes_sync(
         if !https {
             return Err("明文 http 已禁用（凭据安全）".to_string());
         }
-        let mut tls = api_tls_connect(&host, port)?;
-        let mut req = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\nConnection: close\r\n"
-        );
-        let mut has_ua = false;
-        for (k, v) in headers {
-            if k.eq_ignore_ascii_case("host") {
-                continue;
+
+        // 1) 取连接：池中借出（复用），无则新建。
+        let (mut tls, from_pool) = match pool_take(&host, port) {
+            Some(s) => (s, true),
+            None => (api_tls_connect(&host, port)?, false),
+        };
+
+        // 2) 发送 + 读响应；复用连接失效时透明重试一次。
+        let mut attempt = send_and_read(&mut tls, method, &host, &path, headers, body);
+        if let Err((_, request_sent)) = &attempt {
+            let retry_safe = method.eq_ignore_ascii_case("GET") || !request_sent;
+            if from_pool && retry_safe {
+                let mut fresh = api_tls_connect(&host, port)?;
+                attempt = send_and_read(&mut fresh, method, &host, &path, headers, body);
+                tls = fresh;
             }
-            if k.eq_ignore_ascii_case("user-agent") {
-                has_ua = true;
-            }
-            req.push_str(&format!("{k}: {}\r\n", header_utf8(v)));
         }
-        if !has_ua {
-            req.push_str(&format!("User-Agent: {DEFAULT_UA}\r\n"));
-        }
-        if let Some(b) = body {
-            req.push_str(&format!("Content-Length: {}\r\n", b.len()));
-        }
-        req.push_str("\r\n");
-        if let Some(b) = body {
-            req.push_str(b);
-        }
-        write!(tls, "{req}").map_err(|e| format!("发送请求失败: {e}"))?;
-        tls.flush()
-            .map_err(|e| format!("发送请求失败(flush): {e}"))?;
-        let (raw_headers, prefix) = read_headers(&mut tls)?;
-        let (status, resp_headers) = parse_response(&raw_headers)?;
+        let (status, resp_headers, resp_body, reusable) = attempt.map_err(|(e, _)| e)?;
+
+        // 3) 重定向：不读 body、连接直接丢弃（可能残留未读数据）；其余响应
+        //    完整读取且可复用时归还连接。
         if (300..400).contains(&status) {
+            tls.flush().ok();
             let loc = header_find(&resp_headers, "location")
                 .ok_or_else(|| format!("HTTP {status} 重定向缺少 Location 头"))?
                 .to_string();
@@ -390,7 +535,9 @@ pub(crate) fn request_bytes_sync(
             };
             continue;
         }
-        let resp_body = read_body(&mut tls, &resp_headers, prefix)?;
+        if reusable {
+            pool_put(&host, port, tls);
+        }
         return Ok((status, resp_headers, resp_body));
     }
     Err("重定向次数过多".to_string())
@@ -402,7 +549,8 @@ pub(crate) fn request_bytes_sync(
 /// - 新建连接拉 m3u8 142~209ms，复用仅 29~31ms（省 ~120ms/次）；
 /// - CDN 对快速重复新建 TCP+TLS 直接拒绝（SSL: UNEXPECTED_EOF_WHILE_READING）。
 ///
-/// 仅供 HLS 拉流循环使用（同 host 连续请求）；低频 API 调用仍走 request_bytes_sync。
+/// 仅供 HLS 拉流循环使用（同 host 连续拉取、自持连接）；
+/// API/登录侧连接复用见上方的进程级连接池 `API_CONN_POOL`。
 pub(crate) struct KeepAliveConn {
     stream: Option<Box<dyn ReadWrite>>,
     host: String,

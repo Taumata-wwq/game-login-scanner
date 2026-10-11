@@ -109,14 +109,35 @@ pub struct QrHit {
 /// zedbar（ZBar 算法纯 Rust 移植）解码 RGB 图片，返回文本与位置。
 ///
 /// 本项目唯一解码器（2026-10-08 移除 rqrr）。真实 2560x1440 游戏登录截图实测：
-/// 全屏 ~157ms 且 100% 命中。
+/// 全屏 ~128ms 且 100% 命中。
 ///
 /// 开启 retry_undecoded_regions：对检测到 finder 但未解出的区域自动裁剪+放大
 /// 重试（等价「放大到二维码附近」），提升小二维码识别率。
 ///
 /// 开启 position_tracking：让 zedbar 记录二维码四个角点，Symbol::bounds() 由此
 /// 算出包围盒——调用方可据此把下一轮解码限定在「上次命中位置」附近（ROI）。
+///
+/// 本函数为**保真配置**（不抽样扫描线）：识别率下限与历史行为一致。
+/// 整屏热路径用 `decode_rgb_hit_fast`（提速 ~43%），快路径失败后回来兜底。
 pub fn decode_rgb_hit(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
+    decode_impl(rgb, width, height, false)
+}
+
+/// 快配置解码：`scan_density(2,2)` 隔行扫描（每 2 行/列抽 1）。
+///
+/// 2026-10-11 实测（tests/bench_qr.rs，两张真机验证截图）：
+/// - 2K 整屏 2569×1445：128ms → 73ms（-43%），命中；
+/// - 720p 1282×747：32ms → 18ms（-45%），命中。
+///
+/// 隔行只减少扫描密度、不重采样图像（不同于「先降采样成小图再解码」——实测
+/// 1/2 面积平均降采样会导致两张截图均漏检，已否决该方案），对游戏登录码这种
+/// 模块尺寸较大的目标无识别损失；小码漏检风险由调用方「周期性精确兜底」覆盖
+/// （见 scan.rs `decode_full_with_fallback`）。
+pub fn decode_rgb_hit_fast(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
+    decode_impl(rgb, width, height, true)
+}
+
+fn decode_impl(rgb: &[u8], width: u32, height: u32, fast: bool) -> Option<QrHit> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -130,10 +151,13 @@ pub fn decode_rgb_hit(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
     let mut img = zedbar::Image::from_gray(&gray, width, height).ok()?;
     // 所有游戏登录码均为白底黑码（正常极性），无需 test_inverted。
     // 0.7 起 DecoderConfig::new() 默认全禁，显式 enable 二维码即可。
-    let config = zedbar::DecoderConfig::new()
+    let mut config = zedbar::DecoderConfig::new()
         .enable(zedbar::config::QrCode)
         .position_tracking(true)
         .retry_undecoded_regions(true);
+    if fast {
+        config = config.scan_density(2, 2);
+    }
     let mut scanner = zedbar::Scanner::with_config(config);
     let result = scanner.scan(&mut img);
     let sym = result.symbols().first()?;
@@ -142,7 +166,7 @@ pub fn decode_rgb_hit(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
     Some(QrHit { text, bounds })
 }
 
-/// 兼容旧签名：只返回文本（剪贴板等无需位置）。
+/// 兼容旧签名：只返回文本（保真配置；剪贴板等一次性路径用）。
 pub fn decode_rgb(rgb: &[u8], width: u32, height: u32) -> Option<String> {
     decode_rgb_hit(rgb, width, height).map(|h| h.text)
 }
