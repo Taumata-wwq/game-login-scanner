@@ -10,14 +10,10 @@
 # 依赖
 node_modules/
 
-# 本地文档（维护者本地保留，不入库）
-/docs/
-
 # 参考项目与第三方工具（只读参照，不入库）
 /reference/
 
-# GitHub Actions（token 缺 workflow scope，暂不推送）
-/.github/workflows/
+# 注：docs/ 与 .github/workflows/ 随仓库入库（决策记录与 CI 门禁需协作共享）。
 
 # 临时文件
 *.log

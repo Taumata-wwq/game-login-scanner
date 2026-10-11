@@ -36,7 +36,8 @@ Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账
 
 ## 构建
 
-要求 Windows 10 及以上（需 WebView2 运行时，Win11 已内置）与 [Rust](https://rustup.rs/)：
+要求 **Windows 10 1803 及以上**（DXGI 桌面复制 `IDXGIOutputDuplication` 的最低版本；
+需 WebView2 运行时，Win11 已内置，缺失时安装包会联网下载）与 [Rust](https://rustup.rs/)：
 
 ```powershell
 cd src-tauri
@@ -75,3 +76,8 @@ src-tauri/src/
 - [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)
 - [mihoyo-api-collect](https://github.com/UIGF-org/mihoyo-api-collect)
 - [MHY_Scanner](https://github.com/DSVVA/MHY_Scanner)
+
+## 许可证
+
+主体以 MIT 发布（见 `LICENSE`）。二维码解码器 zedbar 为 LGPL-3.0-or-later，
+商用分发前请阅读 `THIRD-PARTY-NOTICES.md`。

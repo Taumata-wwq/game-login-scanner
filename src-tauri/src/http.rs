@@ -70,7 +70,7 @@ impl Response {
 }
 
 /// URL 拆分：仅支持 http(s) 绝对地址，返回 (是否 https, host, port, path?query)。
-pub(crate) fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
+pub fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
     let (https, rest) = if let Some(r) = url.strip_prefix("https://") {
         (true, r)
     } else if let Some(r) = url.strip_prefix("http://") {
@@ -158,7 +158,7 @@ fn read_headers(stream: &mut impl Read) -> Result<(Vec<u8>, Vec<u8>), String> {
 }
 
 /// 解析状态行与响应头。
-fn parse_response(raw: &[u8]) -> Result<(u16, Headers), String> {
+pub fn parse_response(raw: &[u8]) -> Result<(u16, Headers), String> {
     let text = String::from_utf8_lossy(raw);
     let mut lines = text.split('\n');
     let status_line = lines.next().unwrap_or("");
@@ -180,7 +180,7 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Headers), String> {
     Ok((status, headers))
 }
 
-fn header_find<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
+pub fn header_find<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
     headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -189,7 +189,7 @@ fn header_find<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
 
 /// 按 framing（chunked / content-length / 读到 EOF）读取响应体。
 /// `prefix` 为响应头之后已多读的 body 前置字节。
-fn read_body(
+pub fn read_body(
     stream: &mut impl Read,
     headers: &Headers,
     mut prefix: Vec<u8>,
