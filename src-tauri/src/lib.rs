@@ -1228,6 +1228,28 @@ fn live_stop() {
     crate::live::stop();
 }
 
+/// 记录直播间使用历史（前端在连接成功后调用；去重置顶并持久化）。
+#[tauri::command]
+fn live_history_push(room: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cfg.push_live_history(&room);
+    cfg.save().map_err(|e| format!("保存配置失败: {e}"))
+}
+
+/// 删除指定直播间的历史条目。
+#[tauri::command]
+fn live_history_remove(room: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cfg.remove_live_history(&room);
+    cfg.save().map_err(|e| format!("保存配置失败: {e}"))
+}
+
 /// 直播预览帧：按前端视口裁剪最新解码帧并降采样，
 /// 24 字节头（w,h,mon.x,mon.y,mon.w=流宽,mon.h=流高）+ RGBA；暂无帧返回 24 字节零头。
 #[tauri::command]
@@ -1556,6 +1578,8 @@ pub fn run() {
             capture_live_frame,
             live_start,
             live_stop,
+            live_history_push,
+            live_history_remove,
             set_tile_mode,
             set_scan_region,
             set_preview_active,

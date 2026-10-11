@@ -137,6 +137,28 @@ pub struct OfficialToken {
     pub last_used_at: i64,
 }
 
+/// 直播间历史条目（最近使用优先；非敏感数据，明文存储）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveHistoryEntry {
+    /// 房间号（数字字符串；B站/抖音通用）。
+    pub room: String,
+    /// 直播平台（bili；douyin 为后续支持预留）。
+    #[serde(default = "default_live_platform")]
+    pub platform: String,
+    /// 用户备注（可选，如主播名）。
+    #[serde(default)]
+    pub note: String,
+    /// 最后使用时间（Unix 秒）。
+    pub last_used: i64,
+}
+
+fn default_live_platform() -> String {
+    "bili".to_string()
+}
+
+/// 直播间历史上限（最近优先，超出丢弃最旧）。
+pub const LIVE_HISTORY_MAX: usize = 20;
+
 /// 应用配置（持久化）。
 /// 同渠道支持多账号：`*_accounts` 保存全部登录记录，`active_*` 以 uid 指向当前使用的账号。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +205,9 @@ pub struct AppConfig {
     pub fp_seed_id: String,
     #[serde(default)]
     pub fp_seed_time: String,
+    /// 直播间使用历史（最近优先，去重，上限 LIVE_HISTORY_MAX）。
+    #[serde(default)]
+    pub live_history: Vec<LiveHistoryEntry>,
 }
 
 /// display_fps 的 serde 默认值（旧配置无此字段时用 60）。
@@ -220,6 +245,7 @@ impl Default for AppConfig {
             device_fp: String::new(),
             fp_seed_id: String::new(),
             fp_seed_time: String::new(),
+            live_history: Vec::new(),
         }
     }
 }
@@ -492,6 +518,36 @@ impl AppConfig {
 
     /// 保存到磁盘（原子写：先写临时文件再 rename，避免写一半崩溃损坏配置）。
     /// Windows 上 rename 通过 MoveFileEx(REPLACE_EXISTING) 实现，可安全覆盖目标。
+    /// 记录直播间使用历史（去重置顶；超出上限丢弃最旧）。
+    pub fn push_live_history(&mut self, room: &str) {
+        let room = room.trim();
+        if room.is_empty() {
+            return;
+        }
+        self.live_history.retain(|e| e.room != room);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.live_history.insert(
+            0,
+            LiveHistoryEntry {
+                room: room.to_string(),
+                platform: "bili".to_string(),
+                note: String::new(),
+                last_used: now,
+            },
+        );
+        self.live_history.truncate(LIVE_HISTORY_MAX);
+    }
+
+    /// 删除指定直播间的历史条目。返回是否存在过。
+    pub fn remove_live_history(&mut self, room: &str) -> bool {
+        let before = self.live_history.len();
+        self.live_history.retain(|e| e.room != room);
+        self.live_history.len() != before
+    }
+
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path();
         if let Some(parent) = path.parent() {

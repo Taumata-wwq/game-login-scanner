@@ -139,8 +139,35 @@
   .filter-seg button:hover { color: var(--text); background: var(--hover); }
   .filter-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
   /* 直播源控件（房间号输入框）：占据筛选行右侧。 */
-  .live-ctl { margin-left: auto; }
+  .live-ctl { margin-left: auto; position: relative; }
   #liveRoom { width: 110px; height: 24px; }
+  /* 直播间历史下拉：输入框聚焦显示，最近使用优先（config.live_history）。 */
+  #liveHistory {
+    position: absolute; top: 26px; right: 0; z-index: 80;
+    width: 170px; max-height: 190px; overflow-y: auto;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  }
+  .live-h-item {
+    display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+    cursor: pointer; font-size: 11px; color: var(--text); user-select: none;
+  }
+  .live-h-item:hover { background: var(--hover); }
+  .live-h-item .room { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .live-h-item .t { color: var(--faint); font-size: 10px; flex: none; }
+  .live-h-item .x { color: var(--faint); cursor: pointer; padding: 0 3px; flex: none; }
+  .live-h-item .x:hover { color: #ff6b6b; }
+  .live-h-empty { padding: 8px; color: var(--faint); font-size: 11px; text-align: center; }
+  /* 无边框窗口缩放热区：固定于窗口四边/四角（Tauri startResizeDragging）。 */
+  .rz { position: fixed; z-index: 9999; }
+  .rz-n  { top: 0; left: 0; right: 0; height: 6px; cursor: n-resize; }
+  .rz-s  { bottom: 0; left: 0; right: 0; height: 6px; cursor: s-resize; }
+  .rz-e  { top: 0; right: 0; bottom: 0; width: 6px; cursor: e-resize; }
+  .rz-w  { top: 0; left: 0; bottom: 0; width: 6px; cursor: w-resize; }
+  .rz-ne { top: 0; right: 0; width: 12px; height: 12px; cursor: ne-resize; }
+  .rz-nw { top: 0; left: 0; width: 12px; height: 12px; cursor: nw-resize; }
+  .rz-se { bottom: 0; right: 0; width: 12px; height: 12px; cursor: se-resize; }
+  .rz-sw { bottom: 0; left: 0; width: 12px; height: 12px; cursor: sw-resize; }
   /* 添加账号：账号列表的末项（随列表滚动），与账号行同规格，
      透明底 + 虚线边框以示「可添加」而非账号本体。 */
   .acct-add {
@@ -342,6 +369,15 @@
 </style>
 </head>
 <body autocomplete="off">
+  <!-- 无边框窗口缩放热区：四边/四角（startResizeDragging 驱动）。 -->
+  <div class="rz rz-n" data-rz="North"></div>
+  <div class="rz rz-s" data-rz="South"></div>
+  <div class="rz rz-e" data-rz="East"></div>
+  <div class="rz rz-w" data-rz="West"></div>
+  <div class="rz rz-ne" data-rz="NorthEast"></div>
+  <div class="rz rz-nw" data-rz="NorthWest"></div>
+  <div class="rz rz-se" data-rz="SouthEast"></div>
+  <div class="rz rz-sw" data-rz="SouthWest"></div>
   <!-- deep 拖拽区：子树内任意位置可拖（按钮等可点击元素自动豁免）；
        裸属性只对「直接点击该元素」生效，点 logo 图标(svg)会失效——历史「有时拖不动」的根因 -->
   <header data-tauri-drag-region="deep">
@@ -387,6 +423,7 @@
       </div>
       <div class="live-ctl" title="输入B站直播间号后，预览与扫码自动切换到直播画面">
         <input class="txtin" id="liveRoom" placeholder="b站直播间号" maxlength="24" autocomplete="off" spellcheck="false" inputmode="numeric" />
+        <div id="liveHistory" hidden></div>
       </div>
     </div>
     <div class="acct-list" id="acctList"></div>
@@ -596,6 +633,20 @@
   // ---------- 全局交互 ----------
   // 禁用全局右键菜单（问题4）。
   document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // ---------- 无边框窗口缩放（四边/四角热区 → Tauri startResizeDragging） ----------
+  // decorations:false 时系统不提供边缘缩放；8 个固定热区（6/12px）委托
+  // startResizeDragging 按方向驱动。热区置于 body 直下（不在 header 内），
+  // 因此不会与 data-tauri-drag-region 的标题栏拖拽互相触发。
+  document.querySelectorAll('.rz').forEach((el) => {
+    el.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try {
+        window.__TAURI__.window.getCurrentWindow().startResizeDragging(el.dataset.rz);
+      } catch (x) { /* 忽略（如非 Tauri 环境） */ }
+    });
+  });
 
   // 标题栏拖拽：完全由 data-tauri-drag-region="deep" 的注入脚本驱动。
   // 不要再加 JS startDragging 兜底——两处同时调用会互相竞争（实测 ~50% 拖不动；
@@ -1487,6 +1538,73 @@
   let liveSeq = 0;
   let liveTimer = null;
 
+  // 直播间历史：最近使用优先（config.live_history，上限 20，后端去重截断）。
+  let liveHistory = [];
+  function fmtLiveTime(unix) {
+    const t = new Date(unix * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`;
+  }
+  // 用 DOM API 渲染（不用 innerHTML 拼接，防御性避免注入）。
+  function renderLiveHistory() {
+    const box = $('liveHistory');
+    box.innerHTML = '';
+    if (!liveHistory.length) {
+      const d = document.createElement('div');
+      d.className = 'live-h-empty';
+      d.textContent = '暂无历史直播间';
+      box.appendChild(d);
+      return;
+    }
+    for (const e of liveHistory) {
+      const item = document.createElement('div');
+      item.className = 'live-h-item';
+      const room = document.createElement('span');
+      room.className = 'room';
+      room.textContent = e.room;
+      const t = document.createElement('span');
+      t.className = 't';
+      t.textContent = fmtLiveTime(e.last_used);
+      const x = document.createElement('span');
+      x.className = 'x';
+      x.textContent = '✕';
+      x.title = '删除';
+      item.append(room, t, x);
+      // 条目点击：填充输入框并连接。✕ 点击：删除该条（阻止冒泡）。
+      item.addEventListener('mousedown', (ev) => {
+        if (ev.target === x) return;
+        $('liveRoom').value = e.room;
+        hideLiveHistory();
+        scheduleLive();
+      });
+      x.addEventListener('mousedown', (ev) => {
+        ev.stopPropagation();
+        invoke('live_history_remove', { room: e.room })
+          .then(() => invoke('get_config'))
+          .then((cfg) => { liveHistory = cfg.live_history || []; renderLiveHistory(); })
+          .catch(() => {});
+      });
+      box.appendChild(item);
+    }
+  }
+  function showLiveHistory() {
+    // 显示前重拉配置（后端在每次连接成功时已写入最新历史）。
+    invoke('get_config')
+      .then((cfg) => {
+        liveHistory = cfg.live_history || [];
+        renderLiveHistory();
+        $('liveHistory').hidden = false;
+      })
+      .catch(() => {});
+  }
+  function hideLiveHistory() { $('liveHistory').hidden = true; }
+  $('liveRoom').addEventListener('focus', showLiveHistory);
+  $('liveRoom').addEventListener('blur', () => setTimeout(hideLiveHistory, 160));
+  document.addEventListener('mousedown', (e) => {
+    const box = $('liveHistory');
+    if (!box.hidden && !box.contains(e.target) && e.target !== $('liveRoom')) hideLiveHistory();
+  });
+
   function scheduleLive() {
     if (liveTimer) clearTimeout(liveTimer);
     liveTimer = setTimeout(connectLive, 600);
@@ -1511,6 +1629,8 @@
         return;
       }
       liveOn = true;
+      // 记录直播间历史（后端去重置顶并持久化；失败静默）。
+      invoke('live_history_push', { room }).catch(() => {});
       // 用流尺寸立即占位 preview（而非置 null）：live_start 已阻塞到首帧，但首帧
       // 仍要等 refreshLiveFrame 下一轮才写入 srcCanvas。若此处 preview=null，
       // 这段时间 mousedown/wheel 会因守卫 `if (!preview)` 全部失效、无法拖拽缩放。
