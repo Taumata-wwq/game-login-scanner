@@ -1640,12 +1640,10 @@ pub fn run() {
             }
             // 启动即预校验当前 B 服账号（若当前渠道为 B 服）。
             prewarm_bili_account(&handle);
-            // 仅允许上下调节高度：min/max 尺寸约束（min 宽=max 宽=300 逻辑像素、高 400~20000）。
-            // 用系统约束而非 Resized 事件里逐帧 set_size，避免拖拽过程中的抖动。
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_min_size(Some(tauri::LogicalSize::new(300.0, 400.0)));
-                let _ = w.set_max_size(Some(tauri::LogicalSize::new(300.0, 20000.0)));
-            }
+            // 窗口尺寸约束统一由 tauri.conf.json 声明（minWidth/maxWidth/
+            // minHeight/maxHeight = 300×500 ~ 720×980）。旧的 Rust 级
+            // set_min_size/set_max_size（锁宽 300）已移除——它与 conf 的
+            // maxWidth 冲突，导致宽度被锁死、只能上下拖（阶段 1 修复）。
             // 窗口四角圆角（Win11 DWM；Win10 无此 API 静默忽略）。
             #[cfg(windows)]
             {
