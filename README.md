@@ -2,6 +2,8 @@
 
 Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账号自动完成扫码确认，无需使用手机扫码或手动输入账号。
 
+基于 Tauri 2（Rust + 系统 WebView2）构建，发布为单文件可执行程序，体积约 4.4 MB。
+
 支持的游戏：
 
 | 厂商 | 游戏 | 登录渠道 |
@@ -42,7 +44,7 @@ Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账
 ```powershell
 cd src-tauri
 cargo run                 # 调试运行
-cargo build --release     # 产物：target\release\game-login-scanner.exe（约 4.8 MB）
+cargo build --release     # 产物：target\release\game-login-scanner.exe（约 4.4 MB）
 ```
 
 代码结构：
@@ -65,7 +67,7 @@ src-tauri/src/
   config.rs / crypto.rs / http.rs / constants.rs
 ```
 
-测试：`cargo test`；真实网络探针（手动运行）：`cargo test --test probe -- --ignored --nocapture`
+> 单元测试、真实网络探针与解码基准等内部验证设施为本地材料，不随仓库分发。
 
 ## 注意事项
 
@@ -75,11 +77,13 @@ src-tauri/src/
 
 ## 参考
 
-- [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)
-- [mihoyo-api-collect](https://github.com/UIGF-org/mihoyo-api-collect)
-- [MHY_Scanner](https://github.com/DSVVA/MHY_Scanner)
+- [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：B站 API 文档（直播流解析依据）
+- [mihoyo-api-collect](https://github.com/UIGF-org/mihoyo-api-collect)：米哈游 API 文档（登录协议依据）
+- [MHY_Scanner](https://github.com/DSVVA/MHY_Scanner)：同类工具（协议与实现思路参考）
+- [zedbar](https://github.com/eventualbuddha/zedbar)：二维码解码库（ZBar 算法纯 Rust 移植）
+- [H.264 Video Decoder · Media Foundation](https://learn.microsoft.com/windows/win32/medfound/h-264-video-decoder)：系统硬件解码器文档（直播解码依据）
 
 ## 许可证
 
-主体以 MIT 发布（见 `LICENSE`）。二维码解码器 zedbar 为 LGPL-3.0-or-later，
-商用分发前请阅读 `THIRD-PARTY-NOTICES.md`。
+本项目以 [MIT](LICENSE) 许可发布。二维码解码库 zedbar 为 LGPL-3.0-or-later，
+其余依赖均为宽松许可——商用分发前请阅读 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
