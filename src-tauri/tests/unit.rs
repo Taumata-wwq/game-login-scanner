@@ -5,6 +5,7 @@ use game_login_scanner_lib::config::{AppConfig, BiliToken, Channel, OfficialToke
 use game_login_scanner_lib::constants;
 use game_login_scanner_lib::crypto;
 use game_login_scanner_lib::qr::{self, QrKind};
+use game_login_scanner_lib::scan;
 use game_login_scanner_lib::sdk::{bili, mihoyo, official};
 
 use serde_json::{json, Value};
@@ -146,6 +147,253 @@ fn decode_rgb_offset_qr() {
     }
     let decoded = qr::decode_rgb(&rgb, size as u32, size as u32).expect("解码失败");
     assert_eq!(decoded, text);
+}
+
+/// decode_rgb_hit 应返回二维码在图像中的包围盒（用于 ROI 加速）。
+#[test]
+fn decode_rgb_hit_returns_bounds() {
+    let text = "https://x/qr_code_in_game.html?ticket=ROI";
+    let qr_size = 200usize;
+    let qr_rgb = render_qr_rgb(text, qr_size);
+    let size = 800usize;
+    let (off_x, off_y) = (300i32, 200i32);
+    let mut rgb = vec![255u8; size * size * 3];
+    for y in 0..qr_size {
+        for x in 0..qr_size {
+            let i0 = (y * qr_size + x) * 3;
+            let i = ((y + off_y as usize) * size + (x + off_x as usize)) * 3;
+            rgb[i] = qr_rgb[i0];
+            rgb[i + 1] = qr_rgb[i0 + 1];
+            rgb[i + 2] = qr_rgb[i0 + 2];
+        }
+    }
+    let hit = qr::decode_rgb_hit(&rgb, size as u32, size as u32).expect("解码失败");
+    assert_eq!(hit.text, text);
+    let (bx, by, bw, bh) = hit.bounds.expect("应返回包围盒");
+    // 包围盒应大致覆盖二维码区域（允许 zedbar 记录的点略内缩，但不得偏出）。
+    assert!(bx >= off_x - 40 && bx <= off_x + 40, "bx={bx} 偏离 {off_x}");
+    assert!(by >= off_y - 40 && by <= off_y + 40, "by={by} 偏离 {off_y}");
+    assert!(
+        bw >= qr_size as u32 / 2 && bw <= (qr_size as u32) * 2,
+        "bw={bw} 异常"
+    );
+    assert!(
+        bh >= qr_size as u32 / 2 && bh <= (qr_size as u32) * 2,
+        "bh={bh} 异常"
+    );
+}
+
+// ---------- scan::crop_region（ROI 裁剪） ----------
+
+/// 构造 width×height 的纯色 RGB 缓冲。
+fn solid_rgb(w: usize, h: usize, c: [u8; 3]) -> Vec<u8> {
+    let mut v = vec![0u8; w * h * 3];
+    for px in v.as_chunks_mut::<3>().0 {
+        px.copy_from_slice(&c);
+    }
+    v
+}
+
+#[test]
+fn crop_region_normal() {
+    let rgb = solid_rgb(200, 160, [10, 20, 30]);
+    let (sub, w, h) = scan::crop_region(&rgb, 200, 160, 10, 20, 100, 90).unwrap();
+    assert_eq!((w, h), (100, 90));
+    assert_eq!(sub.len(), 100 * 90 * 3);
+    assert_eq!(&sub[0..3], &[10, 20, 30]);
+}
+
+/// 负坐标应收敛到 0，且裁剪尺寸相应缩小（ROI 外扩可能越过左上角）。
+#[test]
+fn crop_region_negative_coords_clamped() {
+    let rgb = solid_rgb(200, 160, [1, 2, 3]);
+    // 请求 x=-20,y=-10,w=120,h=100 → 实际 x0=0,y0=0,x1=100,y1=90 → 100×90
+    let (sub, w, h) = scan::crop_region(&rgb, 200, 160, -20, -10, 120, 100).unwrap();
+    assert_eq!((w, h), (100, 90));
+    assert_eq!(sub.len(), 100 * 90 * 3);
+}
+
+/// 超出右下边界应收敛到帧内。
+#[test]
+fn crop_region_overrun_clamped() {
+    let rgb = solid_rgb(200, 160, [1, 2, 3]);
+    // 请求 x=150,y=110,w=100,h=90 → x1=200,y1=160 → 50×50
+    let (sub, w, h) = scan::crop_region(&rgb, 200, 160, 150, 110, 100, 90).unwrap();
+    assert_eq!((w, h), (50, 50));
+    assert_eq!(sub.len(), 50 * 50 * 3);
+}
+
+/// 裁剪后过小（任一边 < ROI_MIN_SIDE=32）应返回 None，退回全屏解码。
+#[test]
+fn crop_region_too_small_returns_none() {
+    let rgb = solid_rgb(100, 80, [1, 2, 3]);
+    assert!(scan::crop_region(&rgb, 100, 80, 0, 0, 10, 10).is_none());
+    // 部分越界后过小
+    assert!(scan::crop_region(&rgb, 100, 80, 95, 75, 50, 50).is_none());
+}
+
+/// 完全越界应返回 None。
+#[test]
+fn crop_region_fully_out_of_bounds() {
+    let rgb = solid_rgb(100, 80, [1, 2, 3]);
+    assert!(scan::crop_region(&rgb, 100, 80, 200, 200, 50, 50).is_none());
+}
+
+/// 裁剪子图的内容应逐像素对应原图（验证行跨度按原图宽度取值）。
+#[test]
+fn crop_region_preserves_pixels() {
+    // 200×160 图，每像素编码 (x,y)，裁剪后逐点校验。
+    let (w0, h0) = (200usize, 160usize);
+    let mut rgb = vec![0u8; w0 * h0 * 3];
+    for y in 0..h0 {
+        for x in 0..w0 {
+            let i = (y * w0 + x) * 3;
+            rgb[i] = (x % 256) as u8;
+            rgb[i + 1] = (y % 256) as u8;
+            rgb[i + 2] = 0;
+        }
+    }
+    let (x0, y0, cw, ch) = (10i32, 20i32, 100u32, 90u32);
+    let (sub, w, h) = scan::crop_region(&rgb, w0 as u32, h0 as u32, x0, y0, cw, ch).unwrap();
+    assert_eq!((w, h), (cw, ch));
+    for yy in 0..ch as usize {
+        for xx in 0..cw as usize {
+            let si = (yy * cw as usize + xx) * 3;
+            let ex = x0 as usize + xx;
+            let ey = y0 as usize + yy;
+            assert_eq!(sub[si], (ex % 256) as u8, "x 不匹配 @({ex},{ey})");
+            assert_eq!(sub[si + 1], (ey % 256) as u8, "y 不匹配 @({ex},{ey})");
+        }
+    }
+}
+
+// ---------- ROI 端到端：bounds → 裁剪 → 子图解码 → 坐标翻译 ----------
+
+/// 模拟 scan.rs 的 ROI 加速流程：全屏解码拿 bounds，外扩 ROI_PAD 裁剪子图，
+/// 对子图解码并验证坐标翻译回全屏坐标系正确。
+/// 这是 ROI 功能的核心假设——子图仍能解码且位置可还原。
+#[test]
+fn roi_crop_then_decode_roundtrip() {
+    const ROI_PAD: i32 = 24;
+    let text = "https://x/qr_code_in_game.html?ticket=ROIROUNDTRIP";
+    let qr_size = 240usize;
+    let qr_rgb = render_qr_rgb(text, qr_size);
+    let size = 1000usize;
+    let (off_x, off_y) = (380usize, 300usize);
+    let mut rgb = vec![255u8; size * size * 3];
+    for y in 0..qr_size {
+        for x in 0..qr_size {
+            let i0 = (y * qr_size + x) * 3;
+            let i = ((y + off_y) * size + (x + off_x)) * 3;
+            rgb[i] = qr_rgb[i0];
+            rgb[i + 1] = qr_rgb[i0 + 1];
+            rgb[i + 2] = qr_rgb[i0 + 2];
+        }
+    }
+
+    // 第一步：全屏解码，拿到 bounds。
+    let full = qr::decode_rgb_hit(&rgb, size as u32, size as u32).expect("全屏解码失败");
+    assert_eq!(full.text, text);
+    let (fx, fy, fw, fh) = full.bounds.expect("全屏应返回 bounds");
+
+    // 第二步：按 scan.rs 的规则外扩 ROI_PAD 裁剪子图。
+    let rx = (fx - ROI_PAD).max(0);
+    let ry = (fy - ROI_PAD).max(0);
+    let pad2 = (ROI_PAD * 2) as u32;
+    let (sub, sw, sh) =
+        scan::crop_region(&rgb, size as u32, size as u32, rx, ry, fw + pad2, fh + pad2)
+            .expect("ROI 裁剪失败");
+
+    // 第三步：子图解码——ROI 功能的关键假设，必须能解出。
+    let sub_hit = qr::decode_rgb_hit(&sub, sw, sh).expect("ROI 子图解码失败（静区不足？）");
+    assert_eq!(sub_hit.text, text, "子图解码文本不一致");
+
+    // 第四步：坐标翻译回全屏，应与原始 bounds 接近。
+    let (sx, sy, _, _) = sub_hit.bounds.expect("子图应返回 bounds");
+    let gx = sx + rx;
+    let gy = sy + ry;
+    assert!(
+        (gx - fx).abs() <= 40,
+        "翻译后 x 偏移过大：全屏 {fx} vs ROI {gx}（rx={rx}, sx={sx}）"
+    );
+    assert!(
+        (gy - fy).abs() <= 40,
+        "翻译后 y 偏移过大：全屏 {fy} vs ROI {gy}（ry={ry}, sy={sy}）"
+    );
+}
+
+/// 严格探测：二维码紧贴干扰背景（无白边静区），ROI_PAD=24 固定外扩是否足够。
+/// 真实游戏截图的二维码周围是游戏背景而非纯白，此测试还原该场景。
+#[test]
+fn roi_crop_with_noisy_background() {
+    const ROI_PAD: i32 = 24;
+    let text = "https://x/qr_code_in_game.html?ticket=NOISY";
+    let qr_size = 300usize;
+    let qr_rgb = render_qr_rgb(text, qr_size);
+    let size = 1000usize;
+    let (off_x, off_y) = (300usize, 300usize);
+    // 背景：非白（深灰），二维码直接贴上，无额外静区。
+    let mut rgb = vec![64u8; size * size * 3];
+    for y in 0..qr_size {
+        for x in 0..qr_size {
+            let i0 = (y * qr_size + x) * 3;
+            let i = ((y + off_y) * size + (x + off_x)) * 3;
+            rgb[i] = qr_rgb[i0];
+            rgb[i + 1] = qr_rgb[i0 + 1];
+            rgb[i + 2] = qr_rgb[i0 + 2];
+        }
+    }
+    // 全屏解码应成功（render 的 qr 自带白边）。
+    let full = qr::decode_rgb_hit(&rgb, size as u32, size as u32).expect("全屏解码失败");
+    assert_eq!(full.text, text);
+    let (fx, fy, fw, fh) = full.bounds.expect("应返回 bounds");
+    let rx = (fx - ROI_PAD).max(0);
+    let ry = (fy - ROI_PAD).max(0);
+    let pad2 = (ROI_PAD * 2) as u32;
+    let (sub, sw, sh) =
+        scan::crop_region(&rgb, size as u32, size as u32, rx, ry, fw + pad2, fh + pad2)
+            .expect("ROI 裁剪失败");
+    let hit = qr::decode_rgb_hit(&sub, sw, sh);
+    assert!(
+        hit.is_some(),
+        "干扰背景下 ROI 解码失败（bounds {fw}×{fh}，外扩 {ROI_PAD}px 不足）——需按码尺寸比例外扩"
+    );
+}
+
+/// ROI_PAD=24 对大二维码是否足够？zedbar 需要约 4 模块静区，
+/// 大码单模块像素多，24px 可能不足——此测试探测该边界。
+#[test]
+fn roi_crop_large_qr() {
+    const ROI_PAD: i32 = 24;
+    let text = "https://x/qr_code_in_game.html?ticket=LARGEROI";
+    let qr_size = 520usize; // 大码：单模块像素多
+    let qr_rgb = render_qr_rgb(text, qr_size);
+    let size = 1400usize;
+    let (off_x, off_y) = (420usize, 400usize);
+    let mut rgb = vec![255u8; size * size * 3];
+    for y in 0..qr_size {
+        for x in 0..qr_size {
+            let i0 = (y * qr_size + x) * 3;
+            let i = ((y + off_y) * size + (x + off_x)) * 3;
+            rgb[i] = qr_rgb[i0];
+            rgb[i + 1] = qr_rgb[i0 + 1];
+            rgb[i + 2] = qr_rgb[i0 + 2];
+        }
+    }
+    let full = qr::decode_rgb_hit(&rgb, size as u32, size as u32).expect("全屏解码失败");
+    assert_eq!(full.text, text);
+    let (fx, fy, fw, fh) = full.bounds.expect("应返回 bounds");
+    let rx = (fx - ROI_PAD).max(0);
+    let ry = (fy - ROI_PAD).max(0);
+    let pad2 = (ROI_PAD * 2) as u32;
+    let (sub, sw, sh) =
+        scan::crop_region(&rgb, size as u32, size as u32, rx, ry, fw + pad2, fh + pad2)
+            .expect("ROI 裁剪失败");
+    let hit = qr::decode_rgb_hit(&sub, sw, sh);
+    assert!(
+        hit.is_some(),
+        "大码 {qr_size}px 在 ROI_PAD={ROI_PAD} 下 ROI 解码失败——静区不足，需增大 ROI_PAD 或按码尺寸外扩"
+    );
 }
 
 // ---------- qr_svg ----------
@@ -534,7 +782,8 @@ fn hls_parse_init_reads_video_track_id() {
     // 最小 init 段：视频轨（含 avc1）的 track_id 故意设为 2。
     // 修复前代码硬编码 track_id=1，会按错误的 id 取到音频轨、解码 0 帧。
     let hex = "000000146674797069736f6d0000000069736f6d000000fb6d6f6f76000000f37472616b00000034746b68640000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000b76d646961000000206d64686400000000000000000000000000015f9000000000000000000000008f6d696e66000000877374626c0000007f7374736400000000000000010000006f61766331000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000196176634301640028ffe100046764002801000268eb";
-    let data: Vec<u8> = (0..hex.len()).step_by(2)
+    let data: Vec<u8> = (0..hex.len())
+        .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
         .collect();
     let info = game_login_scanner_lib::hls::parse_init(&data).expect("init 应解析成功");
@@ -583,7 +832,10 @@ fn parse_bili_flv_reads_url_info() {
             }
         ] } } } });
     let url = game_login_scanner_lib::live::parse_bili_flv(&v).expect("应提取到 flv");
-    assert_eq!(url, "https://d1--cn.bilivideo.com/live.flv?expires=123&qn=250");
+    assert_eq!(
+        url,
+        "https://d1--cn.bilivideo.com/live.flv?expires=123&qn=250"
+    );
 }
 
 #[test]
@@ -775,4 +1027,90 @@ fn display_fps_defaults_to_60_for_old_config() {
     // 显式写入也能读回。
     let cfg2: AppConfig = serde_json::from_str(r#"{"display_fps":120}"#).unwrap();
     assert_eq!(cfg2.display_fps, 120);
+}
+
+// ---------- http 解析层（mock：本地内存字节，不触网） ----------
+
+#[test]
+fn http_split_url_forms() {
+    use game_login_scanner_lib::http::split_url;
+    // https 默认端口
+    assert_eq!(
+        split_url("https://a.com/p?q=1").unwrap(),
+        (true, "a.com".to_string(), 443, "/p?q=1".to_string())
+    );
+    // 显式端口 + 无路径
+    assert_eq!(
+        split_url("https://a.com:8443").unwrap(),
+        (true, "a.com".to_string(), 8443, "/".to_string())
+    );
+    // http 默认端口
+    assert_eq!(
+        split_url("http://a.com/x").unwrap(),
+        (false, "a.com".to_string(), 80, "/x".to_string())
+    );
+    // 非法协议
+    assert!(split_url("ftp://a.com").is_err());
+    // 缺主机名
+    assert!(split_url("https:///path").is_err());
+}
+
+#[test]
+fn http_parse_response_status_and_headers() {
+    use game_login_scanner_lib::http::{header_find, parse_response};
+    let raw = b"HTTP/1.1 302 Found\r\nLocation: https://b.com/x\r\nContent-Length: 0\r\n\r\n";
+    let (status, headers) = parse_response(raw).unwrap();
+    assert_eq!(status, 302);
+    // 头名大小写不敏感查找
+    assert_eq!(header_find(&headers, "location"), Some("https://b.com/x"));
+    assert_eq!(header_find(&headers, "LOCATION"), Some("https://b.com/x"));
+    assert_eq!(header_find(&headers, "missing"), None);
+}
+
+#[test]
+fn http_parse_response_rejects_bad_status() {
+    use game_login_scanner_lib::http::parse_response;
+    assert!(parse_response(b"garbage\r\n").is_err());
+}
+
+#[test]
+fn http_read_body_content_length() {
+    use game_login_scanner_lib::http::read_body;
+    let headers = vec![("Content-Length".to_string(), "5".to_string())];
+    let mut stream = std::io::Cursor::new(b"hello world".to_vec());
+    let body = read_body(&mut stream, &headers, Vec::new()).unwrap();
+    assert_eq!(body, b"hello");
+}
+
+#[test]
+fn http_read_body_chunked() {
+    use game_login_scanner_lib::http::read_body;
+    let headers = vec![("Transfer-Encoding".to_string(), "chunked".to_string())];
+    // 5 字节 + 6 字节两块，末尾 0 块
+    let raw = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n".to_vec();
+    let mut stream = std::io::Cursor::new(raw);
+    let body = read_body(&mut stream, &headers, Vec::new()).unwrap();
+    assert_eq!(body, b"hello world");
+}
+
+#[test]
+fn http_read_body_chunked_with_prefix() {
+    use game_login_scanner_lib::http::read_body;
+    let headers = vec![("Transfer-Encoding".to_string(), "chunked".to_string())];
+    // prefix 已含部分 body 字节（响应头后多读），应与之拼接后正确解帧。
+    let prefix = b"3\r\nabc".to_vec();
+    let rest = b"\r\n0\r\n\r\n".to_vec();
+    let mut stream = std::io::Cursor::new(rest);
+    let body = read_body(&mut stream, &headers, prefix).unwrap();
+    assert_eq!(body, b"abc");
+}
+
+#[test]
+fn http_read_body_to_eof_without_framing() {
+    use game_login_scanner_lib::http::read_body;
+    // 无 Content-Length / chunked：读到 EOF。
+    let headers: Vec<(String, String)> = Vec::new();
+    let mut stream = std::io::Cursor::new(b"abcdef".to_vec());
+    let body = read_body(&mut stream, &headers, Vec::new()).unwrap();
+    assert_eq!(body, b"abcdef");
 }

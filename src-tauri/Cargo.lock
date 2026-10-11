@@ -4802,9 +4802,9 @@ dependencies = [
 
 [[package]]
 name = "zedbar"
-version = "0.2.5"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80fd9f78aa9c792ecbacea8573cb8f2050d52cfec290616b33047a766ac4cb2c"
+checksum = "ef607ff30e8d9a3d67f002635811929e7fbf3ff683e5f76510ae4b221de46a3d"
 dependencies = [
  "encoding_rs",
  "rand 0.10.3",

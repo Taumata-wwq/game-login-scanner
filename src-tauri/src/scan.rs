@@ -260,6 +260,11 @@ struct LoopState {
     screens_empty_reported: bool,
     /// 各显示器上一帧的抽样指纹（用于跳过未变化的屏幕）。
     last_thumbs: Vec<Option<Vec<u8>>>,
+    /// 各显示器上次二维码命中位置（像素包围盒）——下轮先解此 ROI，命中则跳过全屏。
+    /// 二维码在登录界面位置基本固定，命中后每轮解码范围可缩小一个数量级。
+    last_hits: Vec<Option<(i32, i32, u32, u32)>>,
+    /// 各显示器 ROI 连续未命中次数；超过上限即弃用该 ROI（应对界面布局变化）。
+    roi_misses: Vec<u32>,
     unknown_qr_reported: u32,
     /// 每个票据的失败次数（超过上限后跳过，避免无限重试同一失效码）。
     failed_count: std::collections::HashMap<String, u32>,
@@ -284,6 +289,8 @@ impl LoopState {
             reported_tickets: HashSet::new(),
             screens_empty_reported: false,
             last_thumbs: Vec::new(),
+            last_hits: Vec::new(),
+            roi_misses: Vec::new(),
             unknown_qr_reported: 0,
             failed_count: std::collections::HashMap::new(),
             throttle_stop: false,
@@ -305,6 +312,109 @@ impl LoopState {
             self.reported_tickets.clear();
         }
     }
+}
+
+/// ROI 命中位置外扩的边距（像素）：二维码静止时位置基本不变，留一点容差即可。
+const ROI_PAD: i32 = 24;
+/// ROI 连续未命中上限：超过即弃用该显示器 ROI（应对界面布局变化）。
+const ROI_MAX_MISSES: u32 = 3;
+/// ROI 最小边长：位置或尺寸异常（过小）时放弃 ROI，走全屏。
+const ROI_MIN_SIDE: u32 = 32;
+
+/// 从整帧裁剪出 (x,y,w,h) 子图，返回 (子图 RGB, 宽, 高)。
+/// 坐标越界自动收敛到帧内；裁剪后过小返回 None（退回全屏解码）。
+pub fn crop_region(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let x0 = x.max(0) as u32;
+    let y0 = y.max(0) as u32;
+    let x1 = (x as i64 + w as i64).min(width as i64).max(0) as u32;
+    let y1 = (y as i64 + h as i64).min(height as i64).max(0) as u32;
+    if x1 <= x0 || y1 <= y0 || x1 - x0 < ROI_MIN_SIDE || y1 - y0 < ROI_MIN_SIDE {
+        return None;
+    }
+    let cw = x1 - x0;
+    let ch = y1 - y0;
+    let mut out = Vec::with_capacity((cw * ch * 3) as usize);
+    for row in y0..y1 {
+        let start = (row as usize * width as usize + x0 as usize) * 3;
+        let end = start + (cw as usize * 3);
+        if end <= rgb.len() {
+            out.extend_from_slice(&rgb[start..end]);
+        } else {
+            return None;
+        }
+    }
+    Some((out, cw, ch))
+}
+
+/// ROI 未命中计数 +1；达上限即弃用该显示器 ROI（应对界面布局变化或
+/// 锁到了非目标码）。下次解码回退全屏重新定位。
+fn mark_roi_miss(st: &mut LoopState, idx: usize) {
+    if st.roi_misses.len() <= idx {
+        st.roi_misses.resize(idx + 1, 0);
+    }
+    st.roi_misses[idx] += 1;
+    if st.roi_misses[idx] >= ROI_MAX_MISSES {
+        if st.last_hits.len() > idx {
+            st.last_hits[idx] = None;
+        }
+        st.roi_misses[idx] = 0;
+    }
+}
+
+/// 解码一帧：优先在上次命中的 ROI 内解码，未命中回退全屏。
+///
+/// 游戏登录二维码在同一会话中位置基本固定，命中后每轮只需解一块小区域，
+/// 解码耗时从整屏（~160ms）降到局部（通常 <40ms）。ROI 连续未命中达上限
+/// 即弃用（应对界面布局变化），下次全屏重新定位。
+///
+/// 返回值第二项标记命中是否来自 ROI 分支。**本函数不锁定 ROI 位置**——
+/// 屏幕上可能存在非目标二维码（如直播间关注码），若解出即锁定会永久错过
+/// 真正的登录码。锁定由调用方在 `qr::extract` 确认是目标码后执行；
+/// 非目标码若来自 ROI，调用方应补记 miss 以淘汰错误锁定。
+fn decode_with_roi(
+    st: &mut LoopState,
+    idx: usize,
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+) -> Option<(qr::QrHit, bool)> {
+    if st.last_hits.len() <= idx {
+        st.last_hits.resize(idx + 1, None);
+        st.roi_misses.resize(idx + 1, 0);
+    }
+    // 1) ROI 优先：上次命中位置外扩 ROI_PAD，裁剪后单独解码。
+    if let Some((x, y, rw, rh)) = st.last_hits[idx] {
+        let rx = (x - ROI_PAD).max(0);
+        let ry = (y - ROI_PAD).max(0);
+        let pad2 = (ROI_PAD * 2) as u32;
+        if let Some((sub, sw, sh)) = crop_region(rgb, w, h, rx, ry, rw + pad2, rh + pad2) {
+            if let Some(hit) = qr::decode_rgb_hit(&sub, sw, sh) {
+                let full = hit
+                    .bounds
+                    .map(|(bx, by, bw, bh)| (bx + rx, by + ry, bw, bh));
+                return Some((
+                    qr::QrHit {
+                        text: hit.text,
+                        bounds: full,
+                    },
+                    true,
+                ));
+            }
+        }
+        // ROI 内未解出：累计失败，达上限则弃用该 ROI（下次全屏重新定位）。
+        mark_roi_miss(st, idx);
+    }
+    // 2) 回退全屏：返回命中，是否锁定由调用方决定。
+    let hit = qr::decode_rgb_hit(rgb, w, h)?;
+    Some((hit, false))
 }
 
 /// 抽样生成画面灰度指纹；两帧指纹相同则认为画面未变化。
@@ -669,13 +779,19 @@ async fn process_screen(
     }
     st.last_thumbs[idx] = Some(thumb);
 
-    // 2) zedbar 解码（唯一解码器）：真实 2560x1440 游戏登录截图实测全屏 ~157ms
-    //    且 100% 命中。
-    let Some(text) = qr::decode_rgb(&frame.rgb, frame.w, frame.h) else {
+    // 2) zedbar 解码（唯一解码器）：优先上次命中的 ROI，未命中回退全屏。
+    let Some((hit, from_roi)) = decode_with_roi(st, idx, &frame.rgb, frame.w, frame.h) else {
         return false;
     };
+    let text = hit.text;
     let Some(qrc) = qr::extract(&text) else {
-        // 诊断：能解码但不是登录码，提示原文片段便于排查（限次数）。
+        // 解出二维码但不是目标登录码：
+        // - 若来自 ROI，说明 ROI 锁在了非目标码上（如直播间关注码），补记 miss
+        //   使其最终被淘汰，避免永久错过真正的登录码；
+        // - 来自全屏则不锁定（只有目标码才值得作为 ROI 锚点）。
+        if from_roi {
+            mark_roi_miss(st, idx);
+        }
         if st.unknown_qr_reported < UNKNOWN_QR_REPORTS {
             st.unknown_qr_reported += 1;
             let preview: String = text.chars().take(60).collect();
@@ -687,6 +803,15 @@ async fn process_screen(
         }
         return false;
     };
+    // 确认为目标登录码：用其位置锁定 ROI，供后续轮次优先局部解码。
+    if let Some(b) = hit.bounds {
+        if st.last_hits.len() <= idx {
+            st.last_hits.resize(idx + 1, None);
+            st.roi_misses.resize(idx + 1, 0);
+        }
+        st.last_hits[idx] = Some(b);
+        st.roi_misses[idx] = 0;
+    }
     if try_confirm(app, ctx, &qrc, st).await {
         finish_success(app, st, auto_close).await;
         return true;

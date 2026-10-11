@@ -96,7 +96,17 @@ pub fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// zedbar（ZBar 算法纯 Rust 移植）解码 RGB 图片，返回文本。
+/// 解码结果：文本 + 二维码在图像中的轴对齐包围盒（像素坐标，用于 ROI 加速）。
+///
+/// bounds 为 None 表示 zedbar 未记录位置（对 QR 码通常都有）。
+#[derive(Debug, Clone)]
+pub struct QrHit {
+    pub text: String,
+    /// (x, y, width, height)，相对传入图像左上角。
+    pub bounds: Option<(i32, i32, u32, u32)>,
+}
+
+/// zedbar（ZBar 算法纯 Rust 移植）解码 RGB 图片，返回文本与位置。
 ///
 /// 本项目唯一解码器（2026-10-08 移除 rqrr）。真实 2560x1440 游戏登录截图实测：
 /// 全屏 ~157ms 且 100% 命中。
@@ -104,9 +114,9 @@ pub fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
 /// 开启 retry_undecoded_regions：对检测到 finder 但未解出的区域自动裁剪+放大
 /// 重试（等价「放大到二维码附近」），提升小二维码识别率。
 ///
-/// 注：不返回二维码位置——zedbar 只在**未解码**时记录 finder 区域，成功解码的
-/// 坐标不公开（Symbol.pts 为 crate 内部）。全屏解码已足够快，无需 ROI 加速。
-pub fn decode_rgb(rgb: &[u8], width: u32, height: u32) -> Option<String> {
+/// 开启 position_tracking：让 zedbar 记录二维码四个角点，Symbol::bounds() 由此
+/// 算出包围盒——调用方可据此把下一轮解码限定在「上次命中位置」附近（ROI）。
+pub fn decode_rgb_hit(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -119,17 +129,22 @@ pub fn decode_rgb(rgb: &[u8], width: u32, height: u32) -> Option<String> {
         .collect();
     let mut img = zedbar::Image::from_gray(&gray, width, height).ok()?;
     // 所有游戏登录码均为白底黑码（正常极性），无需 test_inverted。
+    // 0.7 起 DecoderConfig::new() 默认全禁，显式 enable 二维码即可。
     let config = zedbar::DecoderConfig::new()
-        .disable_all()
         .enable(zedbar::config::QrCode)
+        .position_tracking(true)
         .retry_undecoded_regions(true);
     let mut scanner = zedbar::Scanner::with_config(config);
     let result = scanner.scan(&mut img);
-    result
-        .symbols()
-        .first()
-        .and_then(|s| s.data_string())
-        .map(|s| s.to_string())
+    let sym = result.symbols().first()?;
+    let text = sym.data_string()?.to_string();
+    let bounds = sym.bounds().map(|b| (b.x, b.y, b.width, b.height));
+    Some(QrHit { text, bounds })
+}
+
+/// 兼容旧签名：只返回文本（剪贴板等无需位置）。
+pub fn decode_rgb(rgb: &[u8], width: u32, height: u32) -> Option<String> {
+    decode_rgb_hit(rgb, width, height).map(|h| h.text)
 }
 
 /// 读取剪贴板图片（转为 RGB），空/非图返回 None。

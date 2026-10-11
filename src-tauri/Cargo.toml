@@ -41,7 +41,7 @@ base64 = "0.22"
 # 生成 qrcodegen（零依赖）。
 # 注意：zedbar 为 LGPL-3.0-or-later（与其余 MIT/Apache 依赖不同，商用分发需评估）。
 qrcodegen = "1.8"
-zedbar = { version = "0.2", default-features = false, features = ["qrcode"] }
+zedbar = { version = "0.7", default-features = false, features = ["qrcode"] }
 
 # 加密与编码
 sha2 = "0.10"
@@ -101,7 +101,9 @@ opt-level = "z"
 [profile.release.package.tauri-utils]
 opt-level = "z"
 [profile.release.package.rustls]
-opt-level = "z"
+# rustls 在直播拉流热路径上做 TLS 解密，对指令级优化敏感；"z"（体积优先）会
+# 降低解密吞吐。与 openh264 单独提速同理，这里用 2（速度/体积折中）。
+opt-level = 2
 [profile.release.package.serde_json]
 opt-level = "z"
 [profile.release.package.rsa]
