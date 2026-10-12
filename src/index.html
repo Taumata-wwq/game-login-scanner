@@ -1657,40 +1657,66 @@
   function activeSession() { return liveSessions.find((s) => s.id === activeLiveId) || null; }
   function livePlatformLabel(p) { return (p === 'douyin') ? '抖音' : 'B站'; }
 
-  // 更新视窗信息栏（标题/副标题/状态徽标）。
+  // 更新视窗信息栏（标题/副标题/状态徽标）。数据源优先前台房间（含未开播）。
   function updateVpInfo() {
     const ttl = $('vpTitle'), sub = $('vpSub'), badge = $('vpBadge');
     if (!ttl) return;
-    const s = activeSession();
-    if (!s) {
+    if (!activeLiveId) {
       ttl.textContent = '屏幕预览';
       sub.textContent = '未连接直播';
       badge.textContent = scanning ? '扫描中' : '待机';
       badge.className = 'badge' + (scanning ? ' live' : '');
       return;
     }
-    ttl.textContent = s.title || (livePlatformLabel(s.platform) + ' ' + s.room);
+    const room = liveRooms.find((r) => (r.platform + ':' + r.room) === activeLiveId);
+    const sess = activeSession();
+    const platform = room ? room.platform : (sess ? sess.platform : '');
+    const roomNo = room ? room.room : (sess ? sess.room : '');
+    const title = (room && room.title) || (sess && sess.title) || roomNo;
+    ttl.textContent = title;
+    // 副标题：主播名 · 平台 房间号 · 时长。
     const parts = [];
-    if (s.nickname) parts.push(s.nickname);
-    if (s.room_id) parts.push('房间 ' + s.room_id);
-    if (s.duration) parts.push('时长 ' + s.duration);
-    sub.textContent = parts.join(' · ') || ('房间 ' + s.room);
+    const nickname = (room && room.nickname) || (sess && sess.nickname) || '';
+    if (nickname) parts.push(nickname);
+    parts.push(livePlatformLabel(platform) + ' ' + roomNo);
+    const duration = (room && room.live_start) ? fmtDuration(room.live_start) : (sess && sess.duration ? sess.duration : '');
+    if (duration) parts.push('时长 ' + duration);
+    sub.textContent = parts.join(' · ');
     let stText = '直播中', stCls = 'live';
-    if (s.status === 'scan') { stText = '识别中'; stCls = 'live'; }
-    else if (s.status === 'done') { stText = '已确认'; stCls = 'live'; }
-    else if (s.status === 'off') { stText = '未开播'; stCls = ''; }
+    const status = sess ? sess.status : (room && room.live_status === 1 ? 'live' : 'off');
+    if (status === 'scan') { stText = '识别中'; stCls = 'live'; }
+    else if (status === 'done') { stText = '已确认'; stCls = 'live'; }
+    else if (status === 'off') { stText = '未开播'; stCls = ''; }
     badge.textContent = stText;
     badge.className = 'badge ' + stCls;
+  }
+
+  // 开播时长文本（H:MM:SS）。
+  function fmtDuration(start) {
+    if (!start || start <= 0) return '';
+    const secs = Math.max(0, Math.floor(Date.now() / 1000) - start);
+    const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+    const p = (n) => String(n).padStart(2, '0');
+    return h + ':' + p(m) + ':' + p(s);
   }
 
   // 已保存直播间列表（来自 config.live_history，含元数据缓存；含未开播）。
   let liveRooms = [];
 
-  // 拉取已保存直播间列表（含元数据缓存）。
+  // 拉取已保存直播间列表（含元数据缓存），保持本地顺序（避免点击后跳序）。
   async function reloadLiveRooms() {
     try {
       const cfg = await invoke('get_config');
-      liveRooms = cfg.live_history || [];
+      const incoming = cfg.live_history || [];
+      const byId = new Map(incoming.map((r) => [r.platform + ':' + r.room, r]));
+      // 保持本地已有顺序；更新元数据；追加新出现的房间到末尾。
+      const merged = [];
+      for (const r of liveRooms) {
+        const id = r.platform + ':' + r.room;
+        if (byId.has(id)) { merged.push(byId.get(id)); byId.delete(id); }
+      }
+      for (const r of byId.values()) merged.push(r);
+      liveRooms = merged;
     } catch (e) { /* 忽略 */ }
     renderLiveTabs();
   }
@@ -1730,9 +1756,11 @@
       card.dataset.id = id;
       const thumb = document.createElement('div');
       thumb.className = 'thumb';
-      if (s.cover) {
+      // 封面优先级：API 封面 > 关键帧缩略图 > 占位。
+      const coverSrc = s.cover || frameThumbs.get(id) || '';
+      if (coverSrc) {
         const img = document.createElement('img');
-        img.src = s.cover;
+        img.src = coverSrc;
         img.alt = '';
         img.referrerPolicy = 'no-referrer';
         img.addEventListener('error', () => { thumb.innerHTML = '<span class="ph">●</span>'; });
@@ -1783,7 +1811,7 @@
         const [moved] = liveRooms.splice(from, 1);
         liveRooms.splice(to, 0, moved);
         renderLiveTabs();
-        invoke('live_history_reorder', { order: liveRooms.map((x) => x.room) }).catch(() => {});
+        invoke('live_history_reorder', { order: liveRooms.map((x) => x.platform + ':' + x.room) }).catch(() => {});
       });
       box.appendChild(card);
     }
@@ -1798,6 +1826,20 @@
 
   // 每会话记忆的视图（缩放/位置）：切换时保存/恢复，方便来回切换。
   const liveViews = new Map(); // id -> { scale, fx, fy }
+  // 无封面房间的关键帧缩略图（dataURL）：进入时取首帧，退出时更新为末帧。
+  const frameThumbs = new Map(); // id -> dataURL
+
+  // 从 srcCanvas 截取缩略图（等比缩放到 96px 宽），失败返回 null。
+  function captureThumb() {
+    if (!srcCanvas || !srcCanvas.width || !srcCanvas.height) return null;
+    try {
+      const tw = 96, th = Math.round((srcCanvas.height / srcCanvas.width) * tw);
+      const c = document.createElement('canvas');
+      c.width = tw; c.height = th;
+      c.getContext('2d').drawImage(srcCanvas, 0, 0, tw, th);
+      return c.toDataURL('image/jpeg', 0.6);
+    } catch (e) { return null; }
+  }
   // 拖拽排序源会话 id。
   let dragSrcId = null;
 
@@ -1814,8 +1856,15 @@
         await connectLive(platform, room, '');
       } catch (e) { /* connectLive 内部已日志 */ return; }
     }
-    // 保存当前会话的视图。
-    if (activeLiveId) liveViews.set(activeLiveId, { ...view });
+    // 保存当前会话视图 + 末帧缩略图。
+    if (activeLiveId) {
+      liveViews.set(activeLiveId, { ...view });
+      const oldRoom = liveRooms.find((r) => (r.platform + ':' + r.room) === activeLiveId);
+      if (oldRoom && !oldRoom.cover) {
+        const t = captureThumb();
+        if (t) frameThumbs.set(activeLiveId, t);
+      }
+    }
     activeLiveId = id;
     // 通知后端切换前台（恢复该路拉流、暂停其余，后台零带宽零解码）。
     invoke('live_set_active', { id }).catch(() => {});
@@ -1897,8 +1946,15 @@
 
   // 切回桌面（屏幕预览）：暂停所有会话（省资源），保留会话与视图记忆。
   function exitLiveMode() {
-    // 保存当前会话视图，供切回时恢复。
-    if (activeLiveId) liveViews.set(activeLiveId, { ...view });
+    // 保存当前会话视图，供切回时恢复；并更新末帧缩略图。
+    if (activeLiveId) {
+      liveViews.set(activeLiveId, { ...view });
+      const room = liveRooms.find((r) => (r.platform + ':' + r.room) === activeLiveId);
+      if (room && !room.cover) {
+        const t = captureThumb();
+        if (t) frameThumbs.set(activeLiveId, t);
+      }
+    }
     invoke('live_set_active', { id: '' }).catch(() => {});
     invoke('set_preview_active', { active: true }).catch(() => {});
     activeLiveId = null;
@@ -2028,6 +2084,12 @@
     viewDirty = false;
     drawView();
     previewErrShown = false;
+    // 无封面房间：首次进入记录首帧缩略图。
+    const room = liveRooms.find((r) => (r.platform + ':' + r.room) === s.id);
+    if (room && !room.cover && !frameThumbs.has(s.id)) {
+      const t = captureThumb();
+      if (t) frameThumbs.set(s.id, t);
+    }
     return true;
   }
 

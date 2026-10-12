@@ -1293,12 +1293,17 @@ fn live_history_remove(
     platform: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let platform = platform.unwrap_or_else(|| "bilibili".to_string());
+    let platform = if platform == "douyin" {
+        "douyin"
+    } else {
+        "bilibili"
+    };
     let mut cfg = state
         .config
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _ = platform; // 兼容签名；按房间号删除
-    cfg.remove_live_history(&room);
+    cfg.remove_live_history(&room, platform);
     cfg.save().map_err(|e| format!("保存配置失败: {e}"))
 }
 

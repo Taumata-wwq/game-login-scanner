@@ -978,10 +978,20 @@ fn fetch_bili_meta(room: &str) -> RoomMeta {
     };
     let d = &v["data"];
     let live_status = d["live_status"].as_i64().unwrap_or(0);
+    // user_cover 常为空 → 回退 keyframe（首帧缩略图）。
+    let cover = {
+        let uc = d["user_cover"].as_str().unwrap_or("");
+        if !uc.is_empty() {
+            uc.to_string()
+        } else {
+            d["keyframe"].as_str().unwrap_or("").to_string()
+        }
+    };
     RoomMeta {
         title: d["title"].as_str().unwrap_or("").to_string(),
-        nickname: d["uname"].as_str().unwrap_or("").to_string(),
-        cover: d["user_cover"].as_str().unwrap_or("").to_string(),
+        // get_info 无 uname → 另取主播信息（get_anchor_in_room）。
+        nickname: fetch_bili_anchor_name(room),
+        cover,
         room_id: d["room_id"]
             .as_i64()
             .map(|x| x.to_string())
@@ -993,6 +1003,30 @@ fn fetch_bili_meta(room: &str) -> RoomMeta {
             0
         },
     }
+}
+
+/// 拉取 B站主播昵称（get_anchor_in_room 接口）。失败返回空。
+fn fetch_bili_anchor_name(room: &str) -> String {
+    let url = format!(
+        "https://api.live.bilibili.com/live_user/v1/UserInfo/get_anchor_in_room?roomid={room}"
+    );
+    let headers = vec![
+        ("User-Agent".to_string(), BROWSER_UA.to_string()),
+        (
+            "Referer".to_string(),
+            format!("https://live.bilibili.com/{room}"),
+        ),
+    ];
+    let Ok(r) = crate::http::request_sync("GET", &url, &headers, None) else {
+        return String::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&r.body) else {
+        return String::new();
+    };
+    v["data"]["info"]["uname"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
 }
 
 /// 开播时长文本（「H:MM:SS」）；start=0 返回空。
@@ -2085,9 +2119,11 @@ fn decode_session(
             return Ok(());
         }
         // 后台暂停：不读 socket（TCP 背压让 CDN 停发 → 零带宽零解码）。
-        // 恢复时重置锚点与慢流计时，避免按暂停时长误判落后/劣化。
+        // 恢复时进入追帧态（丢弃到下一关键帧），直接跳到最新画面，避免旧帧快进。
         if paused.load(Ordering::SeqCst) {
             anchor = None;
+            skipping = true;
+            skip_since = Some(std::time::Instant::now());
             last_data_at = std::time::Instant::now();
             window_start = std::time::Instant::now();
             window_frames = 0;

@@ -552,13 +552,13 @@ impl AppConfig {
             "bilibili"
         };
         let note = note.trim();
-        // 保留已有备注（未传新备注时）。
-        let old_note = self
+        // 先取旧条目（保留备注与元数据缓存）——必须在 retain 删除前取。
+        let old = self
             .live_history
             .iter()
             .find(|e| e.room == room && e.platform == platform)
-            .map(|e| e.note.clone())
-            .unwrap_or_default();
+            .cloned();
+        let old_note = old.as_ref().map(|e| e.note.clone()).unwrap_or_default();
         // 同一房间号可能跨平台存在，按 (platform, room) 去重。
         self.live_history
             .retain(|e| !(e.room == room && e.platform == platform));
@@ -566,12 +566,6 @@ impl AppConfig {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        // 保留已有元数据缓存（刷新由 update_live_meta 负责）。
-        let old = self
-            .live_history
-            .iter()
-            .find(|e| e.room == room && e.platform == platform)
-            .cloned();
         self.live_history.insert(
             0,
             LiveHistoryEntry {
@@ -595,11 +589,15 @@ impl AppConfig {
         self.live_history.truncate(LIVE_HISTORY_MAX);
     }
 
-    /// 按给定房间顺序重排 live_history（拖拽排序持久化）。
+    /// 按给定 "platform:room" 顺序重排 live_history（拖拽排序持久化）。
     pub fn reorder_live_history(&mut self, order: &[String]) {
         let mut reordered: Vec<LiveHistoryEntry> = Vec::with_capacity(self.live_history.len());
-        for room in order {
-            if let Some(pos) = self.live_history.iter().position(|e| &e.room == room) {
+        for id in order {
+            if let Some(pos) = self
+                .live_history
+                .iter()
+                .position(|e| format!("{}:{}", e.platform, e.room) == *id)
+            {
                 reordered.push(self.live_history.remove(pos));
             }
         }
@@ -646,10 +644,11 @@ impl AppConfig {
         }
     }
 
-    /// 删除指定直播间的历史条目（忽略平台，删除该房间号全部记录）。返回是否存在过。
-    pub fn remove_live_history(&mut self, room: &str) -> bool {
+    /// 删除指定直播间的历史条目（按 platform+room 精确删除）。返回是否存在过。
+    pub fn remove_live_history(&mut self, room: &str, platform: &str) -> bool {
         let before = self.live_history.len();
-        self.live_history.retain(|e| e.room != room);
+        self.live_history
+            .retain(|e| !(e.room == room && e.platform == platform));
         self.live_history.len() != before
     }
 
