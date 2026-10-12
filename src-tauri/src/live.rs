@@ -156,8 +156,15 @@ pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>,
             return Err(format!("B站直播间 {room} 未开播"));
         }
     }
-    if let Some(u) = parse_bili_flv(&v) {
-        return Ok(vec![(u, referer_owned.clone())]);
+    let flv_urls = parse_bili_flv_all(&v);
+    if !flv_urls.is_empty() {
+        // 多 CDN 节点全部收下（解码线程轮换重连；实测 TCP RTT 择优反而抬高
+        // 首帧延迟，故不做测速排序，保持 API 原顺序）。
+        let deduped = dedup_by_host(flv_urls);
+        return Ok(deduped
+            .into_iter()
+            .map(|u| (u, referer_owned.clone()))
+            .collect());
     }
     // 无 FLV（部分房间服务端只提供 HLS）：回退 HLS（m3u8）。
     // decode_loop 按 URL 含 .m3u8 走 HLS 解码路径。
@@ -191,19 +198,22 @@ pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>,
         .as_array()
         .ok_or_else(|| format!("B站直播间 {room} 未找到可用的 FLV 流（可能未开播）"))?;
     let referer = format!("https://live.bilibili.com/{room}");
-    let mut out: Vec<(String, String)> = durls
+    let raw: Vec<String> = durls
         .iter()
         .filter_map(|u| u["url"].as_str())
         .filter(|s| !s.is_empty())
-        .map(|u| (u.to_string(), referer.clone()))
+        .map(std::string::ToString::to_string)
         .collect();
-    if out.is_empty() {
+    if raw.is_empty() {
         return Err(format!(
             "B站直播间 {room} 未找到可用的 FLV 流（可能未开播）"
         ));
     }
-    // 按 host 去重，避免同一节点重复。
-    out.dedup_by(|a, b| host_of(&a.0) == host_of(&b.0));
+    // 多 CDN 节点去重后全部保留（解码线程轮换重连）。
+    let out: Vec<(String, String)> = dedup_by_host(raw)
+        .into_iter()
+        .map(|u| (u, referer.clone()))
+        .collect();
     Ok(out)
 }
 
@@ -235,6 +245,14 @@ fn host_of(url: &str) -> &str {
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url);
     rest.split('/').next().unwrap_or(rest)
+}
+
+/// 按 host 去重（保留首次出现顺序），避免同一节点重复出现在候选列表。
+fn dedup_by_host(urls: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    urls.into_iter()
+        .filter(|u| seen.insert(host_of(u).to_string()))
+        .collect()
 }
 
 /// 从 playinfo 响应解析该房间**实际提供**的清晰度档位（降序）。
@@ -284,37 +302,72 @@ pub fn parse_accept_qn(v: &Value) -> Vec<u32> {
 ///
 /// 实测新结构下 url_list 为 null，旧代码只读 url_list 会解析失败。
 pub fn codec_url(codec: &Value) -> Option<String> {
-    let base = codec["base_url"].as_str()?;
-    if let Some(info) = codec["url_info"].as_array().and_then(|a| a.first()) {
-        let host = info["host"].as_str()?;
-        let extra = info["extra"].as_str().unwrap_or("");
-        return Some(format!("{host}{base}{extra}"));
+    codec_urls(codec).into_iter().next()
+}
+
+/// 从 codec 对象拼出**全部** CDN host 的完整 URL（同一房间通常返回 2 个及以上：
+/// 区域 CT 节点 + B站 BGP `d1--cn-gotcha` 节点）。实测同房间两节点 TCP RTT
+/// 可差 5 倍（10ms vs 55ms），只取第一个会错失低延迟节点。
+pub fn codec_urls(codec: &Value) -> Vec<String> {
+    let Some(base) = codec["base_url"].as_str() else {
+        return Vec::new();
+    };
+    if let Some(infos) = codec["url_info"].as_array() {
+        return infos
+            .iter()
+            .filter_map(|info| {
+                let host = info["host"].as_str()?;
+                let extra = info["extra"].as_str().unwrap_or("");
+                Some(format!("{host}{base}{extra}"))
+            })
+            .collect();
     }
-    let host = codec["url_list"].as_array()?.first()?.as_str()?;
-    Some(format!("{host}{base}"))
+    codec["url_list"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|h| h.as_str())
+                .map(|host| format!("{host}{base}"))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 从 getRoomPlayInfo 响应提取 http_stream / flv / avc 拉流地址（base_url + host）。
 pub fn parse_bili_flv(v: &Value) -> Option<String> {
-    let streams = v["data"]["playurl_info"]["playurl"]["stream"].as_array()?;
+    parse_bili_flv_all(v).into_iter().next()
+}
+
+/// 提取 http_stream / flv / avc 的**全部** CDN host 候选（多节点择优用）。
+pub fn parse_bili_flv_all(v: &Value) -> Vec<String> {
+    let Some(streams) = v["data"]["playurl_info"]["playurl"]["stream"].as_array() else {
+        return Vec::new();
+    };
     for stream in streams {
         if stream["protocol_name"].as_str() != Some("http_stream") {
             continue;
         }
-        for fmt in stream["format"].as_array()? {
+        let Some(fmts) = stream["format"].as_array() else {
+            continue;
+        };
+        for fmt in fmts {
             if fmt["format_name"].as_str() != Some("flv") {
                 continue;
             }
-            for codec in fmt["codec"].as_array()? {
+            let Some(codecs) = fmt["codec"].as_array() else {
+                continue;
+            };
+            for codec in codecs {
                 if codec["codec_name"].as_str() == Some("avc") {
-                    if let Some(u) = codec_url(codec) {
-                        return Some(u);
+                    let urls = codec_urls(codec);
+                    if !urls.is_empty() {
+                        return urls;
                     }
                 }
             }
         }
     }
-    None
+    Vec::new()
 }
 
 /// 从旧版 playUrl 响应提取 durl 直出的 FLV 地址。
@@ -1948,6 +2001,8 @@ pub struct ProbeRoomResult {
     pub h: u32,
     /// 总耗时（毫秒，含解析 + 连接 + 运行 + 停止收尾）。
     pub elapsed_ms: u64,
+    /// 首帧延迟（毫秒，自 probe 开始到帧总线出现第一帧）；0 = 未出帧。
+    pub first_frame_ms: u64,
 }
 
 /// 独立直播间解码冒烟测试（**不占用全局 LIVE 会话，多线程并行安全**）。
@@ -1967,6 +2022,7 @@ pub fn probe_room(room: &str, secs: u64) -> ProbeRoomResult {
         w: 0,
         h: 0,
         elapsed_ms: 0,
+        first_frame_ms: 0,
     };
 
     // 1) 解析流地址（FLV 优先、HLS 回退；与生产同一函数）。
@@ -2015,8 +2071,8 @@ pub fn probe_room(room: &str, secs: u64) -> ProbeRoomResult {
     };
 
     // 3) 运行指定时长后停止（解码循环在读超时边界检查 stop，最坏多等一个
-    //    读超时：FLV 3 秒 / HLS 单请求级）。
-    std::thread::sleep(Duration::from_secs(secs));
+    //    读超时：FLV 3 秒 / HLS 单请求级）。期间轮询帧总线记录首帧时刻。
+    let first_frame_ms = wait_with_first_frame(&frames, secs);
     stop.store(true, Ordering::SeqCst);
     let decode_result = handle
         .join()
@@ -2036,6 +2092,7 @@ pub fn probe_room(room: &str, secs: u64) -> ProbeRoomResult {
     res.h = h;
     res.fps = frames_n as f64 / secs.max(1) as f64;
     res.elapsed_ms = t0.elapsed().as_millis() as u64;
+    res.first_frame_ms = first_frame_ms;
     match decode_result {
         Ok(()) => {
             res.ok = frames_n > 0;
@@ -2052,6 +2109,30 @@ pub fn probe_room(room: &str, secs: u64) -> ProbeRoomResult {
     res
 }
 
+/// 等待 secs 秒（每 5ms 轮询），返回帧总线出现第一帧的时刻（毫秒）；未出帧返回 0。
+/// 用轮询而非固定 sleep，以便精确测首帧延迟（端到端延迟的核心指标）。
+fn wait_with_first_frame(frames: &Arc<Mutex<Frames>>, secs: u64) -> u64 {
+    let start = std::time::Instant::now();
+    let deadline = Duration::from_secs(secs);
+    let mut first_ms = 0u64;
+    loop {
+        let elapsed = start.elapsed();
+        if elapsed >= deadline {
+            return first_ms;
+        }
+        if first_ms == 0
+            && frames
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .next_seq
+                > 0
+        {
+            first_ms = elapsed.as_millis() as u64;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// 按平台 + 房间号做完整生产链冒烟测试（解析 → 解码）。
 /// 抖音房间用 web_rid，走 `resolve_source_sync`（ttwid + enter）。
 pub fn probe_room_platform(platform: Platform, room: &str, secs: u64) -> ProbeRoomResult {
@@ -2065,6 +2146,7 @@ pub fn probe_room_platform(platform: Platform, room: &str, secs: u64) -> ProbeRo
         w: 0,
         h: 0,
         elapsed_ms: 0,
+        first_frame_ms: 0,
     };
     let src = match resolve_source_sync(platform, room, 10000) {
         Ok(s) if !s.candidates.is_empty() => s,
@@ -2099,6 +2181,7 @@ pub fn probe_flv_url(url: &str, referer: &str, cookie: Option<&str>, secs: u64) 
         w: 0,
         h: 0,
         elapsed_ms: 0,
+        first_frame_ms: 0,
     };
     let stop = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(Mutex::new(Frames {
@@ -2131,7 +2214,7 @@ pub fn probe_flv_url(url: &str, referer: &str, cookie: Option<&str>, secs: u64) 
             return res;
         }
     };
-    std::thread::sleep(Duration::from_secs(secs));
+    let first_frame_ms = wait_with_first_frame(&frames, secs);
     stop.store(true, Ordering::SeqCst);
     let decode_result = handle
         .join()
@@ -2149,6 +2232,7 @@ pub fn probe_flv_url(url: &str, referer: &str, cookie: Option<&str>, secs: u64) 
     res.h = h;
     res.fps = frames_n as f64 / secs.max(1) as f64;
     res.elapsed_ms = t0.elapsed().as_millis() as u64;
+    res.first_frame_ms = first_frame_ms;
     match decode_result {
         Ok(()) => {
             res.ok = frames_n > 0;
