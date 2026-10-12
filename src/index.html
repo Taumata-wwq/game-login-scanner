@@ -166,6 +166,28 @@
   .live-h-item .x { color: var(--faint); cursor: pointer; padding: 0 3px; flex: none; }
   .live-h-item .x:hover { color: #ff6b6b; }
   .live-h-empty { padding: 8px; color: var(--faint); font-size: 11px; text-align: center; }
+  /* 多直播间标签栏：预览区顶部一排，切换主画面。 */
+  #liveTabs {
+    position: absolute; top: 4px; left: 4px; right: 4px; z-index: 20;
+    display: none; flex-wrap: wrap; gap: 3px; pointer-events: none;
+  }
+  #liveTabs.on { display: flex; }
+  .live-tab {
+    pointer-events: auto;
+    display: flex; align-items: center; gap: 4px;
+    height: 20px; padding: 0 6px; max-width: 130px;
+    background: rgba(20, 20, 20, 0.78); border: 1px solid var(--border); border-radius: 3px;
+    color: var(--muted); font-size: 10px; cursor: pointer; user-select: none;
+    backdrop-filter: blur(2px);
+  }
+  .live-tab.on { border-color: var(--primary-bg); color: var(--text-strong); font-weight: 600; }
+  .live-tab .plat {
+    font-size: 9px; font-weight: 700; flex: none;
+    padding: 0 3px; border-radius: 2px; background: var(--panel-3); color: var(--text);
+  }
+  .live-tab .rid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .live-tab .x { color: var(--faint); flex: none; padding: 0 1px; }
+  .live-tab .x:hover { color: #ff6b6b; }
   /* 无边框窗口缩放热区：固定于窗口四边/四角（Tauri startResizeDragging）。 */
   .rz { position: fixed; z-index: 9999; }
   .rz-n  { top: 0; left: 0; right: 0; height: 6px; cursor: n-resize; }
@@ -416,6 +438,7 @@
     <!-- 扫描区域：实时监视器，可视区即扫码区（无外框） -->
     <div class="preview-wrap">
       <canvas id="previewCanvas" width="384" height="256"></canvas>
+      <div id="liveTabs"></div>
       <button class="region-reset" id="btnRegionReset" title="重置视图">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/><path d="M3 12h18"/></svg>
       </button>
@@ -1545,12 +1568,100 @@
     return { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
   }
 
-  // ---------- 直播源（B站 / 抖音低延迟画面） ----------
-  let liveOn = false;
-  let liveSeq = 0;
+  // ---------- 直播源（B站 / 抖音低延迟画面，多路监控） ----------
+  // 会话列表：[{ id, room, platform, w, h }]；activeLiveId 为当前主画面。
+  let liveSessions = [];
+  let activeLiveId = null;
   let liveTimer = null;
-  let livePlatform = 'bilibili'; // 当前直播平台
-  function livePlatformLabel() { return livePlatform === 'douyin' ? '抖音' : 'B站'; }
+  let livePlatform = 'bilibili'; // 输入框当前平台
+  function liveOn() { return liveSessions.length > 0; }
+  function activeSession() { return liveSessions.find((s) => s.id === activeLiveId) || null; }
+  function livePlatformLabel(p) { return (p || livePlatform) === 'douyin' ? '抖音' : 'B站'; }
+
+  // 渲染多会话标签栏（主画面切换 + 单独关闭）。
+  function renderLiveTabs() {
+    const box = $('liveTabs');
+    box.innerHTML = '';
+    box.classList.toggle('on', liveSessions.length > 0);
+    for (const s of liveSessions) {
+      const tab = document.createElement('div');
+      tab.className = 'live-tab' + (s.id === activeLiveId ? ' on' : '');
+      const plat = document.createElement('span');
+      plat.className = 'plat';
+      plat.textContent = livePlatformLabel(s.platform);
+      const rid = document.createElement('span');
+      rid.className = 'rid';
+      rid.textContent = s.room;
+      const x = document.createElement('span');
+      x.className = 'x';
+      x.textContent = '✕';
+      x.title = '停止该直播间';
+      tab.append(plat, rid, x);
+      tab.addEventListener('mousedown', (ev) => {
+        if (ev.target === x) return;
+        switchLive(s.id);
+      });
+      x.addEventListener('mousedown', (ev) => {
+        ev.stopPropagation();
+        closeLive(s.id);
+      });
+      box.appendChild(tab);
+    }
+  }
+
+  // 每会话记忆的视图（缩放/位置）：切换时保存/恢复，方便来回切换。
+  const liveViews = new Map(); // id -> { scale, fx, fy }
+
+  // 切换主画面到指定会话（保存旧视图、恢复该会话视图、切换后端前台）。
+  function switchLive(id) {
+    if (activeLiveId === id) return;
+    // 保存当前会话的视图。
+    if (activeLiveId) liveViews.set(activeLiveId, { ...view });
+    activeLiveId = id;
+    // 通知后端切换前台（恢复该路拉流、暂停其余，后台零带宽零解码）。
+    invoke('live_set_active', { id }).catch(() => {});
+    const s = activeSession();
+    if (s && s.w > 0 && s.h > 0) {
+      preview = { mon: { x: 0, y: 0, w: s.w, h: s.h } };
+      // 恢复记忆的视图（首次切到该会话则重置居中）。
+      const saved = liveViews.get(id);
+      view = saved ? { ...saved } : { scale: 1, fx: 0.5, fy: 0.5 };
+      viewT = { ...view };
+      srcCanvas = null;
+    }
+    renderLiveTabs();
+    // 立即拉新会话的帧（不等下一轮 previewLoop，切换更跟手）。
+    refreshPreview().catch(() => {});
+  }
+
+  // 关闭指定会话（前端调后端停止，再刷新列表）。
+  function closeLive(id) {
+    const s = liveSessions.find((x) => x.id === id);
+    if (s) invoke('live_stop', { platform: s.platform, room: s.room }).catch(() => {});
+    liveSessions = liveSessions.filter((x) => x.id !== id);
+    liveViews.delete(id);
+    if (activeLiveId === id) {
+      activeLiveId = null;
+      if (liveSessions.length) switchLive(liveSessions[0].id);
+    }
+    if (!liveSessions.length) exitLiveMode();
+    renderLiveTabs();
+  }
+
+  // 退出直播模式（无会话时恢复屏幕预览）。
+  function exitLiveMode() {
+    invoke('live_set_active', { id: '' }).catch(() => {});
+    invoke('set_preview_active', { active: true }).catch(() => {});
+    liveViews.clear();
+    activeLiveId = null;
+    preview = null;
+    view = { scale: 1, fx: 0.5, fy: 0.5 };
+    viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+    srcCanvas = null;
+    baseMap = null; baseMapReady = false; baseMapActive = false;
+    if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
+    if (tileMode) { invoke('set_tile_mode', { x: 0, y: 0, w: 0, h: 0, on: false }).catch(() => {}); tileMode = false; }
+  }
 
   // 直播间历史：最近使用优先（config.live_history，上限 20，后端去重截断）。
   let liveHistory = [];
@@ -1626,47 +1737,28 @@
     liveTimer = setTimeout(connectLive, 600);
   }
   async function connectLive() {
-    const seq = ++liveSeq;
     const room = $('liveRoom').value.trim();
-    if (!room) {
-      if (liveOn) {
-        liveOn = false;
-        invoke('live_stop').catch(() => {});
-        invoke('set_preview_active', { active: true }).catch(() => {});
-        log('已断开直播，恢复屏幕预览', 'info');
-      }
+    if (!room) return;
+    const id = livePlatform + ':' + room;
+    if (liveSessions.some((s) => s.id === id)) {
+      // 已存在：切到该会话即可。
+      switchLive(id);
       return;
     }
     try {
-      const [w, h] = await invoke('live_start', { platform: livePlatform, room });
-      if (seq !== liveSeq) {
-        // 已被更新的请求取代；房间已清空则回收会话。
-        if (!$('liveRoom').value.trim()) invoke('live_stop').catch(() => {});
-        return;
-      }
-      liveOn = true;
+      const info = await invoke('live_start', { platform: livePlatform, room });
       // 记录直播间历史（后端去重置顶并持久化；失败静默）。
       invoke('live_history_push', { room, platform: livePlatform }).catch(() => {});
-      // 用流尺寸立即占位 preview（而非置 null）：live_start 已阻塞到首帧，但首帧
-      // 仍要等 refreshLiveFrame 下一轮才写入 srcCanvas。若此处 preview=null，
-      // 这段时间 mousedown/wheel 会因守卫 `if (!preview)` 全部失效、无法拖拽缩放。
-      // 占位后即可交互（画面未到显示黑底）；refreshLiveFrame 会用相同流尺寸重建，
-      // 不重置视图，用户此时的拖拽/缩放位置得以保留。
-      preview = { mon: { x: 0, y: 0, w, h } };
-      view = { scale: 1, fx: 0.5, fy: 0.5 };
-      viewT = { scale: 1, fx: 0.5, fy: 0.5 };
-      srcCanvas = null;
-      // 作废屏幕底图/瓦片状态，防止拖拽缩放时把桌面画面当直播底图绘制。
+      liveSessions.push(info);
+      // 作废屏幕底图/瓦片状态（进入直播模式，防止把桌面画面当直播底图）。
       baseMap = null; baseMapReady = false; baseMapActive = false;
       if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
       if (tileMode) { invoke('set_tile_mode', { x: 0, y: 0, w: 0, h: 0, on: false }).catch(() => {}); tileMode = false; }
-      // 停用本地显示器捕获（清除预览 ROI，DXGI 帧总线跳过拷贝）——直播模式下
-      // 本地画面无人消费，不清除会因鼠标移动等持续触发 GPU 拷贝。
+      // 停用本地显示器捕获（直播模式下本地画面无人消费）。
       invoke('set_preview_active', { active: false }).catch(() => {});
-      log('已连接' + livePlatformLabel() + '直播间 ' + room + '（' + w + '×' + h + '），预览与扫码已切换', 'success');
+      switchLive(info.id);
+      log('已连接' + livePlatformLabel() + '直播间 ' + room + '（' + info.w + '×' + info.h + '），预览与扫码已切换', 'success');
     } catch (e) {
-      if (seq !== liveSeq) return;
-      liveOn = false;
       log('连接' + livePlatformLabel() + '直播间 ' + room + ' 失败: ' + e, 'error');
     }
   }
@@ -1691,22 +1783,20 @@
   // 因此视口/拖拽/缩放交互完全复用；无需底图（每帧即当前视口裁剪）。
   // 响应长度语义：0 字节 = 会话已关闭（下播/断流）→ 自动切回屏幕；
   // 24 字节 = 缓冲欠载或帧未变 → 沿用上一帧（流帧率低于 30fps 属正常现象）。
-  function revertLive(msg) {
-    if (!liveOn) return;
-    liveOn = false;
-    invoke('live_stop').catch(() => {});
-    invoke('set_preview_active', { active: true }).catch(() => {});
-    log(msg, 'info');
-  }
   async function refreshLiveFrame() {
+    const s = activeSession();
+    if (!s) { if (!liveSessions.length) exitLiveMode(); return false; }
     const region = viewportMonRect() || { x: 0, y: 0, w: 0, h: 0 };
     const buf = await invoke('capture_live_frame', {
+      id: s.id,
       x: region.x, y: region.y, w: region.w, h: region.h,
       maxWidth: canvas.width,
     });
     if (!(buf instanceof ArrayBuffer)) throw new Error('直播数据异常');
     if (buf.byteLength === 0) {
-      revertLive('直播已结束，恢复屏幕预览与扫码');
+      // 该会话已结束（下播/断流）：从列表移除，回退到剩余会话或屏幕。
+      closeLive(s.id);
+      log('直播间 ' + s.room + ' 已结束', 'info');
       return false;
     }
     if (buf.byteLength <= 24) return false;   // 欠载/帧未变：沿用上一帧
@@ -1735,7 +1825,7 @@
 
   let previewBusy = false;
   async function refreshPreview() {
-    if (liveOn) return refreshLiveFrame();
+    if (liveOn()) return refreshLiveFrame();
     if (previewBusy) return false;
     previewBusy = true;
     try {
@@ -1821,7 +1911,7 @@
     if (!previewActive || gen !== previewGen) return;
     if (changed) idleFrames = 0; else idleFrames++;
     // 直播：按设置帧率拉取（后端按同一节拍弹缓冲帧）。
-    const interval = liveOn
+    const interval = liveOn()
       ? previewIntervalMs()
       : idleFrames > 2
         ? PREVIEW_IDLE_INTERVAL
@@ -1895,7 +1985,7 @@
   function ensureViewAnim() {
     if (viewRaf) return;
     // 直播模式：帧即当前视口裁剪，无需屏幕瓦片底图（否则拖拽会闪现桌面画面）。
-    if (!liveOn && !paused && !baseMapActive) { stopPreview(); startBaseMap(); }
+    if (!liveOn() && !paused && !baseMapActive) { stopPreview(); startBaseMap(); }
     const loop = () => {
       const moving = stepView();
       drawView();
@@ -2038,7 +2128,7 @@
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     const v = viewportFrac();
     const r = contentRect();
-    const useBase = !liveOn && (viewDirty || pendingRealtime) && baseMapReady;
+    const useBase = !liveOn() && (viewDirty || pendingRealtime) && baseMapReady;
     const shot = paused ? pauseShot : (useBase ? baseMap : null);
     if (shot) {
       const sc = shot.canvas;
@@ -2055,7 +2145,7 @@
   }
 
   function updateRegion() {
-    if (!preview || liveOn) return;   // 直播模式下无屏幕扫描区域语义
+    if (!preview || liveOn()) return;   // 直播模式下无屏幕扫描区域语义
     const r = viewportMonRect();
     const str = r.x + ',' + r.y + ',' + r.w + ',' + r.h;
     if (str !== prevRegionStr) {
@@ -2141,7 +2231,7 @@
       stopPreview();
       el.classList.add('paused');
       el.innerHTML = PAUSE_ICON;
-      if (liveOn) return;   // 直播画面天然冻结在最后一帧
+      if (liveOn()) return;   // 直播画面天然冻结在最后一帧
       const origW = preview ? preview.mon.w : 1920;
       capturePauseShot(origW).then(() => {
         if (paused) drawView();

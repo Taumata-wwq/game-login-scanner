@@ -693,9 +693,11 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
             return;
         }
 
-        // 直播源优先：取自上次消费以来的新帧（seq 去重，静止/未变帧近零成本）。
-        if crate::live::active() {
-            if let Some((rgb, w, h)) = crate::live::take_scan_frame() {
+        // 直播源优先：只扫**当前前台（主画面）会话**——后台会话已暂停拉流，
+        // 且避免后台画面误触确认。切换主画面后扫码目标随之切换。
+        let active_live = crate::live::active_id();
+        if let Some(aid) = active_live {
+            if let Some((rgb, w, h)) = crate::live::take_scan_frame(&aid) {
                 live_seen = true;
                 // zedbar 解码（唯一解码器）：快路径 + 周期性精确兜底
                 // （与屏幕路径同一策略，快路径对直播 720p 帧提速 ~40%）。

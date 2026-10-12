@@ -1232,17 +1232,40 @@ fn set_preview_active(active: bool) {
 // ---------- 直播流（B站低延迟捕获） ----------
 
 /// 启动直播会话：解析平台直播间为 http-flv 流并开始解码，
-/// 阻塞至拿到首帧（前端随后用 capture_live_frame 拉取视口画面）。
-/// `platform` 为 "bilibili"（默认）或 "douyin"。返回 (流宽, 流高)。
+/// 阻塞至拿到首帧。返回会话信息（含 id，供 capture_live_frame 用）。
+/// `platform` 为 "bilibili"（默认）或 "douyin"。多路监控：每房间一个会话。
 #[tauri::command]
-async fn live_start(platform: String, room: String) -> Result<(u32, u32), String> {
-    crate::live::start(crate::live::Platform::parse(&platform), room).await
+async fn live_start(platform: String, room: String) -> Result<crate::live::SessionInfo, String> {
+    let p = crate::live::Platform::parse(&platform);
+    crate::live::start(p, room).await
 }
 
-/// 停止直播会话（预览恢复屏幕画面，扫码恢复屏幕扫描）。
+/// 停止指定直播会话；room 为空则停止全部（预览恢复屏幕画面，扫码恢复屏幕扫描）。
 #[tauri::command]
-fn live_stop() {
-    crate::live::stop();
+fn live_stop(platform: Option<String>, room: Option<String>) {
+    match room {
+        Some(r) if !r.is_empty() => {
+            let p = crate::live::Platform::parse(platform.as_deref().unwrap_or("bilibili"));
+            crate::live::stop_room(p, &r);
+        }
+        _ => crate::live::stop_all(),
+    }
+}
+
+/// 活跃直播会话列表（前端房间列表用）。
+#[tauri::command]
+fn live_list() -> Vec<crate::live::SessionInfo> {
+    crate::live::list_sessions()
+}
+
+/// 设置前台（主画面）会话：恢复其拉流、暂停其余（后台零带宽零解码）。
+#[tauri::command]
+fn live_set_active(id: String) {
+    if id.is_empty() {
+        crate::live::pause_all();
+    } else {
+        crate::live::set_active(&id);
+    }
 }
 
 /// 记录直播间使用历史（前端在连接成功后调用；去重置顶并持久化）。
@@ -1276,6 +1299,7 @@ fn live_history_remove(room: String, state: tauri::State<'_, AppState>) -> Resul
 /// 24 字节头（w,h,mon.x,mon.y,mon.w=流宽,mon.h=流高）+ RGBA；暂无帧返回 24 字节零头。
 #[tauri::command]
 fn capture_live_frame(
+    id: String,
     x: i32,
     y: i32,
     w: i32,
@@ -1283,7 +1307,7 @@ fn capture_live_frame(
     max_width: Option<u32>,
 ) -> Result<tauri::ipc::Response, String> {
     let mw = max_width.unwrap_or(384).clamp(80, 4096);
-    match crate::live::crop_frame(x, y, w, h, mw) {
+    match crate::live::crop_frame(&id, x, y, w, h, mw) {
         // 会话不存在（未启动/下播被移除）：0 字节 = 前端自动切回屏幕。
         crate::live::FrameOut::NoSession => Ok(tauri::ipc::Response::new(Vec::new())),
         // 欠载或帧未变：24 字节零头 = 沿用上一帧。
@@ -1600,6 +1624,8 @@ pub fn run() {
             capture_live_frame,
             live_start,
             live_stop,
+            live_list,
+            live_set_active,
             live_history_push,
             live_history_remove,
             set_tile_mode,

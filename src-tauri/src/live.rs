@@ -45,6 +45,14 @@ impl Platform {
             Platform::Douyin => "抖音",
         }
     }
+
+    /// 会话 key 用的平台标识（稳定、非展示用）。
+    pub fn key(self) -> &'static str {
+        match self {
+            Platform::Bilibili => "bilibili",
+            Platform::Douyin => "douyin",
+        }
+    }
 }
 
 /// B站流解析结果：候选 (url, referer) 列表 + 清晰度档位链。
@@ -823,28 +831,127 @@ struct ScanCache {
 
 /// 上次发送的预览帧标识：(seq, 裁剪区, 输出宽)。相同则返回短响应。
 type SentKey = (u64, (u32, u32, u32, u32), u32);
-static LAST_SENT: Mutex<Option<SentKey>> = Mutex::new(None);
-/// 最近一次预览请求的视口（流坐标系）；扫码只分析该区域（与屏幕扫码
-/// 「可视视口即扫描范围」语义一致，也大幅降低解码成本）。
-static LAST_VIEW: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
 
+/// 单个直播会话（多路监控：每房间一个，独立解码线程 + 帧总线 + 预览/扫码状态）。
 struct LiveSession {
+    /// 会话标识 `{platform_key}:{room}`。
+    id: String,
     stop: Arc<AtomicBool>,
+    /// 后台暂停标志：true 时解码线程**停止读 socket**（TCP 背压 → CDN 停发
+    /// → 零带宽零解码），切换回前台时恢复（无需重连，秒切）。这是多路监控
+    /// 「后台不占资源」的核心机制。
+    paused: Arc<AtomicBool>,
     frames: Arc<Mutex<Frames>>,
     room: String,
     platform: Platform,
+    /// 最近一次预览请求的视口（流坐标系）；扫码只分析该区域（与屏幕扫码
+    /// 「可视视口即扫描范围」语义一致）。按会话分桶，多路互不干扰。
+    last_view: Mutex<Option<(i32, i32, i32, i32)>>,
+    /// 上次发送的预览帧标识（按会话分桶）。
+    last_sent: Mutex<Option<SentKey>>,
 }
 
-static LIVE: Mutex<Option<LiveSession>> = Mutex::new(None);
+/// 当前前台（主画面）会话 id。后台会话暂停拉流；切换时更新。
+/// 扫码只扫该会话（避免后台画面误触确认）。
+static ACTIVE_ID: Mutex<Option<String>> = Mutex::new(None);
 
-fn lock_live() -> std::sync::MutexGuard<'static, Option<LiveSession>> {
-    LIVE.lock().unwrap_or_else(PoisonError::into_inner)
+fn set_active_id(id: Option<String>) {
+    *ACTIVE_ID.lock().unwrap_or_else(PoisonError::into_inner) = id;
+}
+
+/// 当前前台会话 id（扫码用）。
+pub fn active_id() -> Option<String> {
+    ACTIVE_ID
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// 设置前台会话：恢复该会话拉流，暂停其余会话。id 为空则全部暂停。
+pub fn set_active(id: &str) {
+    set_active_id(Some(id.to_string()));
+    let sessions = lock_sessions();
+    if let Some(map) = sessions.as_ref() {
+        for (k, s) in map {
+            s.paused.store(k != id, Ordering::SeqCst);
+        }
+    }
+}
+
+/// 暂停全部会话（无前台时，如退出直播模式）。
+pub fn pause_all() {
+    set_active_id(None);
+    let sessions = lock_sessions();
+    if let Some(map) = sessions.as_ref() {
+        for s in map.values() {
+            s.paused.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// 前端房间列表用的会话摘要。
+#[derive(Clone, serde::Serialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub room: String,
+    pub platform: String,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// 同时监控的直播会话上限（内存 ≈ 30~90MB/路 + 1 解码线程 + 1 连接）。
+const MAX_SESSIONS: usize = 3;
+
+type SessionMap = std::collections::HashMap<String, Arc<LiveSession>>;
+/// 会话池：key = `{platform_key}:{room}`。持锁仅做增删查，消费在锁外
+/// （clone Arc<LiveSession> 后操作，避免阻塞其它会话的解码线程）。
+static LIVE_SESSIONS: Mutex<Option<SessionMap>> = Mutex::new(None);
+
+fn lock_sessions() -> std::sync::MutexGuard<'static, Option<SessionMap>> {
+    LIVE_SESSIONS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// 会话 key（平台 + 房间号；同一房间号在不同平台是不同会话）。
+fn session_key(platform: Platform, room: &str) -> String {
+    format!("{}:{room}", platform.key())
+}
+
+fn get_session(key: &str) -> Option<Arc<LiveSession>> {
+    lock_sessions().as_ref()?.get(key).cloned()
+}
+
+fn session_count() -> usize {
+    lock_sessions().as_ref().map_or(0, |m| m.len())
+}
+
+fn insert_session(key: String, s: Arc<LiveSession>) {
+    lock_sessions()
+        .get_or_insert_with(SessionMap::new)
+        .insert(key, s);
+}
+
+fn remove_session(key: &str) -> Option<Arc<LiveSession>> {
+    lock_sessions().as_mut()?.remove(key)
+}
+
+fn take_all_sessions() -> Vec<Arc<LiveSession>> {
+    lock_sessions()
+        .take()
+        .map(|m| m.into_values().collect())
+        .unwrap_or_default()
 }
 
 /// 启动直播会话（解析流地址 + 启动解码线程，阻塞至拿到首帧或超时）。
-pub async fn start(platform: Platform, room: String) -> Result<(u32, u32), String> {
-    stop();
-    *LAST_SENT.lock().unwrap_or_else(PoisonError::into_inner) = None;
+/// 多路监控：同一房间（同平台）重复调用则替换旧会话；超过 MAX_SESSIONS 报错。
+pub async fn start(platform: Platform, room: String) -> Result<SessionInfo, String> {
+    let key = session_key(platform, &room);
+    // 同房间已存在：先停旧会话（重连语义）。
+    if let Some(old) = remove_session(&key) {
+        old.stop.store(true, Ordering::SeqCst);
+    }
+    if session_count() >= MAX_SESSIONS {
+        return Err(format!("同时监控的直播间已达上限（{MAX_SESSIONS} 个）"));
+    }
     // 初始校验：房间可解析、可开播（失败快速反馈给前端）；
     // 实际拉流地址由解码线程每次连接/重连时重新获取（新 expires，自愈临时故障）。
     match platform {
@@ -864,10 +971,17 @@ pub async fn start(platform: Platform, room: String) -> Result<(u32, u32), Strin
         next_seq: 0,
     }));
     let fail: FailFlag = Arc::new(Mutex::new(None));
-    let (room2, stop2, frames2, fail2) = (room.clone(), stop.clone(), frames.clone(), fail.clone());
+    let paused = Arc::new(AtomicBool::new(false));
+    let (room2, stop2, frames2, fail2, paused2) = (
+        room.clone(),
+        stop.clone(),
+        frames.clone(),
+        fail.clone(),
+        paused.clone(),
+    );
     std::thread::Builder::new()
-        .name("live-decode".into())
-        .spawn(move || decode_loop(platform, room2, stop2, frames2, fail2))
+        .name(format!("live-{room}"))
+        .spawn(move || decode_loop(platform, room2, stop2, frames2, fail2, paused2))
         .map_err(|e| format!("解码线程启动失败: {e}"))?;
     // 等首帧（流建立 + 关键帧到达，通常 1~4 秒）。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -878,13 +992,29 @@ pub async fn start(platform: Platform, room: String) -> Result<(u32, u32), Strin
                 if back.w > 0 {
                     let (w, h) = (back.w, back.h);
                     drop(f);
-                    *lock_live() = Some(LiveSession {
-                        stop,
-                        frames,
+                    let id = session_key(platform, &room);
+                    insert_session(
+                        id.clone(),
+                        Arc::new(LiveSession {
+                            id: id.clone(),
+                            stop,
+                            paused,
+                            frames,
+                            room: room.clone(),
+                            platform,
+                            last_view: Mutex::new(None),
+                            last_sent: Mutex::new(None),
+                        }),
+                    );
+                    // 新会话默认置为前台（恢复拉流），暂停其余（同时只前台 1 路）。
+                    set_active(&id);
+                    return Ok(SessionInfo {
+                        id,
                         room: room.clone(),
-                        platform,
+                        platform: platform.key().to_string(),
+                        w,
+                        h,
                     });
-                    return Ok((w, h));
                 }
             }
         }
@@ -898,29 +1028,68 @@ pub async fn start(platform: Platform, room: String) -> Result<(u32, u32), Strin
         }
         if tokio::time::Instant::now() >= deadline {
             stop.store(true, Ordering::SeqCst);
-            return Err(format!("B站直播间 {room} 连接超时（15 秒内未取到画面）"));
+            return Err(format!(
+                "{}直播间 {room} 连接超时（15 秒内未取到画面）",
+                platform.label()
+            ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-/// 停止当前直播会话（断流 + 释放）。
-pub fn stop() {
-    if let Some(s) = lock_live().take() {
+/// 停止指定房间的直播会话；room 为空则停止全部。
+pub fn stop_room(platform: Platform, room: &str) {
+    let key = session_key(platform, room);
+    if let Some(s) = remove_session(&key) {
+        s.stop.store(true, Ordering::SeqCst);
+        log::info!("直播会话已断开（{} {}）", s.platform.label(), s.room);
+    }
+    // 被停的是前台会话：前台清空（无自动接管，由前端切换）。
+    if active_id().as_deref() == Some(key.as_str()) {
+        set_active_id(None);
+    }
+}
+
+/// 停止全部直播会话。
+pub fn stop_all() {
+    set_active_id(None);
+    for s in take_all_sessions() {
         s.stop.store(true, Ordering::SeqCst);
         log::info!("直播会话已断开（{} {}）", s.platform.label(), s.room);
     }
 }
 
-/// 是否存在活跃会话。
-pub fn active() -> bool {
-    lock_live().is_some()
+/// 活跃会话列表（前端房间列表用）。
+pub fn list_sessions() -> Vec<SessionInfo> {
+    let sessions = lock_sessions();
+    let Some(map) = sessions.as_ref() else {
+        return Vec::new();
+    };
+    map.values()
+        .map(|s| {
+            let (w, h) = {
+                let f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
+                f.latest.as_ref().map_or((0, 0), |b| (b.w, b.h))
+            };
+            SessionInfo {
+                id: s.id.clone(),
+                room: s.room.clone(),
+                platform: s.platform.key().to_string(),
+                w,
+                h,
+            }
+        })
+        .collect()
 }
 
-/// 诊断：最新解码帧的 (seq, 媒体时间戳, 队列深度)。探针观测延迟漂移用。
-pub fn diag() -> Option<(u64, u32, usize)> {
-    let live = lock_live();
-    let s = live.as_ref()?;
+/// 是否存在任意活跃会话。
+pub fn active() -> bool {
+    session_count() > 0
+}
+
+/// 诊断指定会话：最新解码帧的 (seq, 媒体时间戳, 队列深度)。
+pub fn diag(id: &str) -> Option<(u64, u32, usize)> {
+    let s = get_session(id)?;
     let f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
     let b = f.latest.as_ref()?;
     Some((b.seq, b.ts, f.queue.len()))
@@ -951,12 +1120,11 @@ pub fn scan_output_size(cw: u32, ch: u32) -> (u32, u32) {
     }
 }
 
-/// 扫码消费者：返回最新帧的**当前显示视口**区域（原分辨率 RGB，
-/// 超上限才等比缩小）。视口未知时用全帧。
-pub fn take_scan_frame() -> Option<(Vec<u8>, u32, u32)> {
-    let live = lock_live();
-    let s = live.as_ref()?;
-    let view = *LAST_VIEW.lock().unwrap_or_else(PoisonError::into_inner);
+/// 扫码消费者（多会话）：取指定会话的最新帧**当前显示视口**区域
+/// （原分辨率 RGB，超上限才等比缩小）。视口未知时用全帧。
+pub fn take_scan_frame(id: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let s = get_session(id)?;
+    let view = *s.last_view.lock().unwrap_or_else(PoisonError::into_inner);
     // 只在锁内取「帧引用 + 缓存命中判断」，**不在锁内做 YUV→RGB 转换**：
     // 转换（原分辨率 1080p ~2M 像素）耗时远大于取引用，而解码线程 push 新帧
     // 需要同一把锁——持锁转换会把解码线程堵住 → 不读 socket → 延迟堆积，
@@ -1036,16 +1204,14 @@ pub enum FrameOut {
     Frame(Vec<u8>),
 }
 
-pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
-    *LAST_VIEW.lock().unwrap_or_else(PoisonError::into_inner) = if w > 0 && h > 0 {
+pub fn crop_frame(id: &str, x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
+    let Some(s) = get_session(id) else {
+        return FrameOut::NoSession;
+    };
+    *s.last_view.lock().unwrap_or_else(PoisonError::into_inner) = if w > 0 && h > 0 {
         Some((x, y, w, h))
     } else {
         None
-    };
-    let live = lock_live();
-    let s = match live.as_ref() {
-        Some(s) => s,
-        None => return FrameOut::NoSession,
     };
     // 锁内只做：弹帧、计算裁剪/输出尺寸、克隆 Arc。YUV→RGBA 转换**在锁外**进行，
     // 避免长时间持有 frames 锁阻塞解码线程 push_frame（与 take_scan_frame 的
@@ -1089,7 +1255,7 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
     // （复用屏幕预览协议），消除重复帧的降采样与 IPC。
     let key = (frame.seq, (cx, cy, cw, ch), tw);
     {
-        let mut last = LAST_SENT.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut last = s.last_sent.lock().unwrap_or_else(PoisonError::into_inner);
         if *last == Some(key) {
             return FrameOut::Empty;
         }
@@ -1167,6 +1333,7 @@ fn decode_loop(
     stop: Arc<AtomicBool>,
     frames: Arc<Mutex<Frames>>,
     fail: FailFlag,
+    paused: Arc<AtomicBool>,
 ) {
     // 清晰度降级链：B站从首次解析响应顺带得到（避免二次 API 请求），
     // 抖音无档位概念。首次 resolve 前暂用 [10000] 兜底。
@@ -1244,7 +1411,7 @@ fn decode_loop(
         );
         let allow_degrade = qn_idx + 1 < qn_chain.len();
         let session_result = if is_hls {
-            decode_hls_session(&url, &referer, &stop, &frames)
+            decode_hls_session(&url, &referer, &stop, &frames, &paused)
         } else {
             decode_session(
                 &url,
@@ -1253,6 +1420,7 @@ fn decode_loop(
                 &stop,
                 &frames,
                 allow_degrade,
+                &paused,
             )
         };
         match session_result {
@@ -1318,14 +1486,20 @@ fn decode_loop(
     }
 }
 
-/// 仅当 LIVE 中仍是本线程对应的会话时移除（防止误删替换后的新会话）。
+/// 仅当会话池中仍是本线程对应的会话时移除（防止误删同房间重建的新会话）。
+/// 用 frames 指针匹配：解码线程只持有自己那帧总线的引用。
 fn remove_session_if(frames: &Arc<Mutex<Frames>>) {
-    let mut live = lock_live();
-    if let Some(s) = live.as_ref() {
-        if Arc::ptr_eq(&s.frames, frames) {
-            live.take();
-            log::info!("直播会话已关闭（流结束/重连失败），回退屏幕预览与扫码");
-        }
+    let mut sessions = lock_sessions();
+    let Some(map) = sessions.as_mut() else {
+        return;
+    };
+    let matched_key = map
+        .iter()
+        .find(|(_, s)| Arc::ptr_eq(&s.frames, frames))
+        .map(|(k, _)| k.clone());
+    if let Some(k) = matched_key {
+        map.remove(&k);
+        log::info!("直播会话已关闭（流结束/重连失败），回退屏幕预览与扫码");
     }
 }
 
@@ -1338,6 +1512,7 @@ fn decode_hls_session(
     referer: &str,
     stop: &AtomicBool,
     frames: &Arc<Mutex<Frames>>,
+    paused: &AtomicBool,
 ) -> Result<(), String> {
     let headers = vec![("User-Agent".to_string(), BROWSER_UA.to_string())];
     // P0：HLS 拉流全程复用同一 TCP+TLS 连接（实测 m3u8 150→30ms，且避免 CDN
@@ -1390,6 +1565,13 @@ fn decode_hls_session(
     loop {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
+        }
+        // 后台暂停：不拉新分片（零带宽零解码），恢复时跳到最新关键帧段。
+        if paused.load(Ordering::SeqCst) {
+            skipped_first = false;
+            lag_window = std::time::Instant::now();
+            std::thread::sleep(Duration::from_millis(120));
+            continue;
         }
         // 拉最新 m3u8。
         let text = match conn.get(m3u8_url, &headers, referer) {
@@ -1726,6 +1908,7 @@ fn decode_session(
     stop: &AtomicBool,
     frames: &Arc<Mutex<Frames>>,
     allow_degrade: bool,
+    paused: &AtomicBool,
 ) -> Result<(), String> {
     let mut reader = HttpFlvReader::connect(url, referer, cookie)?;
 
@@ -1768,6 +1951,16 @@ fn decode_session(
     loop {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
+        }
+        // 后台暂停：不读 socket（TCP 背压让 CDN 停发 → 零带宽零解码）。
+        // 恢复时重置锚点与慢流计时，避免按暂停时长误判落后/劣化。
+        if paused.load(Ordering::SeqCst) {
+            anchor = None;
+            last_data_at = std::time::Instant::now();
+            window_start = std::time::Instant::now();
+            window_frames = 0;
+            std::thread::sleep(Duration::from_millis(80));
+            continue;
         }
         // 连接后 3 秒无任何视频数据：节点劣化，切换节点重连。
         if last_data_at.elapsed() > Duration::from_secs(3) {
@@ -2055,14 +2248,15 @@ pub fn probe_room(room: &str, secs: u64) -> ProbeRoomResult {
         next_seq: 0,
     }));
     let (s2, f2) = (stop.clone(), frames.clone());
+    let paused = Arc::new(AtomicBool::new(false)); // 探针不暂停
     let is_hls = res.is_hls;
     let handle = std::thread::Builder::new()
         .name("probe-decode".into())
         .spawn(move || {
             if is_hls {
-                decode_hls_session(&url, &referer, &s2, &f2)
+                decode_hls_session(&url, &referer, &s2, &f2, &paused)
             } else {
-                decode_session(&url, &referer, None, &s2, &f2, false)
+                decode_session(&url, &referer, None, &s2, &f2, false, &paused)
             }
         });
     let handle = match handle {
@@ -2201,13 +2395,14 @@ pub fn probe_flv_url(url: &str, referer: &str, cookie: Option<&str>, secs: u64) 
         referer.to_string(),
         cookie.map(std::string::ToString::to_string),
     );
+    let paused = Arc::new(AtomicBool::new(false)); // 探针不暂停
     let handle = std::thread::Builder::new()
         .name("probe-flv".into())
         .spawn(move || {
             if is_hls {
-                decode_hls_session(&url, &referer, &s2, &f2)
+                decode_hls_session(&url, &referer, &s2, &f2, &paused)
             } else {
-                decode_session(&url, &referer, cookie.as_deref(), &s2, &f2, false)
+                decode_session(&url, &referer, cookie.as_deref(), &s2, &f2, false, &paused)
             }
         });
     let handle = match handle {
