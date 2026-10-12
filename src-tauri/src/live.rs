@@ -690,16 +690,23 @@ fn yuv_crop_to_rgb(
     let (tw, th) = (tw.max(1), th.max(1));
     let step = step.max(1);
     let cw2 = src_w / 2; // 色度跨距
-    let mut out = Vec::with_capacity(tw * th * 3);
+                         // 预分配 + 直接按下标写（原逐像素 push 有容量检查开销，热路径上明显）。
+    let mut out = vec![0u8; tw * th * 3];
+    let mut oi = 0usize;
+    // 预计算行映射（sy0/sy1/cys0/cys1），避免内层重复除法。
+    let mut row_ys: Vec<(usize, usize)> = Vec::with_capacity(th);
     for oy in 0..th {
         let sy0 = cy + oy * ch / th;
         let sy1 = (cy + (oy + 1) * ch / th).max(sy0 + 1);
+        row_ys.push((sy0, sy1));
+    }
+    for &(sy0, sy1) in row_ys.iter() {
         let cys0 = sy0 / 2;
         let cys1 = (sy1 / 2).max(cys0 + 1);
+        let cstep = step.div_ceil(2).max(1);
         for ox in 0..tw {
             let sx0 = cx + ox * cw / tw;
             let sx1 = (cx + (ox + 1) * cw / tw).max(sx0 + 1);
-            // Y 箱步进平均（step=1 为全平均，扫码用；step>1 为采样，预览用）。
             let mut ysum = 0u32;
             let mut yn = 0u32;
             let mut yy = sy0;
@@ -713,10 +720,8 @@ fn yuv_crop_to_rgb(
                 }
                 yy += step;
             }
-            // 色度箱步进平均（色度是 Y 的一半分辨率，step 相应处理）。
             let cxs0 = sx0 / 2;
             let cxs1 = (sx1 / 2).max(cxs0 + 1);
-            let cstep = step.div_ceil(2).max(1);
             let mut us = 0u32;
             let mut vs = 0u32;
             let mut cn = 0u32;
@@ -736,12 +741,10 @@ fn yuv_crop_to_rgb(
             let uv = (us / cn.max(1)) as i32 - 128;
             let vv = (vs / cn.max(1)) as i32 - 128;
             let yy = yv - 16;
-            let r = (1192 * yy + 1634 * vv) >> 10;
-            let g = (1192 * yy - 400 * uv - 833 * vv) >> 10;
-            let b = (1192 * yy + 2066 * uv) >> 10;
-            out.push(r.clamp(0, 255) as u8);
-            out.push(g.clamp(0, 255) as u8);
-            out.push(b.clamp(0, 255) as u8);
+            out[oi] = ((1192 * yy + 1634 * vv) >> 10).clamp(0, 255) as u8;
+            out[oi + 1] = ((1192 * yy - 400 * uv - 833 * vv) >> 10).clamp(0, 255) as u8;
+            out[oi + 2] = ((1192 * yy + 2066 * uv) >> 10).clamp(0, 255) as u8;
+            oi += 3;
         }
     }
     out
@@ -761,9 +764,16 @@ fn yuv_crop_to_rgba(
     step: usize,
 ) -> Vec<u8> {
     let rgb = yuv_crop_to_rgb(y, u, v, src_w, src_h, crop, tw, th, step);
-    let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
-    for px in rgb.as_chunks::<3>().0 {
-        out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+    // 单次遍历、直接按下标写 RGBA（替代 extend_from_slice 每像素调用）。
+    let n = rgb.len() / 3;
+    let mut out = vec![0u8; n * 4];
+    for i in 0..n {
+        let s = i * 3;
+        let d = i * 4;
+        out[d] = rgb[s];
+        out[d + 1] = rgb[s + 1];
+        out[d + 2] = rgb[s + 2];
+        out[d + 3] = 255;
     }
     out
 }

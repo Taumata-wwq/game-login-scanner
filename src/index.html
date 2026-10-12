@@ -1559,6 +1559,8 @@
   let previewTimer = null;
   let previewErrShown = false;
   const canvas = $('previewCanvas');
+  // 缓存 2D 上下文（getContext 每帧调用有查找开销）。
+  const canvasCtx = canvas.getContext('2d');
 
   // 视窗布局：按 16:9 在「主列宽度」与「扣除信息栏+账号区最小高度后的可用高度」中取小，
   // 等比适配（letterbox），绝不拉伸变形。账号区保留 min 120px。
@@ -2115,10 +2117,12 @@
     const s = activeSession();
     if (!s) { if (!liveSessions.length) exitLiveMode(); return false; }
     const region = viewportMonRect() || { x: 0, y: 0, w: 0, h: 0 };
+    // 预览转换上限（避免按显示分辨率逐像素转 YUV→RGBA 的高开销；
+    // 画布放大由 GPU drawImage 完成，质量足够）。
     const buf = await invoke('capture_live_frame', {
       id: s.id,
       x: region.x, y: region.y, w: region.w, h: region.h,
-      maxWidth: canvas.width,
+      maxWidth: Math.min(canvas.width, 640),
     });
     if (!(buf instanceof ArrayBuffer)) throw new Error('直播数据异常');
     if (buf.byteLength === 0) {
@@ -2244,9 +2248,9 @@
     tickFps();
     if (!previewActive || gen !== previewGen) return;
     if (changed) idleFrames = 0; else idleFrames++;
-    // 直播：按设置帧率拉取（后端按同一节拍弹缓冲帧）。
+    // 直播：按设置帧率拉取；连续无新帧（流帧率低于显示节拍）时降频省 CPU。
     const interval = liveOn()
-      ? previewIntervalMs()
+      ? (idleFrames > 4 ? Math.max(previewIntervalMs(), 50) : previewIntervalMs())
       : idleFrames > 2
         ? PREVIEW_IDLE_INTERVAL
         : previewIntervalMs();
@@ -2321,8 +2325,11 @@
   let viewRaf = null;
   function ensureViewAnim() {
     if (viewRaf) return;
-    // 直播模式：帧即当前视口裁剪，无需屏幕瓦片底图（否则拖拽会闪现桌面画面）。
-    if (!liveOn() && !paused && !baseMapActive) { stopPreview(); startBaseMap(); }
+    // 拖拽/缩放期间停止实时拉帧：避免 IPC 取帧/转换与 60fps RAF 重绘竞争
+    // （尤其低帧率直播流时，竞争会表现为明显卡顿）。拖拽结束由 loop 尾部恢复。
+    stopPreview();
+    // 屏幕模式额外启用瓦片底图（拖拽时显示最新桌面画面）；直播模式冻结当前帧。
+    if (!liveOn() && !paused && !baseMapActive) { startBaseMap(); }
     const loop = () => {
       const moving = stepView();
       drawView();
@@ -2460,7 +2467,7 @@
     // 旧底图已作废（可能还停留在上一轮会话的内容），此时若强行取帧会闪现
     // 上一轮拖拽/缩放的最后一帧；冻结 1~2 帧后全量瓦片帧到达即恢复。
     if (viewDirty && baseMapActive && !baseMapReady) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvasCtx;
     ctx.fillStyle = '#101010';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     const v = viewportFrac();
@@ -2476,7 +2483,8 @@
       ctx.drawImage(sc, sx, sy, sw, sh, r.ox, r.oy, r.cw, r.ch);
     } else if (srcCanvas) {
       ctx.imageSmoothingEnabled = r.cw <= srcCanvas.width + 0.5;
-      ctx.imageSmoothingQuality = 'high';
+      // 拖拽/缩放动画中降质量（GPU 缩放；静止时用 high 保清晰度）。
+      ctx.imageSmoothingQuality = dragging ? 'low' : 'high';
       ctx.drawImage(srcCanvas, r.ox, r.oy, r.cw, r.ch);
     }
   }
