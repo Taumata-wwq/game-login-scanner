@@ -22,7 +22,7 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
     MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-    MF_MT_SUBTYPE, MF_VERSION,
+    MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -81,9 +81,13 @@ pub struct MfDecoder {
     /// MFT 自行提供输出 sample（GetOutputStreamInfo 协商结果）。
     /// 为否时由本结构预分配输出 sample。
     mft_provides_samples: bool,
-    /// 当前输出尺寸与 NV12 亮度行跨距（输出类型协商后确定）。
+    /// 当前输出（编码）尺寸与 NV12 亮度行跨距（输出类型协商后确定）。
     width: u32,
     height: u32,
+    /// 显示孔径尺寸（编码高度可能含 16 对齐填充，如 1080→1088）。
+    /// 有显示孔径时只输出其区域，避免底部填充行显示为绿色条。
+    disp_w: u32,
+    disp_h: u32,
     /// NV12 亮度平面行跨距（字节）。输出类型的 MF_MT_DEFAULT_STRIDE，
     /// 缺失时退回宽度（copy-back 常规情形）。
     stride: u32,
@@ -131,6 +135,8 @@ impl MfDecoder {
                 mft_provides_samples: false,
                 width: 0,
                 height: 0,
+                disp_w: 0,
+                disp_h: 0,
                 stride: 0,
                 out_sample: None,
             };
@@ -171,6 +177,38 @@ impl MfDecoder {
         let frame_size = ot.GetUINT64(&MF_MT_FRAME_SIZE).unwrap_or(0);
         self.width = (frame_size >> 32) as u32;
         self.height = (frame_size & 0xFFFF_FFFF) as u32;
+        // 显示孔径：编码高度常按 16 对齐（如 1080→1088），孔径给出真实显示尺寸；
+        // 无孔径（全 0）则视为编码尺寸（不裁剪）。
+        self.disp_w = 0;
+        self.disp_h = 0;
+        let mut ap = [0u8; 16];
+        let mut ap_len = 0u32;
+        if ot
+            .GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, &mut ap, Some(&mut ap_len))
+            .is_ok()
+            && ap_len >= 16
+        {
+            // MFVideoArea = OffsetX(4) OffsetY(4) cx(4) cy(4)。
+            let cx = u32::from_le_bytes([ap[8], ap[9], ap[10], ap[11]]);
+            let cy = u32::from_le_bytes([ap[12], ap[13], ap[14], ap[15]]);
+            if cx > 0 && cy > 0 && cx <= self.width && cy <= self.height {
+                self.disp_w = cx;
+                self.disp_h = cy;
+            }
+        }
+        if self.disp_w == 0 || self.disp_h == 0 {
+            self.disp_w = self.width;
+            self.disp_h = self.height;
+        }
+        if (self.disp_w, self.disp_h) != (self.width, self.height) {
+            log::info!(
+                "MF 显示孔径 {}x{}（编码 {}x{}，裁剪填充行）",
+                self.disp_w,
+                self.disp_h,
+                self.width,
+                self.height
+            );
+        }
         self.stride = ot
             .GetUINT32(&MF_MT_DEFAULT_STRIDE)
             .unwrap_or(self.width)
@@ -339,24 +377,27 @@ impl MfDecoder {
         let result = (|| {
             let (w, h) = (w as usize, h as usize);
             let stride = self.stride.max(w as u32) as usize;
-            let (cw, ch) = (w / 2, h / 2);
+            // 输出尺寸 = 显示孔径（去除编码对齐填充行，避免绿条）。
+            let ow = (self.disp_w as usize).min(w).max(2);
+            let oh = (self.disp_h as usize).min(h).max(2);
+            let (cw, ch) = (ow / 2, oh / 2);
             // 尺寸合法性（防 MFT 输出异常数据）。
-            if (cur as usize) < stride * h + stride * ch {
+            if (cur as usize) < stride * h + stride * (h / 2) {
                 return Err(format!(
                     "NV12 缓冲不足：{cur} 字节 < 需要 {} 字节",
-                    stride * h + stride * ch
+                    stride * h + stride * (h / 2)
                 ));
             }
-            let mut y = Vec::with_capacity(w * h);
-            for row in 0..h {
+            let mut y = Vec::with_capacity(ow * oh);
+            for row in 0..oh {
                 let base = p.add(row * stride);
-                y.extend_from_slice(std::slice::from_raw_parts(base, w));
+                y.extend_from_slice(std::slice::from_raw_parts(base, ow));
             }
             let uv_base = p.add(stride * h);
             let mut u = vec![0u8; cw * ch];
             let mut v = vec![0u8; cw * ch];
             for row in 0..ch {
-                let rowp = std::slice::from_raw_parts(uv_base.add(row * stride), cw * 2);
+                let rowp = std::slice::from_raw_parts(uv_base.add(row * stride), ow);
                 let u_row = &mut u[row * cw..(row + 1) * cw];
                 let v_row = &mut v[row * cw..(row + 1) * cw];
                 // zip 迭代 + 定长 chunk 拆解：比逐字节 push 快数倍（无容量检查、
@@ -371,8 +412,8 @@ impl MfDecoder {
                 }
             }
             Ok(DecodedFrame {
-                w: w as u32,
-                h: h as u32,
+                w: ow as u32,
+                h: oh as u32,
                 y,
                 u,
                 v,
