@@ -122,6 +122,80 @@ fn https_ify(u: &str) -> String {
     }
 }
 
+/// 抖音直播间元数据。
+#[derive(Default, Clone)]
+pub struct DouyinMeta {
+    pub title: String,
+    pub nickname: String,
+    pub cover: String,
+    pub room_id: String,
+    /// 1 = 直播中，0 = 未开播。
+    pub live_status: i64,
+    pub live_start: i64,
+}
+
+/// 获取抖音直播间元数据（复用 ttwid + enter 响应解析）。
+pub fn fetch_meta_sync(web_rid: &str) -> DouyinMeta {
+    let ttwid = match fetch_ttwid_sync() {
+        Ok(t) => t,
+        Err(_) => return DouyinMeta::default(),
+    };
+    let (headers, _referer) = enter_headers(web_rid, &ttwid);
+    let resp = match crate::http::request_sync("GET", &enter_url(web_rid), &headers, None) {
+        Ok(r) => r,
+        Err(_) => return DouyinMeta::default(),
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&resp.body) else {
+        return DouyinMeta::default();
+    };
+    parse_douyin_meta(&v)
+}
+
+/// 从 enter 响应解析元数据。
+/// 结构：data.data[0].{title, cover.url_list[0], owner.nickname, id_str, status, create_time}。
+pub fn parse_douyin_meta(v: &Value) -> DouyinMeta {
+    let Some(d0) = v
+        .get("data")
+        .and_then(|d| d.get("data"))
+        .and_then(|a| a.get(0))
+    else {
+        return DouyinMeta::default();
+    };
+    let title = d0["title"].as_str().unwrap_or("").to_string();
+    let nickname = d0["owner"]["nickname"].as_str().unwrap_or("").to_string();
+    // 封面：room.cover.url_list[0]，或 owner.avatar_thumb.url_list[0]。
+    let cover = d0["cover"]["url_list"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            d0["owner"]["avatar_thumb"]["url_list"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let room_id = d0["id_str"].as_str().unwrap_or("").to_string();
+    // status: 2 = 直播中（抖音约定）。
+    let status = d0["status"].as_i64().unwrap_or(0);
+    let live_status = if status == 2 { 1 } else { 0 };
+    let live_start = if live_status == 1 {
+        d0["create_time"].as_i64().unwrap_or(0)
+    } else {
+        0
+    };
+    DouyinMeta {
+        title,
+        nickname,
+        cover,
+        room_id,
+        live_status,
+        live_start,
+    }
+}
+
 /// 从 enter 响应提取 flv 拉流地址（多代接口结构兼容，优先最高清晰度）。
 pub fn parse_douyin_flv(v: &Value) -> Option<String> {
     let d0 = v.get("data")?.get("data")?.get(0)?;

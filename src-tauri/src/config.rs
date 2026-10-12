@@ -137,12 +137,12 @@ pub struct OfficialToken {
     pub last_used_at: i64,
 }
 
-/// 直播间历史条目（最近使用优先；非敏感数据，明文存储）。
+/// 直播间条目（受监控的直播间；含元数据缓存，非敏感数据明文存储）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveHistoryEntry {
     /// 房间号（数字字符串；B站/抖音通用）。
     pub room: String,
-    /// 直播平台（bili；douyin 为后续支持预留）。
+    /// 直播平台（bilibili / douyin）。
     #[serde(default = "default_live_platform")]
     pub platform: String,
     /// 用户备注（可选，如主播名）。
@@ -150,14 +150,35 @@ pub struct LiveHistoryEntry {
     pub note: String,
     /// 最后使用时间（Unix 秒）。
     pub last_used: i64,
+    /// 缓存：直播间标题。
+    #[serde(default)]
+    pub title: String,
+    /// 缓存：主播昵称。
+    #[serde(default)]
+    pub nickname: String,
+    /// 缓存：封面 URL。
+    #[serde(default)]
+    pub cover: String,
+    /// 缓存：真实房间号。
+    #[serde(default)]
+    pub room_id: String,
+    /// 缓存：开播状态（1=直播中）。
+    #[serde(default)]
+    pub live_status: i64,
+    /// 缓存：开播时刻（Unix 秒）。
+    #[serde(default)]
+    pub live_start: i64,
+    /// 缓存：元数据最后刷新时间（Unix 秒）。
+    #[serde(default)]
+    pub last_checked: i64,
 }
 
 fn default_live_platform() -> String {
-    "bili".to_string()
+    "bilibili".to_string()
 }
 
-/// 直播间历史上限（最近优先，超出丢弃最旧）。
-pub const LIVE_HISTORY_MAX: usize = 20;
+/// 受监控直播间上限（含桌面共 30 个，超出丢弃最旧）。
+pub const LIVE_HISTORY_MAX: usize = 30;
 
 /// 应用配置（持久化）。
 /// 同渠道支持多账号：`*_accounts` 保存全部登录记录，`active_*` 以 uid 指向当前使用的账号。
@@ -545,6 +566,12 @@ impl AppConfig {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        // 保留已有元数据缓存（刷新由 update_live_meta 负责）。
+        let old = self
+            .live_history
+            .iter()
+            .find(|e| e.room == room && e.platform == platform)
+            .cloned();
         self.live_history.insert(
             0,
             LiveHistoryEntry {
@@ -556,9 +583,67 @@ impl AppConfig {
                     note.to_string()
                 },
                 last_used: now,
+                title: old.as_ref().map(|e| e.title.clone()).unwrap_or_default(),
+                nickname: old.as_ref().map(|e| e.nickname.clone()).unwrap_or_default(),
+                cover: old.as_ref().map(|e| e.cover.clone()).unwrap_or_default(),
+                room_id: old.as_ref().map(|e| e.room_id.clone()).unwrap_or_default(),
+                live_status: old.as_ref().map(|e| e.live_status).unwrap_or(0),
+                live_start: old.as_ref().map(|e| e.live_start).unwrap_or(0),
+                last_checked: old.as_ref().map(|e| e.last_checked).unwrap_or(0),
             },
         );
         self.live_history.truncate(LIVE_HISTORY_MAX);
+    }
+
+    /// 按给定房间顺序重排 live_history（拖拽排序持久化）。
+    pub fn reorder_live_history(&mut self, order: &[String]) {
+        let mut reordered: Vec<LiveHistoryEntry> = Vec::with_capacity(self.live_history.len());
+        for room in order {
+            if let Some(pos) = self.live_history.iter().position(|e| &e.room == room) {
+                reordered.push(self.live_history.remove(pos));
+            }
+        }
+        // 追加未在 order 中的剩余条目（保持原相对顺序）。
+        reordered.append(&mut self.live_history);
+        self.live_history = reordered;
+    }
+
+    /// 更新某直播间的元数据缓存（按 (platform, room) 匹配）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_live_meta(
+        &mut self,
+        room: &str,
+        platform: &str,
+        title: &str,
+        nickname: &str,
+        cover: &str,
+        room_id: &str,
+        live_status: i64,
+        live_start: i64,
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        for e in self.live_history.iter_mut() {
+            if e.room == room && e.platform == platform {
+                if !title.is_empty() {
+                    e.title = title.to_string();
+                }
+                if !nickname.is_empty() {
+                    e.nickname = nickname.to_string();
+                }
+                if !cover.is_empty() {
+                    e.cover = cover.to_string();
+                }
+                if !room_id.is_empty() {
+                    e.room_id = room_id.to_string();
+                }
+                e.live_status = live_status;
+                e.live_start = live_start;
+                e.last_checked = now;
+            }
+        }
     }
 
     /// 删除指定直播间的历史条目（忽略平台，删除该房间号全部记录）。返回是否存在过。

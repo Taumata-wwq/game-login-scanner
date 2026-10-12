@@ -1288,13 +1288,77 @@ fn live_history_push(
 
 /// 删除指定直播间的历史条目。
 #[tauri::command]
-fn live_history_remove(room: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn live_history_remove(
+    room: String,
+    platform: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let mut cfg = state
         .config
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _ = platform; // 兼容签名；按房间号删除
     cfg.remove_live_history(&room);
     cfg.save().map_err(|e| format!("保存配置失败: {e}"))
+}
+
+/// 按房间顺序重排已保存直播间（拖拽排序持久化）。
+#[tauri::command]
+fn live_history_reorder(
+    order: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cfg.reorder_live_history(&order);
+    cfg.save().map_err(|e| format!("保存配置失败: {e}"))
+}
+
+/// 刷新单个直播间的元数据并持久化缓存；返回最新元数据。
+#[tauri::command]
+async fn live_refresh_meta(
+    platform: String,
+    room: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let plat = crate::live::Platform::parse(&platform);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let room_for_fetch = room.clone();
+    std::thread::spawn(move || {
+        let m = crate::live::fetch_meta(plat, &room_for_fetch);
+        let _ = tx.send(m);
+    });
+    let meta = rx.recv().map_err(|_| "元数据获取失败".to_string())?;
+    let plat_key = plat.key();
+    {
+        let mut cfg = state
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cfg.update_live_meta(
+            &room,
+            plat_key,
+            &meta.title,
+            &meta.nickname,
+            &meta.cover,
+            &meta.room_id,
+            meta.live_status,
+            meta.live_start,
+        );
+        let _ = cfg.save();
+    }
+    Ok(serde_json::json!({
+        "room": room,
+        "platform": plat_key,
+        "title": meta.title,
+        "nickname": meta.nickname,
+        "cover": meta.cover,
+        "room_id": meta.room_id,
+        "live_status": meta.live_status,
+        "duration": crate::live::duration_text(meta.live_start),
+    }))
 }
 
 /// 直播预览帧：按前端视口裁剪最新解码帧并降采样，
@@ -1630,6 +1694,8 @@ pub fn run() {
             live_set_active,
             live_history_push,
             live_history_remove,
+            live_history_reorder,
+            live_refresh_meta,
             set_tile_mode,
             set_scan_region,
             set_preview_active,

@@ -870,12 +870,19 @@ pub fn active_id() -> Option<String> {
 }
 
 /// 设置前台会话：恢复该会话拉流，暂停其余会话。id 为空则全部暂停。
+/// 恢复的会话清空显示队列（丢弃暂停期间积压的旧帧），切换即显示最新画面。
 pub fn set_active(id: &str) {
     set_active_id(Some(id.to_string()));
     let sessions = lock_sessions();
     if let Some(map) = sessions.as_ref() {
         for (k, s) in map {
-            s.paused.store(k != id, Ordering::SeqCst);
+            let was_paused = s.paused.swap(k != id, Ordering::SeqCst);
+            // 从暂停恢复：清空显示队列与发送去重（避免旧帧快进）。
+            if was_paused && k == id {
+                let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
+                f.queue.clear();
+                f.scan_cache = None;
+            }
         }
     }
 }
@@ -916,15 +923,40 @@ pub struct SessionInfo {
     pub duration: String,
 }
 
-/// 直播间元数据（标题/主播/封面/房间号/开播时间）。
+/// 直播间元数据（标题/主播/封面/房间号/开播状态/开播时刻）。
 #[derive(Default, Clone)]
-struct RoomMeta {
-    title: String,
-    nickname: String,
-    cover: String,
-    room_id: String,
+pub struct RoomMeta {
+    pub title: String,
+    pub nickname: String,
+    pub cover: String,
+    pub room_id: String,
+    /// 1 = 直播中，0 = 未开播。
+    pub live_status: i64,
     /// 开播时刻（Unix 秒）；0 = 未知/未开播。
-    live_start: i64,
+    pub live_start: i64,
+}
+
+/// 按平台拉取直播间元数据（供前端轮询刷新用）。
+pub fn fetch_meta(platform: Platform, room: &str) -> RoomMeta {
+    match platform {
+        Platform::Bilibili => fetch_bili_meta(room),
+        Platform::Douyin => {
+            let m = crate::douyin::fetch_meta_sync(room);
+            RoomMeta {
+                title: m.title,
+                nickname: m.nickname,
+                cover: m.cover,
+                room_id: m.room_id,
+                live_status: m.live_status,
+                live_start: m.live_start,
+            }
+        }
+    }
+}
+
+/// 开播时长文本（供命令层格式化）。
+pub fn duration_text(live_start: i64) -> String {
+    format_duration(live_start)
 }
 
 /// 拉取 B站直播间元数据（get_info 接口，免登录）。失败返回默认（不阻塞连接）。
@@ -954,6 +986,7 @@ fn fetch_bili_meta(room: &str) -> RoomMeta {
             .as_i64()
             .map(|x| x.to_string())
             .unwrap_or_default(),
+        live_status,
         live_start: if live_status == 1 {
             d["live_time"].as_i64().unwrap_or(0)
         } else {
@@ -976,8 +1009,8 @@ fn format_duration(start: i64) -> String {
     format!("{h}:{m:02}:{s:02}")
 }
 
-/// 同时监控的直播会话上限（内存 ≈ 30~90MB/路 + 1 解码线程 + 1 连接）。
-const MAX_SESSIONS: usize = 3;
+/// 同时监控的直播会话上限。后台会话暂停拉流（零带宽零解码），故上限放宽。
+const MAX_SESSIONS: usize = 30;
 
 type SessionMap = std::collections::HashMap<String, Arc<LiveSession>>;
 /// 会话池：key = `{platform_key}:{room}`。持锁仅做增删查，消费在锁外

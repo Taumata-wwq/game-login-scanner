@@ -68,24 +68,6 @@
 
   main { flex: 1; overflow: hidden; padding: 10px; display: flex; flex-direction: column; gap: 9px; }
 
-  #btnStart {
-    flex: 1 1 auto; width: 100%;
-    height: 28px; padding: 0 14px;
-    background: var(--primary-bg); color: var(--primary-fg);
-    border: none; border-radius: var(--radius);
-    font: 600 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
-    letter-spacing: 0.02em;
-    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-    cursor: pointer; transition: background 0.1s;
-  }
-  #btnStart:hover { background: #ffffff; }
-  #btnStart.running { background: var(--panel-2); color: #ff8f8f; box-shadow: inset 0 0 0 1px rgba(207, 74, 74, 0.55); }
-  #btnStart.running:hover { background: var(--panel-3); }
-  #btnStart.running::after {
-    content: ""; width: 9px; height: 9px; border-radius: 50%;
-    border: 2px solid rgba(207, 74, 74, 0.3); border-top-color: #ff8f8f;
-    animation: spin 0.8s linear infinite;
-  }
   @keyframes spin { to { transform: rotate(360deg); } }
 
   .sectitle {
@@ -97,13 +79,10 @@
   .sectitle::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 
   /* ===== 扫描区域（实时监视器） ===== */
-  /* 底部固定操作栏 */
-  .startbar { flex: none; display: flex; align-items: center; padding-top: 4px; }
   /* canvas 尺寸由 .vp-stage（16:9）控制。 */
   #previewCanvas.dragging { cursor: grabbing; }
 
   /* ===== 账号区 ===== */
-  .acct-filter { display: flex; align-items: center; gap: 4px; flex: none; }
   .filter-seg { display: flex; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
   .filter-seg button {
     height: 20px; border: none; border-radius: 2px;
@@ -403,6 +382,26 @@
   .game-col .gitem.on { border-color: var(--primary-bg); color: var(--text-strong); font-weight: 600; }
   /* 右列账号列表 + 开始按钮。 */
   .acct-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+  /* 筛选行：官服/B服 左，扫码按钮右对齐。 */
+  .acct-filter { display: flex; align-items: center; gap: 6px; }
+  .acct-filter #btnStart { margin-left: auto; width: auto; }
+  /* 扫码按钮改为小尺寸（与筛选段同高）。 */
+  #btnStart {
+    height: 24px; padding: 0 12px;
+    background: var(--primary-bg); color: var(--primary-fg);
+    border: none; border-radius: var(--radius);
+    font: 600 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    cursor: pointer; transition: background 0.1s;
+  }
+  #btnStart:hover { background: #ffffff; }
+  #btnStart.running { background: var(--panel-2); color: #ff8f8f; box-shadow: inset 0 0 0 1px rgba(207, 74, 74, 0.55); }
+  #btnStart.running:hover { background: var(--panel-3); }
+  #btnStart.running::after {
+    content: ""; width: 9px; height: 9px; border-radius: 50%;
+    border: 2px solid rgba(207, 74, 74, 0.3); border-top-color: #ff8f8f;
+    animation: spin 0.8s linear infinite;
+  }
 
   /* 侧栏 / 右侧 分界拖拽条：拖动调整左右占比。 */
   .vsplit {
@@ -417,16 +416,6 @@
     font: 500 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif; cursor: pointer;
   }
   .plat-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
-  /* 添加直播间弹窗内历史列表。 */
-  .live-h-list { display: flex; flex-direction: column; gap: 2px; max-height: 120px; overflow-y: auto; }
-  .live-h-list .item {
-    display: flex; align-items: center; gap: 6px; padding: 4px 7px; cursor: pointer;
-    border: 1px solid var(--line); border-radius: var(--radius); font-size: 10.5px; color: var(--text);
-  }
-  .live-h-list .item:hover { background: var(--hover); }
-  .live-h-list .item .plat { font-size: 9px; font-weight: 700; padding: 0 3px; border-radius: 2px; background: var(--panel-3); flex: none; }
-  .live-h-list .item .r { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .live-h-list .empty { color: var(--faint); font-size: 10px; text-align: center; padding: 4px; }
 </style>
 </head>
 <body autocomplete="off">
@@ -501,14 +490,12 @@
               <button data-f="bilibili">B 服</button>
               <button data-f="hypergryph" hidden>鹰角</button>
             </div>
-          </div>
-          <div class="acct-list" id="acctList"></div>
-          <div class="startbar">
             <button id="btnStart" title="开始 / 停止扫码">
               <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
               <span>开始扫码</span>
             </button>
           </div>
+          <div class="acct-list" id="acctList"></div>
         </div>
       </div>
     </section>
@@ -540,8 +527,7 @@
           <div class="flbl">备注（可选）</div>
           <input type="text" id="addLiveNote" placeholder="如主播名，留空则用默认" maxlength="32" autocomplete="off" />
         </div>
-        <div class="live-h-list" id="addLiveHistory"></div>
-        <button class="btn block" id="btnAddLiveSave">添加并连接</button>
+        <button class="btn block" id="btnAddLiveSave">添加</button>
       </div>
     </div>
   </div>
@@ -716,8 +702,11 @@
   const $ = (id) => document.getElementById(id);
   const logEl = $('log');
 
-  // 全局错误捕获：极验等第三方脚本异常写入日志，便于诊断。
+  // 全局错误捕获：仅记录脚本运行时错误（e.target 为 window）。
+  // 资源加载失败（img/script 等，e.target 为元素、message 为空）不记录——
+  // 否则每个封面加载失败都会刷一条「脚本错误: @」。
   window.addEventListener('error', (e) => {
+    if (e.target && e.target !== window) return;
     try { log('脚本错误: ' + (e.message || '') + ' @ ' + (e.filename || ''), 'error'); } catch (x) {}
   }, true);
   window.addEventListener('unhandledrejection', (e) => {
@@ -1694,7 +1683,19 @@
     badge.className = 'badge ' + stCls;
   }
 
-  // 渲染侧栏直播间列表（"桌面"卡片 + 会话卡片 + 添加按钮）。
+  // 已保存直播间列表（来自 config.live_history，含元数据缓存；含未开播）。
+  let liveRooms = [];
+
+  // 拉取已保存直播间列表（含元数据缓存）。
+  async function reloadLiveRooms() {
+    try {
+      const cfg = await invoke('get_config');
+      liveRooms = cfg.live_history || [];
+    } catch (e) { /* 忽略 */ }
+    renderLiveTabs();
+  }
+
+  // 渲染侧栏直播间列表（"桌面"卡片 + 已保存直播间卡片 + 添加按钮）。
   function renderLiveTabs() {
     const box = $('roomList');
     box.innerHTML = '';
@@ -1717,18 +1718,23 @@
     desk.addEventListener('mousedown', () => exitLiveMode());
     box.appendChild(desk);
 
-    // 2) 直播会话卡片（封面/名/id/主播/状态）。
-    for (const s of liveSessions) {
+    // 2) 已保存直播间卡片（封面/标题/主播/状态）。含未开播。
+    for (const s of liveRooms) {
+      const id = s.platform + ':' + s.room;
+      const sess = liveSessions.find((x) => x.id === id);
+      const active = activeLiveId === id;
+      const live = (sess ? sess.status : (s.live_status === 1 ? 'live' : 'off'));
       const card = document.createElement('div');
-      card.className = 'room-card' + (s.id === activeLiveId ? ' on' : '');
+      card.className = 'room-card' + (active ? ' on' : '');
       card.draggable = true;
-      card.dataset.id = s.id;
+      card.dataset.id = id;
       const thumb = document.createElement('div');
       thumb.className = 'thumb';
       if (s.cover) {
         const img = document.createElement('img');
         img.src = s.cover;
         img.alt = '';
+        img.referrerPolicy = 'no-referrer';
         img.addEventListener('error', () => { thumb.innerHTML = '<span class="ph">●</span>'; });
         thumb.appendChild(img);
       } else {
@@ -1738,38 +1744,46 @@
       meta.className = 'meta';
       const rn = document.createElement('div');
       rn.className = 'rname';
-      rn.textContent = s.note || s.title || s.room;
+      // 第一行：标题（回退备注/房间号）。
+      rn.textContent = s.title || s.note || s.room;
       const rs = document.createElement('div');
       rs.className = 'rsub';
-      rs.textContent = (s.nickname ? s.nickname + ' · ' : '') + s.room;
+      // 第二行：主播名（回退房间号）。
+      rs.textContent = s.nickname || ('房间 ' + s.room);
       meta.append(rn, rs);
       const st = document.createElement('span');
-      st.className = 'st ' + (s.status === 'live' ? 'live' : s.status === 'scan' ? 'scan' : s.status === 'done' ? 'done' : 'off');
-      st.textContent = s.status === 'live' ? '直播中' : s.status === 'scan' ? '识别中' : s.status === 'done' ? '已确认' : '待机';
+      const stCls = live === 'scan' ? 'scan' : live === 'done' ? 'done' : live === 'live' ? 'live' : 'off';
+      st.className = 'st ' + stCls;
+      st.textContent = live === 'scan' ? '识别中' : live === 'done' ? '已确认' : live === 'live' ? '直播中' : '未开播';
       const x = document.createElement('span');
       x.className = 'x';
       x.textContent = '✕';
-      x.title = '停止该直播间';
+      x.title = '移除该直播间';
       x.style.cssText = 'color:var(--faint);cursor:pointer;padding:0 3px;flex:none;';
-      x.addEventListener('mousedown', (ev) => { ev.stopPropagation(); closeLive(s.id); });
+      x.addEventListener('mousedown', (ev) => { ev.stopPropagation(); removeRoom(id); });
       card.append(thumb, meta, st, x);
-      card.addEventListener('mousedown', (ev) => { if (ev.target !== x) switchLive(s.id); });
-      // 拖拽排序。
+      card.addEventListener('mousedown', (ev) => {
+        if (ev.target === x) return;
+        // 未开播：尝试连接（可能报未开播）；开播或已有会话：切换。
+        switchLive(id);
+      });
+      // 拖拽排序（持久化到 config 顺序）。
       card.addEventListener('dragstart', (ev) => {
-        dragSrcId = s.id;
+        dragSrcId = id;
         card.classList.add('dragging');
         ev.dataTransfer.effectAllowed = 'move';
       });
       card.addEventListener('dragend', () => { card.classList.remove('dragging'); dragSrcId = null; });
       card.addEventListener('dragover', (ev) => {
         ev.preventDefault();
-        if (!dragSrcId || dragSrcId === s.id) return;
-        const from = liveSessions.findIndex((x) => x.id === dragSrcId);
-        const to = liveSessions.findIndex((x) => x.id === s.id);
+        if (!dragSrcId || dragSrcId === id) return;
+        const from = liveRooms.findIndex((x) => (x.platform + ':' + x.room) === dragSrcId);
+        const to = liveRooms.findIndex((x) => (x.platform + ':' + x.room) === id);
         if (from < 0 || to < 0 || from === to) return;
-        const [moved] = liveSessions.splice(from, 1);
-        liveSessions.splice(to, 0, moved);
+        const [moved] = liveRooms.splice(from, 1);
+        liveRooms.splice(to, 0, moved);
         renderLiveTabs();
+        invoke('live_history_reorder', { order: liveRooms.map((x) => x.room) }).catch(() => {});
       });
       box.appendChild(card);
     }
@@ -1788,8 +1802,18 @@
   let dragSrcId = null;
 
   // 切换主画面到指定会话（保存旧视图、恢复该会话视图、切换后端前台）。
-  function switchLive(id) {
+  // 未连接的房间：先按需连接。
+  async function switchLive(id) {
     if (activeLiveId === id) return;
+    const sep = id.indexOf(':');
+    const platform = id.slice(0, sep);
+    const room = id.slice(sep + 1);
+    // 未连接 → 连接（可能未开播，报错后仅高亮不切画面）。
+    if (!liveSessions.some((s) => s.id === id)) {
+      try {
+        await connectLive(platform, room, '');
+      } catch (e) { /* connectLive 内部已日志 */ return; }
+    }
     // 保存当前会话的视图。
     if (activeLiveId) liveViews.set(activeLiveId, { ...view });
     activeLiveId = id;
@@ -1808,6 +1832,53 @@
     updateVpInfo();
     // 立即拉新会话的帧（不等下一轮 previewLoop，切换更跟手）。
     refreshPreview().catch(() => {});
+  }
+
+  // 元数据轮询：每 10s 一轮，逐个刷新已保存直播间（每个间隔 2s）。
+  let metaPollTimer = null;
+  let metaPollRunning = false;
+  async function pollMetaRound() {
+    if (metaPollRunning) return;
+    metaPollRunning = true;
+    try {
+      const rooms = liveRooms.slice();
+      for (const r of rooms) {
+        try {
+          const m = await invoke('live_refresh_meta', { platform: r.platform, room: r.room });
+          // 更新本地缓存 + 重渲染。
+          const local = liveRooms.find((x) => x.platform === r.platform && x.room === r.room);
+          if (local && m) {
+            local.title = m.title || local.title;
+            local.nickname = m.nickname || local.nickname;
+            local.cover = m.cover || local.cover;
+            local.room_id = m.room_id || local.room_id;
+            local.live_status = m.live_status;
+            renderLiveTabs();
+          }
+        } catch (e) { /* 忽略单个失败 */ }
+        await new Promise((res) => setTimeout(res, 2000));
+      }
+    } finally {
+      metaPollRunning = false;
+    }
+  }
+  function startMetaPoll() {
+    if (metaPollTimer) return;
+    metaPollTimer = setInterval(pollMetaRound, 10000);
+  }
+
+  // 移除已保存直播间（停会话 + 从 config 删除 + 刷新）。
+  async function removeRoom(id) {
+    const sep = id.indexOf(':');
+    const platform = id.slice(0, sep);
+    const room = id.slice(sep + 1);
+    if (liveSessions.some((s) => s.id === id)) closeLive(id);
+    liveRooms = liveRooms.filter((r) => !(r.platform === platform && r.room === room));
+    renderLiveTabs();
+    try {
+      await invoke('live_history_remove', { room, platform });
+      await reloadLiveRooms();
+    } catch (e) { /* 忽略 */ }
   }
 
   // 关闭指定会话（前端调后端停止，再刷新列表）。
@@ -1850,42 +1921,8 @@
     $('addLiveRoom').value = '';
     $('addLiveNote').value = '';
     addLiveNote = '';
-    // 刷新历史列表。
-    invoke('get_config')
-      .then((cfg) => { liveHistory = cfg.live_history || []; renderAddLiveHistory(); })
-      .catch(() => { renderAddLiveHistory(); });
     $('addLiveOverlay').hidden = false;
     setTimeout(() => $('addLiveRoom').focus(), 50);
-  }
-  function renderAddLiveHistory() {
-    const box = $('addLiveHistory');
-    if (!box) return;
-    box.textContent = '';
-    const items = liveHistory.slice(0, 8);
-    if (!items.length) {
-      const d = document.createElement('div');
-      d.className = 'empty';
-      d.textContent = '暂无历史直播间';
-      box.appendChild(d);
-      return;
-    }
-    for (const e of items) {
-      const it = document.createElement('div');
-      it.className = 'item';
-      const p = document.createElement('span');
-      p.className = 'plat';
-      p.textContent = (e.platform === 'douyin') ? '抖音' : 'B站';
-      const r = document.createElement('span');
-      r.className = 'r';
-      r.textContent = (e.note ? e.note + ' · ' : '') + e.room;
-      it.append(p, r);
-      it.addEventListener('mousedown', () => {
-        addLivePlatform = e.platform || 'bilibili';
-        for (const b of $('addLivePlat').querySelectorAll('button')) b.classList.toggle('on', b.dataset.p === addLivePlatform);
-        $('addLiveRoom').value = e.room;
-      });
-      box.appendChild(it);
-    }
   }
   // 平台选择段。
   $('addLivePlat').addEventListener('click', (e) => {
@@ -1903,17 +1940,17 @@
   });
   $('addLiveRoom').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btnAddLiveSave').click(); });
 
-  // 连接直播间（platform/room/note 明确传入）。
+  // 连接直播间（platform/room/note 明确传入）。未开播不抛异常。
   async function connectLive(platform, room, note) {
     const id = platform + ':' + room;
+    // 先持久化该房间（无论开播与否），保证左栏始终可见。
+    try { await invoke('live_history_push', { room, platform, note: note || '' }); } catch (e) {}
     if (liveSessions.some((s) => s.id === id)) {
-      switchLive(id);
+      await reloadLiveRooms();
       return;
     }
     try {
       const info = await invoke('live_start', { platform, room });
-      // 记录历史（含备注）。
-      invoke('live_history_push', { room, platform, note: note || '' }).catch(() => {});
       if (note) info.note = note;
       info.status = 'live';   // 已连接 → 直播中
       liveSessions.push(info);
@@ -1921,11 +1958,33 @@
       if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
       if (tileMode) { invoke('set_tile_mode', { x: 0, y: 0, w: 0, h: 0, on: false }).catch(() => {}); tileMode = false; }
       invoke('set_preview_active', { active: false }).catch(() => {});
-      switchLive(info.id);
       log('已连接' + livePlatformLabel(platform) + '直播间 ' + room + '（' + info.w + '×' + info.h + '），预览与扫码已切换', 'success');
     } catch (e) {
-      log('连接' + livePlatformLabel(platform) + '直播间 ' + room + ' 失败: ' + e, 'error');
+      log('直播间 ' + room + '：' + e, 'info');
     }
+    await reloadLiveRooms();
+    if (liveSessions.some((s) => s.id === id)) {
+      switchLiveNow(id);
+    }
+  }
+
+  // 仅切换主画面（不触发连接）——供 connectLive 成功后调用，避免递归。
+  function switchLiveNow(id) {
+    if (activeLiveId === id) return;
+    if (activeLiveId) liveViews.set(activeLiveId, { ...view });
+    activeLiveId = id;
+    invoke('live_set_active', { id }).catch(() => {});
+    const s = activeSession();
+    if (s && s.w > 0 && s.h > 0) {
+      preview = { mon: { x: 0, y: 0, w: s.w, h: s.h } };
+      const saved = liveViews.get(id);
+      view = saved ? { ...saved } : { scale: 1, fx: 0.5, fy: 0.5 };
+      viewT = { ...view };
+      srcCanvas = null;
+    }
+    renderLiveTabs();
+    updateVpInfo();
+    refreshPreview().catch(() => {});
   }
 
   // 直播帧拉取：协议与屏幕预览一致（24 字节头 + RGBA），mon = 流原始尺寸，
@@ -2481,6 +2540,10 @@
     }
     renderAll();
     invoke('refresh_official_unames').catch(() => {});
+    // 加载已保存直播间（含未开播）并启动元数据轮询。
+    await reloadLiveRooms();
+    pollMetaRound();
+    startMetaPoll();
     log('应用就绪。添加账号后点击「开始扫码」即可自动识别并登录', 'info');
     startPreview();
   }
