@@ -32,12 +32,15 @@ const MAX_REDIRECTS: usize = 6;
 pub type Headers = Vec<(String, String)>;
 
 /// 头部值 ASCII 化：非 ASCII 字节按 UTF-8 百分号编码（HTTP/1.1 头仅允许
-/// 可见 ASCII）。米哈游 x-rpc 头参考协议本身即用百分号编码
-/// （如 `Chrome%20152.0.0.0`），服务端可正常处理；已有 `%` 原样保留防二次编码。
+/// 可见 ASCII）。中文（device_name 等）借此安全传输。
+///
+/// `%` 原样保留（不做二次编码）：调用方传入的值可能**本就是**百分号编码
+/// （如抖音 ttwid 的 `1%7C…`、米哈游 x-rpc-aigis 的 `…%2B…`）——若把 `%`
+/// 再编成 `%25`，服务端解析出的值错误（实测导致抖音 enter 接口返回空 body）。
 pub fn header_utf8(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
-        if b.is_ascii() && b != b'%' {
+        if b.is_ascii() {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{b:02X}"));
@@ -311,7 +314,7 @@ fn api_tls_connect(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, String> 
                 Ok(_) => Ok(Box::new(t)),
                 Err(alert) => {
                     log::info!("rustls 握手被拒（{alert}），回退 schannel");
-                    tls_connect_schannel(host, port)
+                    tls_connect_schannel(host, port, READ_TIMEOUT)
                 }
             }
         }
@@ -320,7 +323,11 @@ fn api_tls_connect(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, String> 
 }
 
 /// schannel 回退（Windows 系统栈）。
-fn tls_connect_schannel(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, String> {
+fn tls_connect_schannel(
+    host: &str,
+    port: u16,
+    read_timeout: Duration,
+) -> Result<Box<dyn ReadWrite>, String> {
     use schannel::tls_stream;
     let addr = (host, port)
         .to_socket_addrs()
@@ -330,7 +337,7 @@ fn tls_connect_schannel(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, Str
     let tcp = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
         .map_err(|e| format!("连接 {host}:{port} 失败: {e}"))?;
     tcp.set_nodelay(true).ok();
-    tcp.set_read_timeout(Some(READ_TIMEOUT))
+    tcp.set_read_timeout(Some(read_timeout))
         .map_err(|e| format!("设置读超时失败: {e}"))?;
     let cred = schannel::schannel_cred::SchannelCred::builder()
         .acquire(schannel::schannel_cred::Direction::Outbound)
@@ -344,8 +351,31 @@ fn tls_connect_schannel(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, Str
 
 /// Read + Write 组合 trait（双 TLS 栈的统一流类型）。
 /// 需要 Send：连接池为进程级 static（跨线程共享/归还）。
-trait ReadWrite: Read + Write + Send {}
+pub(crate) trait ReadWrite: Read + Write + Send {}
 impl<T: Read + Write + Send> ReadWrite for T {}
+
+/// 流式连接的 TLS 建链：rustls 优先，握手被拒时回退 schannel。
+///
+/// 与 `api_tls_connect` 同策略，但可指定读超时（FLV 流用 3 秒慢流检测）。
+/// **抖音 CDN 对 rustls ClientHello 指纹回 ProtocolVersion alert**（实测；
+/// curl/OpenSSL/schannel 正常）——B站 CDN 对 rustls 正常，故此前流路径只用
+/// rustls 未回退，导致抖音大批节点连接失败。此函数统一补齐回退。
+pub(crate) fn stream_tls_connect(
+    host: &str,
+    port: u16,
+    read_timeout: Duration,
+) -> Result<Box<dyn ReadWrite>, String> {
+    match tls_connect(host, port, read_timeout) {
+        Ok(mut t) => match t.conn.complete_io(&mut t.sock) {
+            Ok(_) => Ok(Box::new(t)),
+            Err(alert) => {
+                log::info!("流 rustls 握手被拒（{alert}），回退 schannel");
+                tls_connect_schannel(host, port, read_timeout)
+            }
+        },
+        Err(e) => Err(e),
+    }
+}
 
 // ---------- API 连接池 ----------
 

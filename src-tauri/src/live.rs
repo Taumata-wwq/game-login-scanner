@@ -21,6 +21,38 @@ use crate::http::header_utf8;
 
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
+// ---------- 直播平台 ----------
+
+/// 直播平台。B站：免登录 API + qn 档位降级；抖音：ttwid 三步解析（无档位）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Bilibili,
+    Douyin,
+}
+
+impl Platform {
+    /// 从前端传入的字符串解析平台（默认 B站以兼容旧调用）。
+    pub fn parse(s: &str) -> Platform {
+        match s {
+            "douyin" => Platform::Douyin,
+            _ => Platform::Bilibili,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Platform::Bilibili => "B站",
+            Platform::Douyin => "抖音",
+        }
+    }
+}
+
+/// 解析出的流源：候选 (url, referer) 列表 + 可选 Cookie（抖音需 ttwid）。
+pub struct StreamSource {
+    pub candidates: Vec<(String, String)>,
+    pub cookie: Option<String>,
+}
+
 // ---------- 流地址解析 ----------
 
 /// 解析 B站直播间为 http-flv 拉流地址，返回 (url, referer)。
@@ -173,6 +205,27 @@ pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>,
     // 按 host 去重，避免同一节点重复。
     out.dedup_by(|a, b| host_of(&a.0) == host_of(&b.0));
     Ok(out)
+}
+
+/// 按平台解析流源（解码线程重连与探针共用）。返回候选列表 + 可选 Cookie。
+pub fn resolve_source_sync(
+    platform: Platform,
+    room: &str,
+    qn: u32,
+) -> Result<StreamSource, String> {
+    match platform {
+        Platform::Bilibili => resolve_stream_sync(room, qn).map(|candidates| StreamSource {
+            candidates,
+            cookie: None,
+        }),
+        Platform::Douyin => {
+            let (url, referer, cookie) = crate::douyin::resolve_sync(room)?;
+            Ok(StreamSource {
+                candidates: vec![(url, referer)],
+                cookie: Some(cookie),
+            })
+        }
+    }
 }
 
 /// 从 URL 中提取 CDN 主机名（节点去重用）。
@@ -711,6 +764,7 @@ struct LiveSession {
     stop: Arc<AtomicBool>,
     frames: Arc<Mutex<Frames>>,
     room: String,
+    platform: Platform,
 }
 
 static LIVE: Mutex<Option<LiveSession>> = Mutex::new(None);
@@ -720,12 +774,20 @@ fn lock_live() -> std::sync::MutexGuard<'static, Option<LiveSession>> {
 }
 
 /// 启动直播会话（解析流地址 + 启动解码线程，阻塞至拿到首帧或超时）。
-pub async fn start(room: String) -> Result<(u32, u32), String> {
+pub async fn start(platform: Platform, room: String) -> Result<(u32, u32), String> {
     stop();
     *LAST_SENT.lock().unwrap_or_else(PoisonError::into_inner) = None;
     // 初始校验：房间可解析、可开播（失败快速反馈给前端）；
     // 实际拉流地址由解码线程每次连接/重连时重新获取（新 expires，自愈临时故障）。
-    resolve_stream(&room, 10000).await?;
+    match platform {
+        Platform::Bilibili => {
+            resolve_stream(&room, 10000).await?;
+        }
+        Platform::Douyin => {
+            // 仅做一次解析校验（能否拿到流）；实际拉流由解码线程每次重连时重新解析。
+            crate::douyin::resolve(&room).await?;
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(Mutex::new(Frames {
         queue: std::collections::VecDeque::new(),
@@ -737,7 +799,7 @@ pub async fn start(room: String) -> Result<(u32, u32), String> {
     let (room2, stop2, frames2, fail2) = (room.clone(), stop.clone(), frames.clone(), fail.clone());
     std::thread::Builder::new()
         .name("live-decode".into())
-        .spawn(move || decode_loop(room2, stop2, frames2, fail2))
+        .spawn(move || decode_loop(platform, room2, stop2, frames2, fail2))
         .map_err(|e| format!("解码线程启动失败: {e}"))?;
     // 等首帧（流建立 + 关键帧到达，通常 1~4 秒）。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -752,6 +814,7 @@ pub async fn start(room: String) -> Result<(u32, u32), String> {
                         stop,
                         frames,
                         room: room.clone(),
+                        platform,
                     });
                     return Ok((w, h));
                 }
@@ -777,7 +840,7 @@ pub async fn start(room: String) -> Result<(u32, u32), String> {
 pub fn stop() {
     if let Some(s) = lock_live().take() {
         s.stop.store(true, Ordering::SeqCst);
-        log::info!("直播会话已断开（B站 {}）", s.room);
+        log::info!("直播会话已断开（{} {}）", s.platform.label(), s.room);
     }
 }
 
@@ -1048,22 +1111,40 @@ fn set_fail(fail: &FailFlag, reason: &str) {
     *fail.lock().unwrap_or_else(PoisonError::into_inner) = Some(reason.to_string());
 }
 
-fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, fail: FailFlag) {
-    // 按房间实际提供的档位构建降级链（不同房间档位不同）。
-    let qn_chain = fetch_qn_chain(&room);
-    log::info!("房间 {room} 清晰度档位链: {qn_chain:?}");
+fn decode_loop(
+    platform: Platform,
+    room: String,
+    stop: Arc<AtomicBool>,
+    frames: Arc<Mutex<Frames>>,
+    fail: FailFlag,
+) {
+    // 按房间实际提供的档位构建降级链（不同房间档位不同）。抖音无档位概念。
+    let qn_chain = if platform == Platform::Bilibili {
+        fetch_qn_chain(&room)
+    } else {
+        vec![10000]
+    };
+    log::info!(
+        "{} 房间 {room} 清晰度档位链: {qn_chain:?}",
+        platform.label()
+    );
     let mut fails = 0u32;
     let mut qn_idx = 0usize;
     // 候选节点池（多 CDN 节点轮换：固定一个可能撞上慢/故障节点）。
     let mut candidates: Vec<(String, String)> = Vec::new();
+    // 抖音拉流需带 ttwid Cookie（B站为 None）。
+    let mut cookie: Option<String> = None;
     let mut cand_used = 0usize;
     loop {
         if stop.load(Ordering::SeqCst) {
             return;
         }
         if candidates.is_empty() {
-            candidates = match resolve_stream_sync(&room, qn_chain[qn_idx]) {
-                Ok(c) => c,
+            match resolve_source_sync(platform, &room, qn_chain[qn_idx]) {
+                Ok(src) => {
+                    candidates = src.candidates;
+                    cookie = src.cookie;
+                }
                 Err(e) => {
                     log::warn!("解析流地址失败: {e}");
                     // 下播/未开播：API 已明确判定，重试无意义——立即关闭会话，
@@ -1071,21 +1152,24 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
                     // 画面停格数秒）。
                     if e.contains("未开播") {
                         log::info!("直播间已下播，立即关闭会话");
-                        set_fail(&fail, &format!("B站直播间 {room} 已下播"));
+                        set_fail(&fail, &format!("{}直播间 {room} 已下播", platform.label()));
                         remove_session_if(&frames);
                         return;
                     }
                     fails += 1;
                     if fails > 4 {
                         log::error!("直播流连续解析失败，会话关闭");
-                        set_fail(&fail, &format!("B站直播间 {room} 流地址解析失败：{e}"));
+                        set_fail(
+                            &fail,
+                            &format!("{}直播间 {room} 流地址解析失败：{e}", platform.label()),
+                        );
                         remove_session_if(&frames);
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(400));
                     continue;
                 }
-            };
+            }
             cand_used = 0;
         }
         if cand_used >= candidates.len() {
@@ -1105,7 +1189,14 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
         let session_result = if is_hls {
             decode_hls_session(&url, &referer, &stop, &frames)
         } else {
-            decode_session(&url, &referer, &stop, &frames, allow_degrade)
+            decode_session(
+                &url,
+                &referer,
+                cookie.as_deref(),
+                &stop,
+                &frames,
+                allow_degrade,
+            )
         };
         match session_result {
             Ok(()) => return, // 收到停止信号
@@ -1121,7 +1212,10 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
                 log::error!("最低清晰度仍无法解码，会话关闭");
                 set_fail(
                     &fail,
-                    &format!("B站直播间 {room} 编码格式不受支持（H.264 解码失败）"),
+                    &format!(
+                        "{}直播间 {room} 编码格式不受支持（H.264 解码失败）",
+                        platform.label()
+                    ),
                 );
                 remove_session_if(&frames);
                 return;
@@ -1154,7 +1248,10 @@ fn decode_loop(room: String, stop: Arc<AtomicBool>, frames: Arc<Mutex<Frames>>, 
             log::error!("直播流连续重连失败，会话关闭");
             set_fail(
                 &fail,
-                &format!("B站直播间 {room} 连接失败（CDN 节点均不可用）"),
+                &format!(
+                    "{}直播间 {room} 连接失败（CDN 节点均不可用）",
+                    platform.label()
+                ),
             );
             remove_session_if(&frames);
             return;
@@ -1365,7 +1462,7 @@ const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(3);
 /// chunked 长连接会卡死（10 秒仅读到 2 个 tag，curl 同流 60fps 正常）。
 /// 这里手写 GET + chunked 解码，读超时兼作慢流检测。
 pub struct HttpFlvReader {
-    stream: Box<dyn Read>,
+    stream: Box<dyn Read + Send>,
     /// 响应是否用 chunked 传输编码。
     /// **关键**：B站不同 CDN 服务器行为不一——JSP3 返回 chunked，Tengine 返回
     /// 裸 FLV（Connection: close 直出）。必须按响应头区分，否则裸流会被误当
@@ -1429,7 +1526,7 @@ impl HttpFlvReader {
     ///
     /// **跟随重定向**：B站 CDN 常返回 302 跳转到实际流节点（curl -L 同行为）。
     /// 早期实现把 302 当"节点不可用"直接失败，导致永远读不到流。
-    pub fn connect(url: &str, referer: &str) -> Result<Self, String> {
+    pub fn connect(url: &str, referer: &str, cookie: Option<&str>) -> Result<Self, String> {
         let mut current = url.to_string();
         // 302 跳转链一般 1~2 跳，给足 6 次冗余。
         for _ in 0..6 {
@@ -1438,17 +1535,20 @@ impl HttpFlvReader {
             if !https {
                 return Err("明文 http 已禁用".to_string());
             }
-            // rustls：纯 Rust TLS。Windows schannel（native-tls）对该 CDN 长连接
-            // 会出现读乱码/EOF（同请求 curl / OpenSSL / rustls 均正常拿到 FLV）。
+            // rustls 优先，握手被拒时回退 schannel：B站 CDN rustls 正常；
+            // 抖音 CDN 对 rustls 指纹回 ProtocolVersion（回退 schannel 后可连）。
             // 读超时兼作慢流检测（3 秒无数据换节点）。
-            let mut tls = crate::http::tls_connect(&host, port, STREAM_READ_TIMEOUT)?;
+            let mut tls = crate::http::stream_tls_connect(&host, port, STREAM_READ_TIMEOUT)?;
+            let cookie_line = cookie
+                .map(|c| format!("Cookie: {c}\r\n"))
+                .unwrap_or_default();
             write!(
                 tls,
                 "GET {path} HTTP/1.1
 Host: {host}
 User-Agent: {BROWSER_UA}
 Referer: {referer}
-Accept: */*
+{cookie_line}Accept: */*
 Connection: keep-alive
 
 "
@@ -1565,11 +1665,12 @@ fn read_exact(reader: &mut impl Read, buf: &mut Vec<u8>, n: usize) -> Result<(),
 fn decode_session(
     url: &str,
     referer: &str,
+    cookie: Option<&str>,
     stop: &AtomicBool,
     frames: &Arc<Mutex<Frames>>,
     allow_degrade: bool,
 ) -> Result<(), String> {
-    let mut reader = HttpFlvReader::connect(url, referer)?;
+    let mut reader = HttpFlvReader::connect(url, referer, cookie)?;
 
     // FLV 头（9 字节）+ PreviousTagSize0（4 字节）。
     let mut hdr = Vec::new();
@@ -1901,7 +2002,7 @@ pub fn probe_room(room: &str, secs: u64) -> ProbeRoomResult {
             if is_hls {
                 decode_hls_session(&url, &referer, &s2, &f2)
             } else {
-                decode_session(&url, &referer, &s2, &f2, false)
+                decode_session(&url, &referer, None, &s2, &f2, false)
             }
         });
     let handle = match handle {
@@ -1944,6 +2045,118 @@ pub fn probe_room(room: &str, secs: u64) -> ProbeRoomResult {
         }
         Err(e) => {
             // 中途错误：有帧则属「部分失败」（分析时按 frames 区分），保留 error。
+            res.ok = false;
+            res.error = Some(e);
+        }
+    }
+    res
+}
+
+/// 按平台 + 房间号做完整生产链冒烟测试（解析 → 解码）。
+/// 抖音房间用 web_rid，走 `resolve_source_sync`（ttwid + enter）。
+pub fn probe_room_platform(platform: Platform, room: &str, secs: u64) -> ProbeRoomResult {
+    let t0 = std::time::Instant::now();
+    let mut res = ProbeRoomResult {
+        is_hls: false,
+        ok: false,
+        error: None,
+        frames: 0,
+        fps: 0.0,
+        w: 0,
+        h: 0,
+        elapsed_ms: 0,
+    };
+    let src = match resolve_source_sync(platform, room, 10000) {
+        Ok(s) if !s.candidates.is_empty() => s,
+        Ok(_) => {
+            res.error = Some("无可用流地址".to_string());
+            res.elapsed_ms = t0.elapsed().as_millis() as u64;
+            return res;
+        }
+        Err(e) => {
+            res.error = Some(e);
+            res.elapsed_ms = t0.elapsed().as_millis() as u64;
+            return res;
+        }
+    };
+    let (url, referer) = src.candidates[0].clone();
+    let mut r2 = probe_flv_url(&url, &referer, src.cookie.as_deref(), secs);
+    // 保留解析耗时计入总耗时。
+    r2.elapsed_ms += t0.elapsed().as_millis() as u64;
+    r2
+}
+
+/// 按给定 FLV/HLS 直链做解码冒烟测试（诊断用）。`cookie` 可选（抖音直链无需）。
+/// 与 `probe_room` 同构，但跳过解析步骤——用于验证「已有直链」的解码链健康度。
+pub fn probe_flv_url(url: &str, referer: &str, cookie: Option<&str>, secs: u64) -> ProbeRoomResult {
+    let t0 = std::time::Instant::now();
+    let mut res = ProbeRoomResult {
+        is_hls: url.contains(".m3u8"),
+        ok: false,
+        error: None,
+        frames: 0,
+        fps: 0.0,
+        w: 0,
+        h: 0,
+        elapsed_ms: 0,
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let frames = Arc::new(Mutex::new(Frames {
+        queue: std::collections::VecDeque::new(),
+        latest: None,
+        scan_cache: None,
+        next_seq: 0,
+    }));
+    let (s2, f2) = (stop.clone(), frames.clone());
+    let is_hls = res.is_hls;
+    let (url, referer, cookie) = (
+        url.to_string(),
+        referer.to_string(),
+        cookie.map(std::string::ToString::to_string),
+    );
+    let handle = std::thread::Builder::new()
+        .name("probe-flv".into())
+        .spawn(move || {
+            if is_hls {
+                decode_hls_session(&url, &referer, &s2, &f2)
+            } else {
+                decode_session(&url, &referer, cookie.as_deref(), &s2, &f2, false)
+            }
+        });
+    let handle = match handle {
+        Ok(h) => h,
+        Err(e) => {
+            res.error = Some(format!("解码线程启动失败: {e}"));
+            res.elapsed_ms = t0.elapsed().as_millis() as u64;
+            return res;
+        }
+    };
+    std::thread::sleep(Duration::from_secs(secs));
+    stop.store(true, Ordering::SeqCst);
+    let decode_result = handle
+        .join()
+        .unwrap_or_else(|_| Err("解码线程异常退出".to_string()));
+    let (frames_n, w, h) = {
+        let f = frames.lock().unwrap_or_else(PoisonError::into_inner);
+        (
+            f.next_seq as u32,
+            f.latest.as_ref().map_or(0, |x| x.w),
+            f.latest.as_ref().map_or(0, |x| x.h),
+        )
+    };
+    res.frames = frames_n;
+    res.w = w;
+    res.h = h;
+    res.fps = frames_n as f64 / secs.max(1) as f64;
+    res.elapsed_ms = t0.elapsed().as_millis() as u64;
+    match decode_result {
+        Ok(()) => {
+            res.ok = frames_n > 0;
+            if !res.ok {
+                res.error = Some("测试时长内无视频帧".to_string());
+            }
+        }
+        Err(e) => {
             res.ok = false;
             res.error = Some(e);
         }

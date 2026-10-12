@@ -519,12 +519,20 @@ impl AppConfig {
     /// 保存到磁盘（原子写：先写临时文件再 rename，避免写一半崩溃损坏配置）。
     /// Windows 上 rename 通过 MoveFileEx(REPLACE_EXISTING) 实现，可安全覆盖目标。
     /// 记录直播间使用历史（去重置顶；超出上限丢弃最旧）。
-    pub fn push_live_history(&mut self, room: &str) {
+    /// `platform` 为 "bilibili" / "douyin"，兼容旧值 "bili"。
+    pub fn push_live_history(&mut self, room: &str, platform: &str) {
         let room = room.trim();
         if room.is_empty() {
             return;
         }
-        self.live_history.retain(|e| e.room != room);
+        let platform = if platform == "douyin" {
+            "douyin"
+        } else {
+            "bilibili"
+        };
+        // 同一房间号可能跨平台存在，按 (platform, room) 去重。
+        self.live_history
+            .retain(|e| !(e.room == room && e.platform == platform));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -533,7 +541,7 @@ impl AppConfig {
             0,
             LiveHistoryEntry {
                 room: room.to_string(),
-                platform: "bili".to_string(),
+                platform: platform.to_string(),
                 note: String::new(),
                 last_used: now,
             },
@@ -541,7 +549,7 @@ impl AppConfig {
         self.live_history.truncate(LIVE_HISTORY_MAX);
     }
 
-    /// 删除指定直播间的历史条目。返回是否存在过。
+    /// 删除指定直播间的历史条目（忽略平台，删除该房间号全部记录）。返回是否存在过。
     pub fn remove_live_history(&mut self, room: &str) -> bool {
         let before = self.live_history.len();
         self.live_history.retain(|e| e.room != room);

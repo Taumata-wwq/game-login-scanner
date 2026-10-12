@@ -5,6 +5,7 @@ pub mod config;
 pub mod constants;
 pub mod crypto;
 pub mod decode;
+pub mod douyin;
 pub mod duplication;
 pub mod hls;
 pub mod http;
@@ -1232,10 +1233,10 @@ fn set_preview_active(active: bool) {
 
 /// 启动直播会话：解析平台直播间为 http-flv 流并开始解码，
 /// 阻塞至拿到首帧（前端随后用 capture_live_frame 拉取视口画面）。
-/// 返回 (流宽, 流高)。
+/// `platform` 为 "bilibili"（默认）或 "douyin"。返回 (流宽, 流高)。
 #[tauri::command]
-async fn live_start(room: String) -> Result<(u32, u32), String> {
-    crate::live::start(room).await
+async fn live_start(platform: String, room: String) -> Result<(u32, u32), String> {
+    crate::live::start(crate::live::Platform::parse(&platform), room).await
 }
 
 /// 停止直播会话（预览恢复屏幕画面，扫码恢复屏幕扫描）。
@@ -1246,12 +1247,17 @@ fn live_stop() {
 
 /// 记录直播间使用历史（前端在连接成功后调用；去重置顶并持久化）。
 #[tauri::command]
-fn live_history_push(room: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn live_history_push(
+    room: String,
+    platform: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let platform = platform.unwrap_or_else(|| "bilibili".to_string());
     let mut cfg = state
         .config
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cfg.push_live_history(&room);
+    cfg.push_live_history(&room, &platform);
     cfg.save().map_err(|e| format!("保存配置失败: {e}"))
 }
 

@@ -138,9 +138,17 @@
   }
   .filter-seg button:hover { color: var(--text); background: var(--hover); }
   .filter-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
-  /* 直播源控件（房间号输入框）：占据筛选行右侧。 */
-  .live-ctl { margin-left: auto; position: relative; }
-  #liveRoom { width: 110px; height: 24px; }
+  /* 直播源控件（平台选择 + 房间号输入框）：占据筛选行右侧。 */
+  .live-ctl { margin-left: auto; position: relative; display: flex; align-items: center; gap: 3px; }
+  /* 平台选择段（B站 / 抖音）：小号紧凑。 */
+  .live-plat { display: flex; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; height: 24px; }
+  .live-plat button {
+    background: transparent; color: var(--muted); border: none; padding: 0 6px;
+    font-size: 10px; cursor: pointer; height: 100%; line-height: 1;
+  }
+  .live-plat button + button { border-left: 1px solid var(--border); }
+  .live-plat button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  #liveRoom { width: 88px; height: 24px; }
   /* 直播间历史下拉：输入框聚焦显示，最近使用优先（config.live_history）。 */
   #liveHistory {
     position: absolute; top: 26px; right: 0; z-index: 80;
@@ -421,8 +429,12 @@
         <button data-f="bilibili">B 服</button>
         <button data-f="hypergryph" hidden>鹰角</button>
       </div>
-      <div class="live-ctl" title="输入B站直播间号后，预览与扫码自动切换到直播画面">
-        <input class="txtin" id="liveRoom" placeholder="b站直播间号" maxlength="24" autocomplete="off" spellcheck="false" inputmode="numeric" />
+      <div class="live-ctl" title="选择平台并输入直播间号后，预览与扫码自动切换到直播画面">
+        <div class="live-plat" id="livePlat">
+          <button data-p="bilibili" class="on">B站</button>
+          <button data-p="douyin">抖音</button>
+        </div>
+        <input class="txtin" id="liveRoom" placeholder="直播间号" maxlength="24" autocomplete="off" spellcheck="false" inputmode="numeric" />
         <div id="liveHistory" hidden></div>
       </div>
     </div>
@@ -1533,10 +1545,12 @@
     return { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
   }
 
-  // ---------- 直播源（B站低延迟画面） ----------
+  // ---------- 直播源（B站 / 抖音低延迟画面） ----------
   let liveOn = false;
   let liveSeq = 0;
   let liveTimer = null;
+  let livePlatform = 'bilibili'; // 当前直播平台
+  function livePlatformLabel() { return livePlatform === 'douyin' ? '抖音' : 'B站'; }
 
   // 直播间历史：最近使用优先（config.live_history，上限 20，后端去重截断）。
   let liveHistory = [];
@@ -1546,17 +1560,19 @@
     return `${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`;
   }
   // 用 DOM API 渲染（不用 innerHTML 拼接，防御性避免注入）。
+  // 只显示当前平台的历史（同一房间号可能在另一平台也有记录）。
   function renderLiveHistory() {
     const box = $('liveHistory');
     box.innerHTML = '';
-    if (!liveHistory.length) {
+    const items = liveHistory.filter((e) => (e.platform || 'bilibili') === livePlatform);
+    if (!items.length) {
       const d = document.createElement('div');
       d.className = 'live-h-empty';
       d.textContent = '暂无历史直播间';
       box.appendChild(d);
       return;
     }
-    for (const e of liveHistory) {
+    for (const e of items) {
       const item = document.createElement('div');
       item.className = 'live-h-item';
       const room = document.createElement('span');
@@ -1622,7 +1638,7 @@
       return;
     }
     try {
-      const [w, h] = await invoke('live_start', { room });
+      const [w, h] = await invoke('live_start', { platform: livePlatform, room });
       if (seq !== liveSeq) {
         // 已被更新的请求取代；房间已清空则回收会话。
         if (!$('liveRoom').value.trim()) invoke('live_stop').catch(() => {});
@@ -1630,7 +1646,7 @@
       }
       liveOn = true;
       // 记录直播间历史（后端去重置顶并持久化；失败静默）。
-      invoke('live_history_push', { room }).catch(() => {});
+      invoke('live_history_push', { room, platform: livePlatform }).catch(() => {});
       // 用流尺寸立即占位 preview（而非置 null）：live_start 已阻塞到首帧，但首帧
       // 仍要等 refreshLiveFrame 下一轮才写入 srcCanvas。若此处 preview=null，
       // 这段时间 mousedown/wheel 会因守卫 `if (!preview)` 全部失效、无法拖拽缩放。
@@ -1647,16 +1663,28 @@
       // 停用本地显示器捕获（清除预览 ROI，DXGI 帧总线跳过拷贝）——直播模式下
       // 本地画面无人消费，不清除会因鼠标移动等持续触发 GPU 拷贝。
       invoke('set_preview_active', { active: false }).catch(() => {});
-      log('已连接B站直播间 ' + room + '（' + w + '×' + h + '），预览与扫码已切换', 'success');
+      log('已连接' + livePlatformLabel() + '直播间 ' + room + '（' + w + '×' + h + '），预览与扫码已切换', 'success');
     } catch (e) {
       if (seq !== liveSeq) return;
       liveOn = false;
-      log('连接B站直播间 ' + room + ' 失败: ' + e, 'error');
+      log('连接' + livePlatformLabel() + '直播间 ' + room + ' 失败: ' + e, 'error');
     }
   }
   $('liveRoom').addEventListener('input', scheduleLive);
   $('liveRoom').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { if (liveTimer) clearTimeout(liveTimer); connectLive(); }
+  });
+  // 平台切换（B站 / 抖音）：切换后重新连接当前房间号（若有）；刷新历史下拉。
+  $('livePlat').addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const p = btn.dataset.p;
+    if (p === livePlatform) return;
+    livePlatform = p;
+    for (const b of $('livePlat').querySelectorAll('button')) b.classList.toggle('on', b === btn);
+    $('liveRoom').placeholder = p === 'douyin' ? '抖音直播间号' : '直播间号';
+    if ($('liveHistory').hidden === false) renderLiveHistory();
+    if ($('liveRoom').value.trim()) scheduleLive();
   });
 
   // 直播帧拉取：协议与屏幕预览一致（24 字节头 + RGBA），mon = 流原始尺寸，
