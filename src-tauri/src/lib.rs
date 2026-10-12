@@ -1273,14 +1273,16 @@ fn live_set_active(id: String) {
 fn live_history_push(
     room: String,
     platform: Option<String>,
+    note: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let platform = platform.unwrap_or_else(|| "bilibili".to_string());
+    let note = note.unwrap_or_default();
     let mut cfg = state
         .config
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cfg.push_live_history(&room, &platform);
+    cfg.push_live_history(&room, &platform, &note);
     cfg.save().map_err(|e| format!("保存配置失败: {e}"))
 }
 

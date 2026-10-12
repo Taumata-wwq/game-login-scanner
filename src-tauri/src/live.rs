@@ -849,6 +849,8 @@ struct LiveSession {
     last_view: Mutex<Option<(i32, i32, i32, i32)>>,
     /// 上次发送的预览帧标识（按会话分桶）。
     last_sent: Mutex<Option<SentKey>>,
+    /// 直播间元数据（标题/主播/封面等）。
+    meta: Mutex<RoomMeta>,
 }
 
 /// 当前前台（主画面）会话 id。后台会话暂停拉流；切换时更新。
@@ -897,6 +899,81 @@ pub struct SessionInfo {
     pub platform: String,
     pub w: u32,
     pub h: u32,
+    /// 直播间标题（元数据，可能为空）。
+    #[serde(default)]
+    pub title: String,
+    /// 主播昵称（元数据，可能为空）。
+    #[serde(default)]
+    pub nickname: String,
+    /// 封面图 URL（元数据，可能为空）。
+    #[serde(default)]
+    pub cover: String,
+    /// 房间号（元数据；B站真实房间号可能不同于短号）。
+    #[serde(default)]
+    pub room_id: String,
+    /// 已开播时长文本（如「1:23:45」，可能为空）。
+    #[serde(default)]
+    pub duration: String,
+}
+
+/// 直播间元数据（标题/主播/封面/房间号/开播时间）。
+#[derive(Default, Clone)]
+struct RoomMeta {
+    title: String,
+    nickname: String,
+    cover: String,
+    room_id: String,
+    /// 开播时刻（Unix 秒）；0 = 未知/未开播。
+    live_start: i64,
+}
+
+/// 拉取 B站直播间元数据（get_info 接口，免登录）。失败返回默认（不阻塞连接）。
+fn fetch_bili_meta(room: &str) -> RoomMeta {
+    let url = format!("https://api.live.bilibili.com/room/v1/Room/get_info?room_id={room}");
+    let headers = vec![
+        ("User-Agent".to_string(), BROWSER_UA.to_string()),
+        (
+            "Referer".to_string(),
+            format!("https://live.bilibili.com/{room}"),
+        ),
+    ];
+    let body = match crate::http::request_sync("GET", &url, &headers, None) {
+        Ok(r) => r.body,
+        Err(_) => return RoomMeta::default(),
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&body) else {
+        return RoomMeta::default();
+    };
+    let d = &v["data"];
+    let live_status = d["live_status"].as_i64().unwrap_or(0);
+    RoomMeta {
+        title: d["title"].as_str().unwrap_or("").to_string(),
+        nickname: d["uname"].as_str().unwrap_or("").to_string(),
+        cover: d["user_cover"].as_str().unwrap_or("").to_string(),
+        room_id: d["room_id"]
+            .as_i64()
+            .map(|x| x.to_string())
+            .unwrap_or_default(),
+        live_start: if live_status == 1 {
+            d["live_time"].as_i64().unwrap_or(0)
+        } else {
+            0
+        },
+    }
+}
+
+/// 开播时长文本（「H:MM:SS」）；start=0 返回空。
+fn format_duration(start: i64) -> String {
+    if start <= 0 {
+        return String::new();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(start);
+    let secs = (now - start).max(0);
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    format!("{h}:{m:02}:{s:02}")
 }
 
 /// 同时监控的直播会话上限（内存 ≈ 30~90MB/路 + 1 解码线程 + 1 连接）。
@@ -993,6 +1070,12 @@ pub async fn start(platform: Platform, room: String) -> Result<SessionInfo, Stri
                     let (w, h) = (back.w, back.h);
                     drop(f);
                     let id = session_key(platform, &room);
+                    // 元数据（B站 get_info；抖音暂空）。
+                    let meta = if platform == Platform::Bilibili {
+                        fetch_bili_meta(&room)
+                    } else {
+                        RoomMeta::default()
+                    };
                     insert_session(
                         id.clone(),
                         Arc::new(LiveSession {
@@ -1004,6 +1087,7 @@ pub async fn start(platform: Platform, room: String) -> Result<SessionInfo, Stri
                             platform,
                             last_view: Mutex::new(None),
                             last_sent: Mutex::new(None),
+                            meta: Mutex::new(meta.clone()),
                         }),
                     );
                     // 新会话默认置为前台（恢复拉流），暂停其余（同时只前台 1 路）。
@@ -1014,6 +1098,11 @@ pub async fn start(platform: Platform, room: String) -> Result<SessionInfo, Stri
                         platform: platform.key().to_string(),
                         w,
                         h,
+                        title: meta.title,
+                        nickname: meta.nickname,
+                        cover: meta.cover,
+                        room_id: meta.room_id,
+                        duration: format_duration(meta.live_start),
                     });
                 }
             }
@@ -1071,12 +1160,22 @@ pub fn list_sessions() -> Vec<SessionInfo> {
                 let f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
                 f.latest.as_ref().map_or((0, 0), |b| (b.w, b.h))
             };
+            let m = s
+                .meta
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
             SessionInfo {
                 id: s.id.clone(),
                 room: s.room.clone(),
                 platform: s.platform.key().to_string(),
                 w,
                 h,
+                title: m.title,
+                nickname: m.nickname,
+                cover: m.cover,
+                room_id: m.room_id,
+                duration: format_duration(m.live_start),
             }
         })
         .collect()

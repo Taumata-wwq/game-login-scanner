@@ -520,7 +520,7 @@ impl AppConfig {
     /// Windows 上 rename 通过 MoveFileEx(REPLACE_EXISTING) 实现，可安全覆盖目标。
     /// 记录直播间使用历史（去重置顶；超出上限丢弃最旧）。
     /// `platform` 为 "bilibili" / "douyin"，兼容旧值 "bili"。
-    pub fn push_live_history(&mut self, room: &str, platform: &str) {
+    pub fn push_live_history(&mut self, room: &str, platform: &str, note: &str) {
         let room = room.trim();
         if room.is_empty() {
             return;
@@ -530,6 +530,14 @@ impl AppConfig {
         } else {
             "bilibili"
         };
+        let note = note.trim();
+        // 保留已有备注（未传新备注时）。
+        let old_note = self
+            .live_history
+            .iter()
+            .find(|e| e.room == room && e.platform == platform)
+            .map(|e| e.note.clone())
+            .unwrap_or_default();
         // 同一房间号可能跨平台存在，按 (platform, room) 去重。
         self.live_history
             .retain(|e| !(e.room == room && e.platform == platform));
@@ -542,7 +550,11 @@ impl AppConfig {
             LiveHistoryEntry {
                 room: room.to_string(),
                 platform: platform.to_string(),
-                note: String::new(),
+                note: if note.is_empty() {
+                    old_note
+                } else {
+                    note.to_string()
+                },
                 last_used: now,
             },
         );
