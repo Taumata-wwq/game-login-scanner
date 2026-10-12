@@ -2108,6 +2108,10 @@ fn decode_session(
     let mut skipping = false;
     // 追帧开始时刻（用于超时保护：异常流长时间无关键帧时强制重连，避免假死）。
     let mut skip_since: Option<std::time::Instant> = None;
+    // 恢复同步：从暂停恢复后，丢弃积压帧直到媒体时间追上墙钟（直接跳到最新）。
+    // (基准媒体时间戳, 基准墙钟时刻)；None = 尚未找到起始关键帧。
+    let mut resync = false;
+    let mut resync_base: Option<(u32, std::time::Instant)> = None;
     // 连续快速追帧计数（间隔 < CATCHUP_WINDOW_MS 才累加；偶发追帧不复位也不累加）。
     // 达 CATCHUP_LIMIT 判为解码吞吐持续不足 → 降级清晰度（新会话计数从 0 起）。
     let mut catchup_count = 0u32;
@@ -2119,11 +2123,13 @@ fn decode_session(
             return Ok(());
         }
         // 后台暂停：不读 socket（TCP 背压让 CDN 停发 → 零带宽零解码）。
-        // 恢复时进入追帧态（丢弃到下一关键帧），直接跳到最新画面，避免旧帧快进。
+        // 恢复时进入追帧态（丢弃到最新关键帧），直接跳到最新画面，避免旧帧快进。
         if paused.load(Ordering::SeqCst) {
             anchor = None;
-            skipping = true;
-            skip_since = Some(std::time::Instant::now());
+            skipping = false;
+            skip_since = None;
+            resync = true; // 恢复后先追齐到最新
+            resync_base = None;
             last_data_at = std::time::Instant::now();
             window_start = std::time::Instant::now();
             window_frames = 0;
@@ -2167,6 +2173,35 @@ fn decode_session(
         let frame_type = first >> 4;
         if first & 0x0F != 7 {
             continue; // 非 AVC
+        }
+
+        // ---- 恢复同步：丢弃积压帧直到媒体时间追上墙钟（直接跳到最新画面）----
+        // 动机：暂停恢复后 CDN/TCP 可能残留积压帧，逐帧播出表现为「慢速快进」。
+        // 做法：以恢复后首个关键帧为基准，持续丢弃，直到媒体时间戳的增量
+        // ≥ 墙钟增量（说明已追平直播），再从该关键帧正常解码。
+        if resync {
+            let now = std::time::Instant::now();
+            match resync_base {
+                None => {
+                    if frame_type == 1 {
+                        resync_base = Some((media_ts, now));
+                    }
+                    continue;
+                }
+                Some((b_ts, b_at)) => {
+                    let media_ahead = media_ts.wrapping_sub(b_ts) as i64;
+                    let wall = b_at.elapsed().as_millis() as i64;
+                    if media_ahead >= wall && frame_type == 1 {
+                        // 已追平：退出 resync，从本关键帧开始解码。
+                        resync = false;
+                        resync_base = None;
+                        anchor = Some((media_ts, now));
+                        // 继续向下解码本帧（关键帧）。
+                    } else {
+                        continue;
+                    }
+                }
+            }
         }
 
         // ---- 直播追帧（安全网）----
