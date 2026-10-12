@@ -47,10 +47,16 @@ impl Platform {
     }
 }
 
+/// B站流解析结果：候选 (url, referer) 列表 + 清晰度档位链。
+type BiliStreamResult = (Vec<(String, String)>, Vec<u32>);
+
 /// 解析出的流源：候选 (url, referer) 列表 + 可选 Cookie（抖音需 ttwid）。
 pub struct StreamSource {
     pub candidates: Vec<(String, String)>,
     pub cookie: Option<String>,
+    /// 房间实际提供的清晰度档位链（B站首次解析响应中顺带得到，避免二次 API
+    /// 请求；抖音为 None）。降级重连用。
+    pub qn_chain: Option<Vec<u32>>,
 }
 
 // ---------- 流地址解析 ----------
@@ -134,7 +140,7 @@ async fn resolve_stream(room: &str, qn: u32) -> Result<(String, String), String>
 
 /// 同步版 B站流地址解析：解码线程重连时调用（每次拿全新 expires 的地址，
 /// 自愈 CDN 临时 404 与地址过期——固定 URL 重连只会反复失败）。
-pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>, String> {
+pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<BiliStreamResult, String> {
     let url = format!(
         "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn={qn}&platform=web&ptype=16"
     );
@@ -156,21 +162,26 @@ pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>,
             return Err(format!("B站直播间 {room} 未开播"));
         }
     }
+    // 顺带从同一响应解析清晰度档位链（避免 decode_loop 再发一次相同请求）。
+    let qn_chain = build_qn_chain(&parse_accept_qn(&v));
     let flv_urls = parse_bili_flv_all(&v);
     if !flv_urls.is_empty() {
         // 多 CDN 节点全部收下（解码线程轮换重连；实测 TCP RTT 择优反而抬高
         // 首帧延迟，故不做测速排序，保持 API 原顺序）。
         let deduped = dedup_by_host(flv_urls);
-        return Ok(deduped
-            .into_iter()
-            .map(|u| (u, referer_owned.clone()))
-            .collect());
+        return Ok((
+            deduped
+                .into_iter()
+                .map(|u| (u, referer_owned.clone()))
+                .collect(),
+            qn_chain,
+        ));
     }
     // 无 FLV（部分房间服务端只提供 HLS）：回退 HLS（m3u8）。
     // decode_loop 按 URL 含 .m3u8 走 HLS 解码路径。
     if let Some(u) = crate::hls::parse_bili_hls(&v) {
         log::info!("房间 {room} 仅提供 HLS 流，使用 LL-HLS 拉流");
-        return Ok(vec![(u, referer_owned.clone())]);
+        return Ok((vec![(u, referer_owned.clone())], qn_chain));
     }
     let real_room = v["data"]["room_id"]
         .as_i64()
@@ -214,7 +225,7 @@ pub fn resolve_stream_sync(room: &str, qn: u32) -> Result<Vec<(String, String)>,
         .into_iter()
         .map(|u| (u, referer.clone()))
         .collect();
-    Ok(out)
+    Ok((out, qn_chain))
 }
 
 /// 按平台解析流源（解码线程重连与探针共用）。返回候选列表 + 可选 Cookie。
@@ -224,15 +235,19 @@ pub fn resolve_source_sync(
     qn: u32,
 ) -> Result<StreamSource, String> {
     match platform {
-        Platform::Bilibili => resolve_stream_sync(room, qn).map(|candidates| StreamSource {
-            candidates,
-            cookie: None,
-        }),
+        Platform::Bilibili => {
+            resolve_stream_sync(room, qn).map(|(candidates, qn_chain)| StreamSource {
+                candidates,
+                cookie: None,
+                qn_chain: Some(qn_chain),
+            })
+        }
         Platform::Douyin => {
             let (url, referer, cookie) = crate::douyin::resolve_sync(room)?;
             Ok(StreamSource {
                 candidates: vec![(url, referer)],
                 cookie: Some(cookie),
+                qn_chain: None,
             })
         }
     }
@@ -1118,24 +1133,6 @@ fn build_qn_chain(accept: &[u32]) -> Vec<u32> {
     chain
 }
 
-/// 获取房间实际提供的清晰度降级链（一次 API 查询）。失败退化为 [10000]。
-fn fetch_qn_chain(room: &str) -> Vec<u32> {
-    let url = format!(
-        "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room}&protocol=0,1&format=0,2&codec=0,1&qn=10000&platform=web&ptype=16"
-    );
-    let referer = format!("https://live.bilibili.com/{room}");
-    let headers = vec![
-        ("User-Agent".to_string(), BROWSER_UA.to_string()),
-        ("Referer".to_string(), referer),
-    ];
-    let v: Option<Value> = crate::http::request_sync("GET", &url, &headers, None)
-        .ok()
-        .and_then(|r| serde_json::from_str(&r.body).ok());
-    match v {
-        Some(v) => build_qn_chain(&parse_accept_qn(&v)),
-        None => vec![10000],
-    }
-}
 /// 直播追帧阈值（毫秒）：输出帧媒体时间戳落后「应有值」超过此值即追帧。
 ///
 /// 2026-10-11（MF 硬解落地后）：解码吞吐大幅改善（实测 720p 平均单帧
@@ -1171,16 +1168,10 @@ fn decode_loop(
     frames: Arc<Mutex<Frames>>,
     fail: FailFlag,
 ) {
-    // 按房间实际提供的档位构建降级链（不同房间档位不同）。抖音无档位概念。
-    let qn_chain = if platform == Platform::Bilibili {
-        fetch_qn_chain(&room)
-    } else {
-        vec![10000]
-    };
-    log::info!(
-        "{} 房间 {room} 清晰度档位链: {qn_chain:?}",
-        platform.label()
-    );
+    // 清晰度降级链：B站从首次解析响应顺带得到（避免二次 API 请求），
+    // 抖音无档位概念。首次 resolve 前暂用 [10000] 兜底。
+    let mut qn_chain: Vec<u32> = vec![10000];
+    let mut qn_chain_ready = false;
     let mut fails = 0u32;
     let mut qn_idx = 0usize;
     // 候选节点池（多 CDN 节点轮换：固定一个可能撞上慢/故障节点）。
@@ -1197,6 +1188,19 @@ fn decode_loop(
                 Ok(src) => {
                     candidates = src.candidates;
                     cookie = src.cookie;
+                    // 首次解析顺带拿到档位链（B站）；抖音保持 [10000]。
+                    if !qn_chain_ready {
+                        if let Some(chain) = src.qn_chain {
+                            if !chain.is_empty() {
+                                log::info!(
+                                    "{} 房间 {room} 清晰度档位链: {chain:?}",
+                                    platform.label()
+                                );
+                                qn_chain = chain;
+                            }
+                        }
+                        qn_chain_ready = true;
+                    }
                 }
                 Err(e) => {
                     log::warn!("解析流地址失败: {e}");
@@ -2027,7 +2031,7 @@ pub fn probe_room(room: &str, secs: u64) -> ProbeRoomResult {
 
     // 1) 解析流地址（FLV 优先、HLS 回退；与生产同一函数）。
     let candidates = match resolve_stream_sync(room, 10000) {
-        Ok(c) if !c.is_empty() => c,
+        Ok((c, _)) if !c.is_empty() => c,
         Ok(_) => {
             res.error = Some("无可用流地址".to_string());
             res.elapsed_ms = t0.elapsed().as_millis() as u64;
