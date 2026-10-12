@@ -534,6 +534,26 @@
     </div>
   </div>
 
+  <!-- 直播备注弹窗 -->
+  <div class="overlay" id="liveNoteOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        直播备注
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="liveNoteOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="field-row">
+          <div class="flbl">备注（留空则清除）</div>
+          <input type="text" id="liveNoteInput" placeholder="如主播名" maxlength="32" autocomplete="off" />
+        </div>
+        <button class="btn block" id="btnLiveNoteSave">保存</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 编辑备注弹窗 -->
   <div class="overlay" id="remarkOverlay" hidden>
     <div class="dialog">
@@ -1957,17 +1977,30 @@
     metaPollTimer = setInterval(pollMetaRound, 10000);
   }
 
-  // 双击直播间编辑备注。
+  // 双击直播间编辑备注（自定义弹窗，非浏览器 prompt）。
+  let liveNoteRoom = null;
   function openLiveNoteDialog(room) {
-    const nv = prompt('输入备注（留空则清除）：', room.note || '');
-    if (nv === null) return; // 取消
-    room.note = nv.trim();
+    liveNoteRoom = room;
+    $('liveNoteInput').value = room.note || '';
+    $('liveNoteOverlay').hidden = false;
+    setTimeout(() => $('liveNoteInput').focus(), 50);
+  }
+  function saveLiveNote() {
+    if (!liveNoteRoom) return;
+    const note = $('liveNoteInput').value.trim();
+    liveNoteRoom.note = note;
     renderLiveTabs();
     invoke('live_history_set_note', {
-      room: room.room, platform: room.platform, note: room.note,
+      room: liveNoteRoom.room, platform: liveNoteRoom.platform, note,
     }).catch(() => {});
     updateVpInfo();
+    $('liveNoteOverlay').hidden = true;
+    liveNoteRoom = null;
   }
+  $('btnLiveNoteSave').addEventListener('click', saveLiveNote);
+  $('liveNoteInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveLiveNote();
+  });
 
   // 移除已保存直播间（停会话 + 从 config 删除 + 刷新）。
   async function removeRoom(id) {
@@ -2122,7 +2155,7 @@
     const buf = await invoke('capture_live_frame', {
       id: s.id,
       x: region.x, y: region.y, w: region.w, h: region.h,
-      maxWidth: Math.min(canvas.width, 640),
+      maxWidth: Math.min(canvas.width, 480),
     });
     if (!(buf instanceof ArrayBuffer)) throw new Error('直播数据异常');
     if (buf.byteLength === 0) {
@@ -2162,8 +2195,14 @@
   }
 
   let previewBusy = false;
+  let liveBusy = false;
   async function refreshPreview() {
-    if (liveOn()) return refreshLiveFrame();
+    if (liveOn()) {
+      if (liveBusy) return false;
+      liveBusy = true;
+      try { return await refreshLiveFrame(); }
+      finally { liveBusy = false; }
+    }
     if (previewBusy) return false;
     previewBusy = true;
     try {
@@ -2223,6 +2262,11 @@
   function previewIntervalMs() {
     return 1000 / (fpsSetting || 60);
   }
+  // 直播预览轮询间隔：直播流本身多为 15~30fps。40ms（≈25fps）匹配常见直播帧率，
+  // 显著降低转换/IPC 开销（转换是 CPU 大头，实测 1080p→480 约数 ms/帧）。
+  function liveIntervalMs() {
+    return 40;
+  }
   const PREVIEW_IDLE_INTERVAL = 140;
   let idleFrames = 0;
   let previewActive = false;
@@ -2248,9 +2292,9 @@
     tickFps();
     if (!previewActive || gen !== previewGen) return;
     if (changed) idleFrames = 0; else idleFrames++;
-    // 直播：按设置帧率拉取；连续无新帧（流帧率低于显示节拍）时降频省 CPU。
+    // 直播：固定 33ms（≈30fps）；连续无新帧时进一步降频省 CPU。
     const interval = liveOn()
-      ? (idleFrames > 4 ? Math.max(previewIntervalMs(), 50) : previewIntervalMs())
+      ? (idleFrames > 4 ? 50 : liveIntervalMs())
       : idleFrames > 2
         ? PREVIEW_IDLE_INTERVAL
         : previewIntervalMs();
@@ -2325,11 +2369,18 @@
   let viewRaf = null;
   function ensureViewAnim() {
     if (viewRaf) return;
-    // 拖拽/缩放期间停止实时拉帧：避免 IPC 取帧/转换与 60fps RAF 重绘竞争
-    // （尤其低帧率直播流时，竞争会表现为明显卡顿）。拖拽结束由 loop 尾部恢复。
+    // 直播模式：画面是「后端按视口裁剪」的帧，平移/缩放必须重新拉取该区域的新帧
+    // —— 不能用 RAF 客户端平移（srcCanvas 只是旧区域，直接重绘会「画面不动」）。
+    // 故：直接同步 view=viewT（无平滑），由预览轮询拉新区域帧重绘。
+    if (liveOn()) {
+      view = { ...viewT };
+      viewDirty = true;
+      refreshPreview().catch(() => {});
+      return;
+    }
+    // 屏幕模式：停止实时预览，启用瓦片底图 + RAF 平滑重绘（底图可客户端平移）。
     stopPreview();
-    // 屏幕模式额外启用瓦片底图（拖拽时显示最新桌面画面）；直播模式冻结当前帧。
-    if (!liveOn() && !paused && !baseMapActive) { startBaseMap(); }
+    if (!paused && !baseMapActive) { startBaseMap(); }
     const loop = () => {
       const moving = stepView();
       drawView();
@@ -2440,15 +2491,17 @@
   }
   function startBaseMap() {
     if (baseMapActive) return;
+    // preview 未就绪（如刚从直播切回、屏幕首帧未到）：不启用底图，
+    // 否则 set_tile_mode 用错区域 → 瓦片永不脏 → 拖拽出现黑块。
+    if (!preview) return;
     baseMapActive = true;
     // 旧底图来自上一轮拖拽/缩放会话，内容可能已过期：先作废，
     // 等后端 tile_mode 全量脏瓦片帧（首个 tileLoop 周期）刷新后再启用。
     baseMapReady = false;
-    if (preview) {
-      const m = preview.mon;
-      invoke('set_tile_mode', { x: m.x, y: m.y, w: m.w, h: m.h, on: true }).catch(() => {});
-      tileMode = true;
-    }
+    baseMap = null;
+    const m = preview.mon;
+    invoke('set_tile_mode', { x: m.x, y: m.y, w: m.w, h: m.h, on: true }).catch(() => {});
+    tileMode = true;
     tileLoop();
   }
   function stopBaseMap() {

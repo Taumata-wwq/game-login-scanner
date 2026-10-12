@@ -750,7 +750,9 @@ fn yuv_crop_to_rgb(
     out
 }
 
-/// 同 yuv_crop_to_rgb，但输出 RGBA（预览协议用，多一字节 255）。
+/// 预览专用：YUV420 → RGBA 最近邻采样（O(tw×th)，无箱平均内层循环）。
+/// 预览仅用于人眼观察，最近邻足够；比箱平均快 5~10 倍（实测转换是 CPU 大头）。
+/// 输出尺寸按 tw×th，源像素取映射点（不做平均）。
 #[allow(clippy::too_many_arguments)]
 fn yuv_crop_to_rgba(
     y: &[u8],
@@ -761,19 +763,55 @@ fn yuv_crop_to_rgba(
     crop: (u32, u32, u32, u32),
     tw: usize,
     th: usize,
-    step: usize,
+    _step: usize,
 ) -> Vec<u8> {
-    let rgb = yuv_crop_to_rgb(y, u, v, src_w, src_h, crop, tw, th, step);
-    // 单次遍历、直接按下标写 RGBA（替代 extend_from_slice 每像素调用）。
-    let n = rgb.len() / 3;
-    let mut out = vec![0u8; n * 4];
-    for i in 0..n {
-        let s = i * 3;
-        let d = i * 4;
-        out[d] = rgb[s];
-        out[d + 1] = rgb[s + 1];
-        out[d + 2] = rgb[s + 2];
-        out[d + 3] = 255;
+    let (cx, cy, cw, ch) = (
+        crop.0 as usize,
+        crop.1 as usize,
+        crop.2 as usize,
+        crop.3 as usize,
+    );
+    let cw = cw.min(src_w.saturating_sub(cx)).max(1);
+    let ch = ch.min(src_h.saturating_sub(cy)).max(1);
+    let (tw, th) = (tw.max(1), th.max(1));
+    let cw2 = src_w / 2;
+    let mut out = vec![0u8; tw * th * 4];
+    // 预计算每列的 Y 索引与色度索引（避免内层重复乘除）。
+    let mut ycol = vec![0usize; tw];
+    let mut ccol = vec![0usize; tw];
+    let cmax = cw2.saturating_sub(1);
+    for ox in 0..tw {
+        let sx = (cx + ox * cw / tw).min(src_w - 1);
+        ycol[ox] = sx;
+        ccol[ox] = (sx / 2).min(cmax);
+    }
+    let hmax = src_h.saturating_sub(1);
+    // 安全前提：cy+ch≤src_h、ycol/ccol 已夹取、sy≤hmax、cyy≤src_h/2-1。
+    // 用 get_unchecked 去掉热路径边界检查（本函数是 CPU 大头，实测显著）。
+    unsafe {
+        let yp = y.as_ptr();
+        let up = u.as_ptr();
+        let vp = v.as_ptr();
+        let op = out.as_mut_ptr();
+        let mut oi = 0usize;
+        for oy in 0..th {
+            let sy = (cy + oy * ch / th).min(hmax);
+            let cyy = (sy / 2).min(src_h / 2 - 1);
+            let ybase = sy * src_w;
+            let cbase = cyy * cw2;
+            for ox in 0..tw {
+                let ysx = *ycol.get_unchecked(ox);
+                let csx = *ccol.get_unchecked(ox);
+                let yy = *yp.add(ybase + ysx) as i32 - 16;
+                let uu = *up.add(cbase + csx) as i32 - 128;
+                let vv = *vp.add(cbase + csx) as i32 - 128;
+                *op.add(oi) = ((1192 * yy + 1634 * vv) >> 10).clamp(0, 255) as u8;
+                *op.add(oi + 1) = ((1192 * yy - 400 * uu - 833 * vv) >> 10).clamp(0, 255) as u8;
+                *op.add(oi + 2) = ((1192 * yy + 2066 * uu) >> 10).clamp(0, 255) as u8;
+                *op.add(oi + 3) = 255;
+                oi += 4;
+            }
+        }
     }
     out
 }
