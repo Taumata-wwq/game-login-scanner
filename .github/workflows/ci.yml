@@ -12,7 +12,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # 固定 1.98.1：embed-resource 3.0.11 发出的 cargo:rustc-link-arg-tests
+        # 指令在 rustc 1.99.0 上被拒绝（invalid instruction），1.98.1 正常。
+        uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

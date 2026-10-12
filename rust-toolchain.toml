@@ -1,5 +1,7 @@
 [toolchain]
-# 跟随 stable：固定为具体版本号（如 1.98.1）可保证可复现构建，但需本机已装该
-# 精确版本，否则触发大额下载。如需固定，请改为已安装的版本号。
+# 跟随 stable。注意：rustc 1.99.0 起 embed-resource 3.0.11 发出的
+# cargo:rustc-link-arg-tests 指令被 cargo 拒绝（CI 实测 invalid instruction），
+# 故 CI 固定 1.98.1（见 .github/workflows/ci.yml）。待 embed-resource 上游修复
+# 或改用其他 manifest 嵌入方式后再跟随最新 stable。
 channel = "stable"
 components = ["rustfmt", "clippy"]
