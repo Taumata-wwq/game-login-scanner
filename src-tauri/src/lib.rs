@@ -1030,6 +1030,22 @@ async fn capture_preview(
     h: i32,
     max_width: Option<u32>,
 ) -> Result<tauri::ipc::Response, String> {
+    // 取帧 / BGRA→RGB / 节流全程同步且可能耗时（DXGI Map 数毫秒），放到 blocking
+    // 线程池执行，避免占住 tokio async 工作线程（P1-16）。
+    tauri::async_runtime::spawn_blocking(move || capture_preview_sync(&app, x, y, w, h, max_width))
+        .await
+        .map_err(|e| format!("预览任务失败: {e}"))?
+}
+
+/// `capture_preview` 的同步实现（在 blocking 池执行）。
+fn capture_preview_sync(
+    app: &tauri::AppHandle,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    max_width: Option<u32>,
+) -> Result<tauri::ipc::Response, String> {
     // 用带 1 秒缓存的 screen_rects() 枚举显示器（每帧实时枚举是预览帧率上不去的瓶颈之一）。
     let screens = crate::screenshot::screen_rects();
     if screens.is_empty() {

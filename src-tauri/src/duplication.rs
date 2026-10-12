@@ -31,7 +31,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SA
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
-    DXGI_OUTPUT_DESC,
+    DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTPUT_DESC,
 };
 
 /// 显示器矩形键（虚拟桌面物理像素 x/y/w/h）。
@@ -386,6 +386,26 @@ impl MonitorDup {
         if cols == 0 || tw == 0 || th == 0 || self.w == 0 || self.h == 0 {
             return;
         }
+        let (gw, gh) = (self.w, self.h);
+        // 输出坐标矩形（物理像素）→ 瓦片范围并标脏；脏矩形与移动矩形复用。
+        let mark_rect = |dirty: &mut [bool], l: i32, t: i32, r: i32, b: i32| {
+            let dx0 = (l.max(0) as u32 * tw / gw).min(tw.saturating_sub(1));
+            let dy0 = (t.max(0) as u32 * th / gh).min(th.saturating_sub(1));
+            let dx1 = ((r.max(0) as u32) * tw / gw).max(dx0 + 1).min(tw);
+            let dy1 = ((b.max(0) as u32) * th / gh).max(dy0 + 1).min(th);
+            let c0 = dx0 / TILE_PX;
+            let r0 = dy0 / TILE_PX;
+            let c1 = (dx1 - 1) / TILE_PX;
+            let r1 = (dy1 - 1) / TILE_PX;
+            for rr in r0..=r1 {
+                for cc in c0..=c1 {
+                    let idx = (rr * cols + cc) as usize;
+                    if idx < dirty.len() {
+                        dirty[idx] = true;
+                    }
+                }
+            }
+        };
         // 源图（物理像素）→ 瓦片网格的映射：源 x → 降采样 x = x*tw/w。
         unsafe {
             let mut rects = [windows::Win32::Foundation::RECT::default(); 64];
@@ -401,30 +421,30 @@ impl MonitorDup {
                 return;
             }
             let n = (required as usize) / std::mem::size_of::<windows::Win32::Foundation::RECT>();
-            if n == 0 {
-                // 成功取到 0 个脏矩形 = 本帧无像素变化（可能仅指针移动）。
-                // 不标脏、不拷贝：屏幕静止时零开销（下一处真实变化会被重新标记）。
-                return;
-            }
+            // 注意：n == 0 时不能直接返回——滚动/拖动窗口只产生「移动矩形」而无脏矩形，
+            // 漏处理会令瓦片底图停在陈旧内容（P0-5）。故继续处理 MoveRects。
             for r in rects[..n.min(rects.len())].iter() {
-                // 脏矩形（输出坐标）→ 降采样坐标
-                let dx0 = (r.left.max(0) as u32 * tw / self.w).min(tw.saturating_sub(1));
-                let dy0 = (r.top.max(0) as u32 * th / self.h).min(th.saturating_sub(1));
-                let dx1 = ((r.right.max(0) as u32) * tw / self.w).max(dx0 + 1).min(tw);
-                let dy1 = ((r.bottom.max(0) as u32) * th / self.h)
-                    .max(dy0 + 1)
-                    .min(th);
-                let c0 = dx0 / TILE_PX;
-                let r0 = dy0 / TILE_PX;
-                let c1 = (dx1 - 1) / TILE_PX;
-                let r1 = (dy1 - 1) / TILE_PX;
-                for rr in r0..=r1 {
-                    for cc in c0..=c1 {
-                        let idx = (rr * cols + cc) as usize;
-                        if idx < self.tiles.dirty.len() {
-                            self.tiles.dirty[idx] = true;
-                        }
-                    }
+                mark_rect(&mut self.tiles.dirty, r.left, r.top, r.right, r.bottom);
+            }
+            // 移动矩形：SourcePoint 处的像素被搬到 DestinationRect。两处都会变化，
+            // 保守各标一次（源区留旧内容、目标区是新内容）。取失败时按无移动处理
+            // （脏矩形已覆盖主要变化；不额外全标以免拖窗时整屏重传）。
+            let mut moves = [DXGI_OUTDUPL_MOVE_RECT::default(); 64];
+            let mut mreq: u32 = 0;
+            let mcap = (moves.len() * std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>()) as u32;
+            if self
+                .dup
+                .GetFrameMoveRects(mcap, moves.as_mut_ptr(), &mut mreq)
+                .is_ok()
+            {
+                let mn = (mreq as usize) / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>();
+                for mr in moves[..mn.min(moves.len())].iter() {
+                    let d = mr.DestinationRect;
+                    mark_rect(&mut self.tiles.dirty, d.left, d.top, d.right, d.bottom);
+                    let dw = d.right - d.left;
+                    let dh = d.bottom - d.top;
+                    let s = mr.SourcePoint;
+                    mark_rect(&mut self.tiles.dirty, s.x, s.y, s.x + dw, s.y + dh);
                 }
             }
         }

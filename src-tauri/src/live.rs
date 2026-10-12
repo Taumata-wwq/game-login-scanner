@@ -928,9 +928,9 @@ pub fn crop_frame(x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
         // 最旧帧，队列空时复用队首帧。显示间隔由轮询时钟决定，到达抖动被缓冲吸收
         // ——「到达即弹出」会把抖动直接透传，缓冲再深也无济于事。
         let popped = f.queue.pop_front();
-        let fref = match &popped {
-            Some(fr) => fr,
-            None => f.queue.front().unwrap(),
+        // 上面已确认队列非空，pop_front 必返回 Some；or_else 兜底消除原 unwrap 的不可达分支（P1-9）。
+        let Some(fref) = popped.as_ref().or_else(|| f.queue.front()) else {
+            return FrameOut::Empty;
         };
         if fref.w == 0 || fref.h == 0 {
             return FrameOut::Empty;
