@@ -2108,10 +2108,13 @@ fn decode_session(
     let mut skipping = false;
     // 追帧开始时刻（用于超时保护：异常流长时间无关键帧时强制重连，避免假死）。
     let mut skip_since: Option<std::time::Instant> = None;
-    // 恢复同步：从暂停恢复后，丢弃积压帧直到媒体时间追上墙钟（直接跳到最新）。
-    // (基准媒体时间戳, 基准墙钟时刻)；None = 尚未找到起始关键帧。
-    let mut resync = false;
-    let mut resync_base: Option<(u32, std::time::Instant)> = None;
+    // 恢复同步：从暂停恢复后，丢弃帧直到「恢复后经过一段墙钟」且到达关键帧，
+    // 直接跳到最新画面（避免重放暂停期间积压的旧帧）。
+    // was_paused 确保仅「暂停→恢复」触发，全新会话首帧不延迟。
+    let mut resync_until: Option<std::time::Instant> = None;
+    let mut was_paused = false;
+    // 暂停开始时刻（用于按暂停时长推算需要丢弃的积压窗口）。
+    let mut pause_started: Option<std::time::Instant> = None;
     // 连续快速追帧计数（间隔 < CATCHUP_WINDOW_MS 才累加；偶发追帧不复位也不累加）。
     // 达 CATCHUP_LIMIT 判为解码吞吐持续不足 → 降级清晰度（新会话计数从 0 起）。
     let mut catchup_count = 0u32;
@@ -2128,13 +2131,26 @@ fn decode_session(
             anchor = None;
             skipping = false;
             skip_since = None;
-            resync = true; // 恢复后先追齐到最新
-            resync_base = None;
+            resync_until = None;
+            was_paused = true;
+            if pause_started.is_none() {
+                pause_started = Some(std::time::Instant::now());
+            }
             last_data_at = std::time::Instant::now();
             window_start = std::time::Instant::now();
             window_frames = 0;
             std::thread::sleep(Duration::from_millis(80));
             continue;
+        }
+        // 从暂停恢复：按暂停时长推算积压窗口（封顶 3s），丢弃该窗口内的旧帧，
+        // 排空 socket/TCP 积压 → 直接跳到最新画面。
+        if was_paused && resync_until.is_none() {
+            let paused_ms = pause_started
+                .take()
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(800)
+                .clamp(400, 3000);
+            resync_until = Some(std::time::Instant::now() + Duration::from_millis(paused_ms));
         }
         // 连接后 3 秒无任何视频数据：节点劣化，切换节点重连。
         if last_data_at.elapsed() > Duration::from_secs(3) {
@@ -2175,33 +2191,18 @@ fn decode_session(
             continue; // 非 AVC
         }
 
-        // ---- 恢复同步：丢弃积压帧直到媒体时间追上墙钟（直接跳到最新画面）----
-        // 动机：暂停恢复后 CDN/TCP 可能残留积压帧，逐帧播出表现为「慢速快进」。
-        // 做法：以恢复后首个关键帧为基准，持续丢弃，直到媒体时间戳的增量
-        // ≥ 墙钟增量（说明已追平直播），再从该关键帧正常解码。
-        if resync {
+        // ---- 恢复同步：丢弃「丢弃窗口」内的所有帧，仅在窗口结束后的首个关键帧恢复 ----
+        // 动机：暂停恢复后 socket/TCP 可能残留积压旧帧，逐帧播出表现为「慢速快进」。
+        // 做法：丢弃窗口（800ms）内所有帧；窗口结束且遇到关键帧时，从该帧开始解码
+        // （直接跳到最新画面）。
+        if let Some(deadline) = resync_until {
             let now = std::time::Instant::now();
-            match resync_base {
-                None => {
-                    if frame_type == 1 {
-                        resync_base = Some((media_ts, now));
-                    }
-                    continue;
-                }
-                Some((b_ts, b_at)) => {
-                    let media_ahead = media_ts.wrapping_sub(b_ts) as i64;
-                    let wall = b_at.elapsed().as_millis() as i64;
-                    if media_ahead >= wall && frame_type == 1 {
-                        // 已追平：退出 resync，从本关键帧开始解码。
-                        resync = false;
-                        resync_base = None;
-                        anchor = Some((media_ts, now));
-                        // 继续向下解码本帧（关键帧）。
-                    } else {
-                        continue;
-                    }
-                }
+            if now < deadline || frame_type != 1 {
+                continue; // 仍在丢弃窗口内，或尚未到关键帧
             }
+            // 窗口结束 + 关键帧：恢复正常解码。
+            resync_until = None;
+            anchor = Some((media_ts, now));
         }
 
         // ---- 直播追帧（安全网）----

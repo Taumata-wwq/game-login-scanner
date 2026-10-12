@@ -289,8 +289,10 @@
     border-bottom: 1px solid var(--line);
   }
   .sidebar header .logo { width: 15px; height: 15px; flex: none; display: grid; place-items: center; color: var(--text-strong); }
-  .sidebar header h1 { font-size: 11px; font-weight: 600; margin: 0; letter-spacing: 0.04em; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto; }
-  .sidebar header .spacer { flex: 1; height: 100%; }
+  /* 标题可收缩（min-width:0 才能省略号），按钮不可收缩——避免窄栏时按钮被挤出。 */
+  .sidebar header h1 { font-size: 11px; font-weight: 600; margin: 0; letter-spacing: 0.04em; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
+  .sidebar header .spacer { flex: 0 1 0; min-width: 4px; height: 100%; }
+  .sidebar header .hbtns { flex: none; }
   /* 直播间/桌面列表：滚动区。 */
   .room-list {
     flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
@@ -1803,7 +1805,9 @@
       card.append(thumb, meta, st, x);
       card.addEventListener('mousedown', (ev) => {
         if (ev.target === x) return;
-        // 未开播：尝试连接（可能报未开播）；开播或已有会话：切换。
+        // 未开播且无会话：不切换（保持在当前直播间）；否则切换。
+        const isLive = (s.live_status === 1) || liveSessions.some((x2) => x2.id === id);
+        if (!isLive) return;
         switchLive(id);
       });
       // 拖拽排序（持久化到 config 顺序）。
@@ -1861,6 +1865,19 @@
     const sep = id.indexOf(':');
     const platform = id.slice(0, sep);
     const room = id.slice(sep + 1);
+    // 点击时刷新一次元数据（标题/封面按需更新）。
+    invoke('live_refresh_meta', { platform, room }).then((m) => {
+      const local = liveRooms.find((x) => (x.platform + ':' + x.room) === id);
+      if (local && m) {
+        local.title = m.title || local.title;
+        local.nickname = m.nickname || local.nickname;
+        local.cover = m.cover || local.cover;
+        local.room_id = m.room_id || local.room_id;
+        local.live_status = m.live_status;
+        renderLiveTabs();
+        if (activeLiveId === id) updateVpInfo();
+      }
+    }).catch(() => {});
     // 未连接 → 连接（可能未开播，报错后仅高亮不切画面）。
     if (!liveSessions.some((s) => s.id === id)) {
       try {
@@ -1908,12 +1925,16 @@
           // 更新本地缓存 + 重渲染。
           const local = liveRooms.find((x) => x.platform === r.platform && x.room === r.room);
           if (local && m) {
-            // 仅在有新值时覆盖（避免未开播房间刷新把标题/封面清空）。
-            local.title = m.title || local.title;
-            local.nickname = m.nickname || local.nickname;
-            local.cover = m.cover || local.cover;
-            local.room_id = m.room_id || local.room_id;
+            // 轮询只更新「开播状态」；标题/封面/主播名仅在点击或开播变化时更新
+            // （避免抖音签名封面 URL 每次刷新导致图片反复重载）。
+            const went_live = local.live_status !== 1 && m.live_status === 1;
             local.live_status = m.live_status;
+            if (went_live) {
+              local.title = m.title || local.title;
+              local.nickname = m.nickname || local.nickname;
+              local.cover = m.cover || local.cover;
+              local.room_id = m.room_id || local.room_id;
+            }
             renderLiveTabs();
             if ((r.platform + ':' + r.room) === activeLiveId) updateVpInfo();
           }
@@ -2014,6 +2035,19 @@
     const id = platform + ':' + room;
     // 先持久化该房间（无论开播与否），保证左栏始终可见。
     try { await invoke('live_history_push', { room, platform, note: note || '' }); } catch (e) {}
+    // 立即拉取一次元数据（标题/封面/主播名），不等轮询。
+    try {
+      const m = await invoke('live_refresh_meta', { platform, room });
+      const local = liveRooms.find((x) => (x.platform + ':' + x.room) === id);
+      if (local && m) {
+        local.title = m.title || local.title;
+        local.nickname = m.nickname || local.nickname;
+        local.cover = m.cover || local.cover;
+        local.room_id = m.room_id || local.room_id;
+        local.live_status = m.live_status;
+        renderLiveTabs();
+      }
+    } catch (e) { /* 忽略 */ }
     if (liveSessions.some((s) => s.id === id)) {
       await reloadLiveRooms();
       return;
