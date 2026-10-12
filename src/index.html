@@ -1810,6 +1810,11 @@
         if (!isLive) return;
         switchLive(id);
       });
+      // 双击编辑备注。
+      card.addEventListener('dblclick', (ev) => {
+        if (ev.target === x) return;
+        openLiveNoteDialog(s);
+      });
       // 拖拽排序（持久化到 config 顺序）。
       card.addEventListener('dragstart', (ev) => {
         dragSrcId = id;
@@ -1948,6 +1953,18 @@
   function startMetaPoll() {
     if (metaPollTimer) return;
     metaPollTimer = setInterval(pollMetaRound, 10000);
+  }
+
+  // 双击直播间编辑备注。
+  function openLiveNoteDialog(room) {
+    const nv = prompt('输入备注（留空则清除）：', room.note || '');
+    if (nv === null) return; // 取消
+    room.note = nv.trim();
+    renderLiveTabs();
+    invoke('live_history_set_note', {
+      room: room.room, platform: room.platform, note: room.note,
+    }).catch(() => {});
+    updateVpInfo();
   }
 
   // 移除已保存直播间（停会话 + 从 config 删除 + 刷新）。

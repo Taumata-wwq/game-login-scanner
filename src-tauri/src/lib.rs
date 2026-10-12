@@ -1307,6 +1307,27 @@ fn live_history_remove(
     cfg.save().map_err(|e| format!("保存配置失败: {e}"))
 }
 
+/// 设置某直播间的备注。
+#[tauri::command]
+fn live_history_set_note(
+    room: String,
+    platform: String,
+    note: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let platform = if platform == "douyin" {
+        "douyin"
+    } else {
+        "bilibili"
+    };
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cfg.set_live_note(&room, platform, &note);
+    cfg.save().map_err(|e| format!("保存配置失败: {e}"))
+}
+
 /// 按房间顺序重排已保存直播间（拖拽排序持久化）。
 #[tauri::command]
 fn live_history_reorder(
@@ -1700,6 +1721,7 @@ pub fn run() {
             live_history_push,
             live_history_remove,
             live_history_reorder,
+            live_history_set_note,
             live_refresh_meta,
             set_tile_mode,
             set_scan_region,

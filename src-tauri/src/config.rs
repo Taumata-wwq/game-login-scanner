@@ -606,6 +606,15 @@ impl AppConfig {
         self.live_history = reordered;
     }
 
+    /// 设置某直播间的备注（按 platform+room 精确匹配）。
+    pub fn set_live_note(&mut self, room: &str, platform: &str, note: &str) {
+        for e in self.live_history.iter_mut() {
+            if e.room == room && e.platform == platform {
+                e.note = note.to_string();
+            }
+        }
+    }
+
     /// 更新某直播间的元数据缓存（按 (platform, room) 匹配）。
     #[allow(clippy::too_many_arguments)]
     pub fn update_live_meta(
