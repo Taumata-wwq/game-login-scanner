@@ -1609,16 +1609,10 @@ pub fn run() {
                     *r = Some(String::new());
                 }
             }
-            // 仅允许上下调节高度：锁定宽度 300（逻辑像素），高度下限 400。
-            tauri::WindowEvent::Resized { .. } if window.label() == "main" => {
-                let sf = window.scale_factor().unwrap_or(1.0);
-                let size = window.outer_size().unwrap_or_default();
-                let lw = size.width as f64 / sf;
-                let lh = size.height as f64 / sf;
-                if (lw - 300.0).abs() > 0.5 || lh < 400.0 {
-                    let _ = window.set_size(tauri::LogicalSize::new(300.0, lh.max(400.0)));
-                }
-            }
+            // 宽度锁定已移除（多直播间阶段1）：宽度可自由调节，尺寸约束由
+            // tauri.conf.json 的 min/max（300×500 ~ 720×980）统一控制。旧逻辑每次
+            // Resized 都把宽度设回 300（阶段1 之前遗留），是「只能上下拖、宽度锁死」
+            // 的真正根因——commit 38ccb55 仅删除了 setup 中的 set_min/max_size，漏删此处。
             _ => {}
         })
         .setup(move |app| {
