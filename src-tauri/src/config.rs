@@ -513,8 +513,13 @@ impl AppConfig {
     const DIR: &'static str = "游戏扫码器";
 
     /// 配置文件路径：%APPDATA%\<AppName>\config.json
+    ///
+    /// 直接取 `%APPDATA%`（= `dirs::config_dir()` 在 Windows 上的取值）：本工具
+    /// 仅支持 Windows，去掉 `dirs` 依赖（省一个 crate 的体积与依赖面）。
     pub fn path() -> PathBuf {
-        let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        let base = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
         base.join(Self::DIR).join("config.json")
     }
 

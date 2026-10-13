@@ -158,26 +158,138 @@ pub fn decode_rgb_hit_fast(rgb: &[u8], width: u32, height: u32) -> Option<QrHit>
     decode_impl(&rgb_to_gray(rgb, width, height), width, height, true)
 }
 
+/// 解码配置：快路径 `scan_density(2,2)`；**内置的无界小码重试始终关闭**，
+/// 改由 `bounded_retry` 做限额重试（见其文档）。
+fn base_config(fast: bool) -> zedbar::DecoderConfig {
+    // 所有游戏登录码均为白底黑码（正常极性），无需 test_inverted。
+    // 0.7 起 DecoderConfig::new() 默认全禁，显式 enable 二维码即可。
+    let config = zedbar::DecoderConfig::new()
+        .enable(zedbar::config::QrCode)
+        .position_tracking(true)
+        .retry_undecoded_regions(false);
+    if fast {
+        config.scan_density(2, 2)
+    } else {
+        config
+    }
+}
+
+/// 有界小码重试：只对**前 N 个候选区域**做裁剪放大重扫，且受面积/耗时双重预算约束。
+///
+/// 背景（2026-10-13 实测）：zedbar 内置 `retry_undecoded_regions(true)` 会对全部
+/// 候选区域 × 3 档放大（2x/4x/6x）逐个重扫（内部上限 16 区域），细节密集的游戏/
+/// 直播画面下候选常达数十个 → 单帧解码 577.9ms（1080p）/ 97.2ms（720p），
+/// 而关闭后仅 47.5ms / 38.9ms——它是扫码 CPU 与单帧延迟抖动的主要来源。
+///
+/// 有界策略在保留「小码兜底」的前提下把最坏耗时压到可预测范围：
+/// - 候选按面积降序，只取前 `MAX_RETRY_REGIONS` 个；
+/// - 跳过大区域（>10% 画面，与内置实现一致：大区域多为 1D 码误报）；
+/// - 放大后像素数超 `RETRY_MAX_UPSCALED_PX` 的档位直接跳过（防止 4x 一个
+///   大区域产生 16M 像素的巨图重扫）；
+/// - 每步前检查总耗时预算 `RETRY_TIME_BUDGET`，超时立即停止。
+///
+/// 重试用与主扫描相同的配置（同 density），与内置实现语义一致。
+const MAX_RETRY_REGIONS: usize = 2;
+/// 重试放大倍率（内置实现的前两档；6x 收益最低且放大后像素最多，省略）。
+const RETRY_SCALES: &[u32] = &[2, 4];
+/// 重试总耗时预算：超出即停止（本帧按未命中处理，下一帧再试）。
+const RETRY_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(60);
+/// 候选区域最小边长：小于此值视为噪声碎片，放大也无意义。
+const RETRY_MIN_SIDE: u32 = 16;
+/// 候选区域面积占画面比例上限（与 zedbar 内置重试一致）。
+const RETRY_MAX_REGION_RATIO: u64 = 10; // 1/10
+/// 放大后单图像素上限（约 2MP：单次重扫耗时与 1080p 主扫描同量级）。
+const RETRY_MAX_UPSCALED_PX: u64 = 2_000_000;
+
+fn bounded_retry(
+    src: &zedbar::Image,
+    regions: &[zedbar::FinderRegion],
+    fast: bool,
+) -> Option<QrHit> {
+    if regions.is_empty() {
+        return None;
+    }
+    let (iw, ih) = (src.width(), src.height());
+    let img_area = iw as u64 * ih as u64;
+    let area_limit = (img_area / RETRY_MAX_REGION_RATIO).max(1);
+    let t0 = std::time::Instant::now();
+    // 候选按面积降序：面积大者更可能是真实二维码（内置实现按置信度排序返回，
+    // 这里用面积做等价近似，避免依赖内部排序细节）。
+    let mut cands: Vec<zedbar::FinderRegion> = regions.to_vec();
+    cands.sort_by_key(|r| std::cmp::Reverse(r.width as u64 * r.height as u64));
+    for region in cands.into_iter().take(MAX_RETRY_REGIONS) {
+        if t0.elapsed() > RETRY_TIME_BUDGET {
+            break;
+        }
+        if region.width < RETRY_MIN_SIDE || region.height < RETRY_MIN_SIDE {
+            continue;
+        }
+        if region.width as u64 * region.height as u64 > area_limit {
+            continue;
+        }
+        // 外扩 50% 作为静区（与 zedbar 内置重试一致：二维码解码需要静区）。
+        let pad_x = region.width / 2;
+        let pad_y = region.height / 2;
+        let cx = region.x.saturating_sub(pad_x);
+        let cy = region.y.saturating_sub(pad_y);
+        let cw = (region.width + 2 * pad_x).min(iw.saturating_sub(cx));
+        let ch = (region.height + 2 * pad_y).min(ih.saturating_sub(cy));
+        let Some(cropped) = src.crop(cx, cy, cw, ch) else {
+            continue;
+        };
+        for &scale in RETRY_SCALES {
+            if t0.elapsed() > RETRY_TIME_BUDGET {
+                break;
+            }
+            // 放大后像素上限：超限的档位跳过（4x 对大区域会产生巨图）。
+            let up_px = cw as u64 * ch as u64 * (scale as u64) * (scale as u64);
+            if up_px > RETRY_MAX_UPSCALED_PX {
+                continue;
+            }
+            let Some(mut up) = cropped.upscale(scale) else {
+                continue;
+            };
+            let mut scanner = zedbar::Scanner::with_config(base_config(fast));
+            let res = scanner.scan(&mut up);
+            let Some(sym) = res.symbols().first() else {
+                continue;
+            };
+            let Some(text) = sym.data_string() else {
+                continue;
+            };
+            // 坐标映射回原图：放大图坐标 ÷ 倍率 + 裁剪原点。
+            let bounds = sym.bounds().map(|b| {
+                (
+                    b.x / scale as i32 + cx as i32,
+                    b.y / scale as i32 + cy as i32,
+                    (b.width / scale).max(1),
+                    (b.height / scale).max(1),
+                )
+            });
+            return Some(QrHit {
+                text: text.to_string(),
+                bounds,
+            });
+        }
+    }
+    None
+}
+
 fn decode_impl(gray: &[u8], width: u32, height: u32, fast: bool) -> Option<QrHit> {
     if width == 0 || height == 0 {
         return None;
     }
     let mut img = zedbar::Image::from_gray(gray, width, height).ok()?;
-    // 所有游戏登录码均为白底黑码（正常极性），无需 test_inverted。
-    // 0.7 起 DecoderConfig::new() 默认全禁，显式 enable 二维码即可。
-    let mut config = zedbar::DecoderConfig::new()
-        .enable(zedbar::config::QrCode)
-        .position_tracking(true)
-        .retry_undecoded_regions(true);
-    if fast {
-        config = config.scan_density(2, 2);
-    }
-    let mut scanner = zedbar::Scanner::with_config(config);
+    let mut scanner = zedbar::Scanner::with_config(base_config(fast));
+    // 扫描不写像素（仅内部走线缓冲），故同一 Image 可直接用于后续的有界重试。
     let result = scanner.scan(&mut img);
-    let sym = result.symbols().first()?;
-    let text = sym.data_string()?.to_string();
-    let bounds = sym.bounds().map(|b| (b.x, b.y, b.width, b.height));
-    Some(QrHit { text, bounds })
+    if let Some(sym) = result.symbols().first() {
+        let text = sym.data_string()?.to_string();
+        let bounds = sym.bounds().map(|b| (b.x, b.y, b.width, b.height));
+        return Some(QrHit { text, bounds });
+    }
+    // 主扫描未命中：对候选区域做有界重试（小码兜底，见 bounded_retry）。
+    bounded_retry(&img, result.finder_regions(), fast)
 }
 
 /// 兼容旧签名：只返回文本（保真配置；剪贴板等一次性路径用）。

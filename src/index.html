@@ -318,7 +318,8 @@
   .room-card .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .room-card .rname { font-size: 10.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .room-card .rsub { font-size: 9px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .room-card .st { flex: none; font-size: 8.5px; font-weight: 700; padding: 1px 4px; border-radius: 2px; }
+  /* 状态徽标：固定宽度 + 不换行（文案仅在 直播中/识别中/已确认/未开播 间切换）。 */
+  .room-card .st { flex: none; width: 38px; text-align: center; white-space: nowrap; font-size: 8.5px; font-weight: 700; padding: 1px 0; border-radius: 2px; }
   .st.live { background: rgba(92,176,117,0.18); color: var(--ok); }
   .st.off { background: var(--panel-3); color: var(--faint); }
   .st.scan { background: rgba(217,169,74,0.2); color: var(--warn); }
@@ -345,7 +346,8 @@
   .vp-info .ttl { color: var(--text-strong); font-weight: 600; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .vp-info .sep { color: var(--faint); }
   .vp-info .spacer { flex: 1; }
-  .vp-info .badge { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 2px; background: var(--panel-3); color: var(--muted); }
+  /* 顶部状态徽标：固定宽度（防被标题挤压换行）。 */
+  .vp-info .badge { flex: none; width: 46px; text-align: center; white-space: nowrap; font-size: 9px; font-weight: 700; padding: 1px 0; border-radius: 2px; background: var(--panel-3); color: var(--muted); }
   .vp-info .badge.live { background: rgba(92,176,117,0.18); color: var(--ok); }
   /* 视窗适配容器：尺寸由 JS 设置（16:9 适配结果），居中放置 stage。 */
   .vp-fit { flex: 0 0 auto; width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
@@ -373,7 +375,7 @@
   .acct-area { flex: 1 1 auto; min-height: 120px; display: flex; padding: 8px 10px 10px; gap: 8px; }
   /* 左列游戏选择（阶段4 填充）。 */
   .game-col {
-    width: 120px; flex: none; display: flex; flex-direction: column; gap: 3px;
+    width: 125px; flex: none; display: flex; flex-direction: column; gap: 3px;
     overflow-y: auto; overscroll-behavior: contain;
   }
   .game-col .gitem {
@@ -1549,7 +1551,7 @@
       if (!dragging) return;
       const appRect = document.querySelector('.app').getBoundingClientRect();
       let w = e.clientX - appRect.left;
-      w = Math.min(Math.max(w, 140), Math.min(360, appRect.width - 320));
+      w = Math.min(Math.max(w, 140), Math.min(240, appRect.width - 320));
       side.style.width = w + 'px';
       sizeCanvasToDisplay();
     });
@@ -1705,7 +1707,9 @@
     const platform = room ? room.platform : (sess ? sess.platform : '');
     const roomNo = room ? room.room : (sess ? sess.room : '');
     const title = (room && room.title) || (sess && sess.title) || roomNo;
-    ttl.textContent = title;
+    // 与左列同规则：有备注时显示「备注（原标题）」。
+    const note = (room && room.note) || '';
+    ttl.textContent = note ? (note + '（' + title + '）') : title;
     // 副标题：主播名 · 平台 房间号 · 时长。
     const parts = [];
     const nickname = (room && room.nickname) || (sess && sess.nickname) || '';
@@ -1815,12 +1819,16 @@
       meta.className = 'meta';
       const rn = document.createElement('div');
       rn.className = 'rname';
-      // 第一行：标题（回退备注/房间号）。
-      rn.textContent = s.title || s.note || s.room;
+      // 第一行：有备注时显示「备注（原标题）」（与账号名同规则）；无备注显示标题。
+      const origTitle = s.title || s.room;
+      const dispName = s.note ? (s.note + '（' + origTitle + '）') : origTitle;
+      rn.textContent = dispName;
       const rs = document.createElement('div');
       rs.className = 'rsub';
-      // 第二行：主播名（回退房间号）。
-      rs.textContent = s.nickname || ('房间 ' + s.room);
+      // 第二行：平台 + 直播间号（不再显示主播名，主播名见悬浮提示）。
+      rs.textContent = livePlatformLabel(s.platform) + ' ' + s.room;
+      // 悬浮提示：备注（直播间名）-主播名（无主播名时省略后缀）。
+      card.title = s.nickname ? (dispName + '-' + s.nickname) : dispName;
       meta.append(rn, rs);
       const st = document.createElement('span');
       const stCls = live === 'scan' ? 'scan' : live === 'done' ? 'done' : live === 'live' ? 'live' : 'off';
@@ -2274,10 +2282,24 @@
   function previewIntervalMs() {
     return 1000 / (fpsSetting || 60);
   }
-  // 直播预览轮询间隔：直播流本身多为 15~30fps。40ms（≈25fps）匹配常见直播帧率，
-  // 显著降低转换/IPC 开销（转换是 CPU 大头，实测 1080p→480 约数 ms/帧）。
-  function liveIntervalMs() {
-    return 40;
+  // 直播预览节拍：**按实测「新帧到达率」跟随流帧率**（16~50ms 夹取）。
+  //
+  // 旧实现固定 40ms（≈25fps）、连续无新帧降到 50ms（20fps）——这是「直播最多
+  // 20 多帧」的直接原因：即便流是 30/60fps，显示也被轮询节拍限住。
+  // 现改为每秒统计一次真实新帧数：30fps 流 → 33ms、60fps 流 → 16ms、
+  // 20fps 流 → 50ms；无新帧（暂停/断流）退到 50ms 省资源。
+  // 同时受设置里的「显示区域帧率」上限约束（与屏幕预览同一口径）。
+  let liveEstInterval = 33;   // 初始 ≈30fps；首秒窗口结束后按实测调整
+  let liveWin = { t0: performance.now(), frames: 0 };
+  function liveAdaptiveInterval(changed) {
+    if (changed) liveWin.frames++;
+    const el = performance.now() - liveWin.t0;
+    if (el >= 1000) {
+      const fps = (liveWin.frames * 1000) / el;
+      liveWin = { t0: performance.now(), frames: 0 };
+      liveEstInterval = fps >= 1 ? Math.min(Math.max(Math.round(1000 / fps), 16), 50) : 50;
+    }
+    return Math.max(liveEstInterval, previewIntervalMs());
   }
   const PREVIEW_IDLE_INTERVAL = 140;
   let idleFrames = 0;
@@ -2306,7 +2328,7 @@
     if (changed) idleFrames = 0; else idleFrames++;
     // 直播：固定 33ms（≈30fps）；连续无新帧时进一步降频省 CPU。
     const interval = liveOn()
-      ? (idleFrames > 4 ? 50 : liveIntervalMs())
+      ? liveAdaptiveInterval(changed)
       : idleFrames > 2
         ? PREVIEW_IDLE_INTERVAL
         : previewIntervalMs();

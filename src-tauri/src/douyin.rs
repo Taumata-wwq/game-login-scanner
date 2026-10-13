@@ -220,6 +220,19 @@ pub fn parse_douyin_flv(v: &Value) -> Option<String> {
     if let Some(s) = d0["stream_url"]["live_core_sdk_data"]["pull_data"]["stream_data"].as_str() {
         if let Ok(sd) = serde_json::from_str::<Value>(s) {
             if let Some(routes) = sd.get("data").and_then(|d| d.as_object()) {
+                // 显式清晰度优先级（原画 > 高清 > 标清 > 流畅），不依赖 JSON 对象的
+                // 遍历顺序——`serde_json` 未开 preserve_order 时 Map 为 BTreeMap
+                // （按键排序），"取第一个"会随机落到某个档位。
+                for key in ["origin", "hd", "sd", "ld"] {
+                    if let Some(u) = routes
+                        .get(key)
+                        .and_then(|r| r["main"]["flv"].as_str())
+                        .filter(|u| !u.is_empty())
+                    {
+                        return Some(https_ify(u));
+                    }
+                }
+                // 未知键名的兜底：任意取一个可用地址。
                 for route in routes.values() {
                     if let Some(u) = route["main"]["flv"].as_str() {
                         if !u.is_empty() {
