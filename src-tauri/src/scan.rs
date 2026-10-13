@@ -272,6 +272,12 @@ struct LoopState {
     /// 快路径（scan_density）对常见大码足够，但小码存在漏检可能——按节流间隔
     /// 周期性跑一次保真解码，把识别率下限锚在历史行为（见 decode_full_with_fallback）。
     last_exact_scan: Option<tokio::time::Instant>,
+    /// 直播扫码：上次已解码帧的内容标识 (帧序号, 裁剪区)。60Hz 轮询下同一帧
+    /// 会被取到多次，重复解码纯属浪费（流 30fps 时约占一半）——标识相同即
+    /// 跳过解码（不改变「每个新帧都解码一次」的检测时效）。
+    live_last_key: Option<crate::live::ScanKey>,
+    /// 上次前台会话 id（检测切换以重置 live_last_key）。
+    live_prev_id: Option<String>,
     /// 触发成功频率限制：终止扫描（服务端已确认成功，继续扫只会重复提交）。
     throttle_stop: bool,
     /// 用户请求停止且已取消挂起操作：立即终止扫描。
@@ -298,6 +304,8 @@ impl LoopState {
             unknown_qr_reported: 0,
             failed_count: std::collections::HashMap::new(),
             last_exact_scan: None,
+            live_last_key: None,
+            live_prev_id: None,
             throttle_stop: false,
             stopped: false,
         }
@@ -339,8 +347,8 @@ const EXACT_FALLBACK_INTERVAL: Duration = Duration::from_millis(800);
 /// 快路径 `scan_density(2,2)` 对模块尺寸较大的游戏登录码无识别损失（两张
 /// 真机验证截图均命中，提速 ~43%）；小码/低对比目标存在漏检可能，故保留
 /// 周期性精确兜底。兜底只在快路径**失败**后触发，命中路径零额外开销。
-fn decode_full_with_fallback(st: &mut LoopState, rgb: &[u8], w: u32, h: u32) -> Option<qr::QrHit> {
-    if let Some(hit) = qr::decode_rgb_hit_fast(rgb, w, h) {
+fn decode_full_with_fallback(st: &mut LoopState, gray: &[u8], w: u32, h: u32) -> Option<qr::QrHit> {
+    if let Some(hit) = qr::decode_gray_hit_fast(gray, w, h) {
         return Some(hit);
     }
     let due = st
@@ -350,13 +358,14 @@ fn decode_full_with_fallback(st: &mut LoopState, rgb: &[u8], w: u32, h: u32) -> 
         return None;
     }
     st.last_exact_scan = Some(tokio::time::Instant::now());
-    qr::decode_rgb_hit(rgb, w, h)
+    qr::decode_gray_hit(gray, w, h)
 }
 
-/// 从整帧裁剪出 (x,y,w,h) 子图，返回 (子图 RGB, 宽, 高)。
+/// 从整帧裁剪出 (x,y,w,h) 子图，返回 (子图灰度, 宽, 高)。
 /// 坐标越界自动收敛到帧内；裁剪后过小返回 None（退回全屏解码）。
+/// 灰度 1 字节/像素（紧凑布局：行跨距 = width）。
 pub fn crop_region(
-    rgb: &[u8],
+    gray: &[u8],
     width: u32,
     height: u32,
     x: i32,
@@ -373,12 +382,12 @@ pub fn crop_region(
     }
     let cw = x1 - x0;
     let ch = y1 - y0;
-    let mut out = Vec::with_capacity((cw * ch * 3) as usize);
+    let mut out = Vec::with_capacity((cw * ch) as usize);
     for row in y0..y1 {
-        let start = (row as usize * width as usize + x0 as usize) * 3;
-        let end = start + (cw as usize * 3);
-        if end <= rgb.len() {
-            out.extend_from_slice(&rgb[start..end]);
+        let start = row as usize * width as usize + x0 as usize;
+        let end = start + cw as usize;
+        if end <= gray.len() {
+            out.extend_from_slice(&gray[start..end]);
         } else {
             return None;
         }
@@ -417,7 +426,7 @@ fn mark_roi_miss(st: &mut LoopState, idx: usize) {
 fn decode_with_roi(
     st: &mut LoopState,
     idx: usize,
-    rgb: &[u8],
+    gray: &[u8],
     w: u32,
     h: u32,
 ) -> Option<(qr::QrHit, bool)> {
@@ -430,8 +439,8 @@ fn decode_with_roi(
         let rx = (x - ROI_PAD).max(0);
         let ry = (y - ROI_PAD).max(0);
         let pad2 = (ROI_PAD * 2) as u32;
-        if let Some((sub, sw, sh)) = crop_region(rgb, w, h, rx, ry, rw + pad2, rh + pad2) {
-            if let Some(hit) = qr::decode_rgb_hit(&sub, sw, sh) {
+        if let Some((sub, sw, sh)) = crop_region(gray, w, h, rx, ry, rw + pad2, rh + pad2) {
+            if let Some(hit) = qr::decode_gray_hit(&sub, sw, sh) {
                 let full = hit
                     .bounds
                     .map(|(bx, by, bw, bh)| (bx + rx, by + ry, bw, bh));
@@ -449,21 +458,22 @@ fn decode_with_roi(
     }
     // 2) 回退全屏：快路径（scan_density）优先，失败后周期性精确兜底；
     //    是否锁定 ROI 由调用方决定。
-    let hit = decode_full_with_fallback(st, rgb, w, h)?;
+    let hit = decode_full_with_fallback(st, gray, w, h)?;
     Some((hit, false))
 }
 
 /// 抽样生成画面灰度指纹；两帧指纹相同则认为画面未变化。
-fn thumbnail(rgb: &[u8], width: u32, height: u32) -> Vec<u8> {
+/// 输入已是灰度（1 字节/像素，行跨距 = width）。
+fn thumbnail(gray: &[u8], width: u32, height: u32) -> Vec<u8> {
     let iw = width as usize;
     let mut out = Vec::new();
     let mut y = 0u32;
     while y < height {
         let mut x = 0u32;
         while x < width {
-            let i = (y as usize * iw + x as usize) * 3;
-            if i + 2 < rgb.len() {
-                out.push(((rgb[i] as u16 + rgb[i + 1] as u16 + rgb[i + 2] as u16) / 3) as u8);
+            let i = y as usize * iw + x as usize;
+            if i < gray.len() {
+                out.push(gray[i]);
             }
             x += THUMB_STRIDE;
         }
@@ -697,11 +707,27 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         // 且避免后台画面误触确认。切换主画面后扫码目标随之切换。
         let active_live = crate::live::active_id();
         if let Some(aid) = active_live {
-            if let Some((rgb, w, h)) = crate::live::take_scan_frame(&aid) {
+            // 切换前台会话（换房间）：重置去重键——不同会话的帧序号各自从 0 起，
+            // 直接沿用旧键会误判「同一帧」而跳过新会话的首帧解码。
+            if st.live_prev_id.as_deref() != Some(aid.as_str()) {
+                st.live_prev_id = Some(aid.clone());
+                st.live_last_key = None;
+            }
+            if let Some(frame) = crate::live::take_scan_frame(&aid) {
                 live_seen = true;
+                // 同一帧去重：无新帧（标识相同）时跳过解码——重复解码同一像素
+                // 不会更早发现二维码，只是白白烧 CPU。新帧必定解码一次，
+                // 检测时效不变。
+                if st.live_last_key == Some(frame.key) {
+                    let wait = interval;
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+                st.live_last_key = Some(frame.key);
+                let (w, h) = (frame.w, frame.h);
                 // zedbar 解码（唯一解码器）：快路径 + 周期性精确兜底
                 // （与屏幕路径同一策略，快路径对直播 720p 帧提速 ~40%）。
-                let decoded = decode_full_with_fallback(&mut st, &rgb, w, h).map(|h| h.text);
+                let decoded = decode_full_with_fallback(&mut st, &frame.gray, w, h).map(|h| h.text);
                 if let Some(text) = decoded {
                     if let Some(qrc) = qr::extract(&text) {
                         if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
@@ -795,7 +821,7 @@ async fn process_screen(
     let frame = match crate::duplication::scan_frame(rect) {
         Ok(Some(f)) => f,
         Ok(None) => return false,
-        Err(_) => match crate::screenshot::capture_region(rect.0, rect.1, rect.2, rect.3) {
+        Err(_) => match crate::screenshot::capture_region_gray(rect.0, rect.1, rect.2, rect.3) {
             Some(f) => f,
             None => {
                 if !st.screens_empty_reported {
@@ -809,7 +835,7 @@ async fn process_screen(
     st.screens_empty_reported = false;
 
     // 1) 指纹去重：微小变化（如光标闪烁）不触发解码。
-    let thumb = thumbnail(&frame.rgb, frame.w, frame.h);
+    let thumb = thumbnail(&frame.gray, frame.w, frame.h);
     if st.last_thumbs.get(idx).and_then(|t| t.as_ref()) == Some(&thumb) {
         return false;
     }
@@ -819,7 +845,7 @@ async fn process_screen(
     st.last_thumbs[idx] = Some(thumb);
 
     // 2) zedbar 解码（唯一解码器）：优先上次命中的 ROI，未命中回退全屏。
-    let Some((hit, from_roi)) = decode_with_roi(st, idx, &frame.rgb, frame.w, frame.h) else {
+    let Some((hit, from_roi)) = decode_with_roi(st, idx, &frame.gray, frame.w, frame.h) else {
         return false;
     };
     let text = hit.text;

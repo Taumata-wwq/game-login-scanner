@@ -3,8 +3,9 @@
 //! 选型沿革与依据（2026-10-11 调研 → 2026-10-12 落地）：
 //! - 原实现为 openh264 单线程软解（Windows 上多线程必崩），1080p60 单线程
 //!   19~24ms/帧跟不上流帧间隔，追帧/降清晰度常态化；
-//! - 系统自带 H.264 解码 MFT（见 mf_decode.rs）走 DXVA 硬解，CPU 占用大幅下降、
-//!   延迟更低，且**零体积增量**（系统组件）；
+//! - 系统自带 H.264 解码 MFT（见 mf_decode.rs）：**提供 DXGI 设备管理器后走
+//!   DXVA 硬解**（输出 D3D11 纹理、回读转 I420），CPU 占用大幅下降、延迟更低，
+//!   且**零体积增量**（系统组件）；设备管理器不可用时自动回退软解（行为同旧版）；
 //! - 稳定性验证（移除软解回退的依据）：300 个真实直播间批量解码测试
 //!   （5 游戏分区，tests/live_batch.rs）**零解码错误**，覆盖 640×368~4K 分辨率与
 //!   60~77fps 高帧率流；本地自校验与直播长跑亦全部通过。
@@ -53,7 +54,14 @@ impl VideoDecoder for Box<dyn VideoDecoder> {
 pub fn new_decoder() -> Result<Box<dyn VideoDecoder>, String> {
     match MfDecoder::new() {
         Ok(inner) => {
-            log::info!("直播解码器：Media Foundation H.264（DXVA 硬解，系统组件，零体积）");
+            log::info!(
+                "直播解码器：Media Foundation H.264（{}，系统组件，零体积）",
+                if inner.dxva_active() {
+                    "DXVA 硬解"
+                } else {
+                    "软解"
+                }
+            );
             Ok(Box::new(HwDecoder { inner }))
         }
         Err(e) => Err(format!(
@@ -76,6 +84,10 @@ impl VideoDecoder for HwDecoder {
     }
 
     fn name(&self) -> &'static str {
-        "MF(DXVA)"
+        if self.inner.dxva_active() {
+            "MF(DXVA)"
+        } else {
+            "MF(软解)"
+        }
     }
 }

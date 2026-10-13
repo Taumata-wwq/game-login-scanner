@@ -537,9 +537,16 @@ impl AppConfig {
         }
     }
 
-    /// 保存到磁盘（原子写：先写临时文件再 rename，避免写一半崩溃损坏配置）。
-    /// Windows 上 rename 通过 MoveFileEx(REPLACE_EXISTING) 实现，可安全覆盖目标。
-    /// 记录直播间使用历史（去重置顶；超出上限丢弃最旧）。
+    /// 记录直播间使用历史。
+    ///
+    /// **顺序语义（重要）**：左侧列表顺序只在用户拖拽（`reorder_live_history`）时变化。
+    /// 因此本方法对**已存在**条目只更新字段（备注/元数据缓存/使用时间），保持其在列表
+    /// 中的既有位置；**新**条目追加到末尾。此前实现在每次连接时把条目「去重置顶」
+    /// （insert(0)），等效于按最近使用自动排序——用户拖拽排好的顺序在重启后会被
+    /// 打乱，已按「固定顺序持久化」的要求修正。
+    ///
+    /// 超上限（`LIVE_HISTORY_MAX`）时淘汰**最久未使用**的一条（而非截断末尾——
+    /// 追加语义下末尾是最新添加的房间）。
     /// `platform` 为 "bilibili" / "douyin"，兼容旧值 "bili"。
     pub fn push_live_history(&mut self, room: &str, platform: &str, note: &str) {
         let room = room.trim();
@@ -552,41 +559,48 @@ impl AppConfig {
             "bilibili"
         };
         let note = note.trim();
-        // 先取旧条目（保留备注与元数据缓存）——必须在 retain 删除前取。
-        let old = self
-            .live_history
-            .iter()
-            .find(|e| e.room == room && e.platform == platform)
-            .cloned();
-        let old_note = old.as_ref().map(|e| e.note.clone()).unwrap_or_default();
-        // 同一房间号可能跨平台存在，按 (platform, room) 去重。
-        self.live_history
-            .retain(|e| !(e.room == room && e.platform == platform));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        self.live_history.insert(
-            0,
-            LiveHistoryEntry {
-                room: room.to_string(),
-                platform: platform.to_string(),
-                note: if note.is_empty() {
-                    old_note
-                } else {
-                    note.to_string()
-                },
-                last_used: now,
-                title: old.as_ref().map(|e| e.title.clone()).unwrap_or_default(),
-                nickname: old.as_ref().map(|e| e.nickname.clone()).unwrap_or_default(),
-                cover: old.as_ref().map(|e| e.cover.clone()).unwrap_or_default(),
-                room_id: old.as_ref().map(|e| e.room_id.clone()).unwrap_or_default(),
-                live_status: old.as_ref().map(|e| e.live_status).unwrap_or(0),
-                live_start: old.as_ref().map(|e| e.live_start).unwrap_or(0),
-                last_checked: old.as_ref().map(|e| e.last_checked).unwrap_or(0),
-            },
-        );
-        self.live_history.truncate(LIVE_HISTORY_MAX);
+        // 已存在：原位更新（备注留空则保留旧备注），位置不变。
+        if let Some(e) = self
+            .live_history
+            .iter_mut()
+            .find(|e| e.room == room && e.platform == platform)
+        {
+            if !note.is_empty() {
+                e.note = note.to_string();
+            }
+            e.last_used = now;
+            return;
+        }
+        // 新条目：追加到末尾（既有条目顺序保持不变）。
+        self.live_history.push(LiveHistoryEntry {
+            room: room.to_string(),
+            platform: platform.to_string(),
+            note: note.to_string(),
+            last_used: now,
+            title: String::new(),
+            nickname: String::new(),
+            cover: String::new(),
+            room_id: String::new(),
+            live_status: 0,
+            live_start: 0,
+            last_checked: 0,
+        });
+        // 超上限：淘汰最久未使用的一条（同 last_used 时取列表中最靠前者）。
+        if self.live_history.len() > LIVE_HISTORY_MAX {
+            if let Some(idx) = self
+                .live_history
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(i, _)| i)
+            {
+                self.live_history.remove(idx);
+            }
+        }
     }
 
     /// 按给定 "platform:room" 顺序重排 live_history（拖拽排序持久化）。
@@ -661,6 +675,8 @@ impl AppConfig {
         self.live_history.len() != before
     }
 
+    /// 保存到磁盘（原子写：先写临时文件再 rename，避免写一半崩溃损坏配置）。
+    /// Windows 上 rename 通过 MoveFileEx(REPLACE_EXISTING) 实现，可安全覆盖目标。
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path();
         if let Some(parent) = path.parent() {

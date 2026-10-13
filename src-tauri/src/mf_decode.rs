@@ -3,9 +3,12 @@
 //! 背景与选型（2026-10-11 调研结论，详见 docs/性能优化调研报告-2026-10-11.md）：
 //! - 现用 openh264 为**单线程软解**（Windows 上 num_threads 必崩，无法多线程），
 //!   1080p60 单线程 19~24ms/帧跟不上流帧间隔，导致追帧/降清晰度常态化；
-//! - 系统自带的 H.264 解码 MFT（CLSID_CMSH264DecoderMFT）**自动优先走 DXVA 硬解、
-//!   无硬件时软解回退**（微软签名组件，无需自行分支）；解码负载从 CPU 卸载到
-//!   GPU 的专用解码单元，典型 CPU 占用从「占满一核」降至个位数百分比；
+//! - 系统自带的 H.264 解码 MFT（CLSID_CMSH264DecoderMFT）承载解码（微软签名组件）。
+//!   **关键修正（2026-10-13）**：该 MFT 在未提供 D3D 设备管理器时是**纯软解**
+//!   （1080p ~9ms/帧、高帧率流可占满一核，实测确认）。只有通过
+//!   `MFT_MESSAGE_SET_D3D_MANAGER` 提供 DXGI 设备管理器后才会走 **DXVA 硬解**
+//!   （输出 D3D11 纹理，本文件回读到 CPU 转 I420）。故这里尝试建立 D3D11 设备 +
+//!   设备管理器启用硬解；任一步失败自动回退软解（行为与旧实现一致）；
 //! - 输入要求为 **Annex-B**（本管线已有 `avcc_to_annexb`，天然契合）；
 //! - 输出 **NV12 系统内存**（copy-back 模式）：`decode()` 内完成 NV12→紧凑 I420
 //!   转换，下游帧总线无需感知硬件路径。
@@ -14,12 +17,22 @@
 //! 缺失——`new()` 会失败，由调用方（decode.rs）转为带操作指引的错误提示。
 
 use windows::core::Interface;
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_STAGING,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
 use windows::Win32::Media::MediaFoundation::{
-    CMSH264DecoderMFT, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFMediaType, IMFSample, IMFTransform,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFStartup,
-    MFVideoFormat_H264, MFVideoFormat_NV12, MFSTARTUP_LITE, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
+    CMSH264DecoderMFT, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFDXGIBuffer, IMFDXGIDeviceManager,
+    IMFMediaType, IMFSample, IMFTransform, MFCreateDXGIDeviceManager, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFStartup, MFVideoFormat_H264,
+    MFVideoFormat_NV12, MFSTARTUP_LITE, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
     MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
     MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MF_VERSION,
@@ -93,6 +106,110 @@ pub struct MfDecoder {
     stride: u32,
     /// 预创建输出 sample（mft_provides_samples=false 时用；尺寸变化后重建）。
     out_sample: Option<IMFSample>,
+    /// DXVA 状态（Some = 已向 MFT 提供 D3D 设备管理器，输出为 D3D11 纹理）。
+    dxva: Option<Dxva>,
+}
+
+/// DXVA 硬解状态：D3D11 设备 + DXGI 设备管理器 + NV12 回读 staging 纹理。
+///
+/// 为什么需要它：MS H.264 解码 MFT **只有在收到 `MFT_MESSAGE_SET_D3D_MANAGER`
+/// （带 DXGI 设备管理器）时才会使用 DXVA 硬解**；否则静默走软解（实测 1080p
+/// ~9ms/帧，高帧率直播流会占满一核 CPU）。启用后输出 sample 携带 D3D11 纹理
+/// （`IMFDXGIBuffer`，解码器的 DPB 纹理数组），本结构负责拷到 CPU 可读的
+/// staging 纹理再读回。
+struct Dxva {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    /// 设备管理器（保持存活：MFT 通过消息引用它，生命周期需覆盖解码器）。
+    manager: IMFDXGIDeviceManager,
+    /// CPU 可读的 NV12 staging 纹理（按输出尺寸缓存/重建）。
+    staging: Option<ID3D11Texture2D>,
+    staging_size: (u32, u32),
+}
+
+impl Dxva {
+    /// 创建 D3D11 设备与 DXGI 设备管理器；任一步失败返回 None（回退软解）。
+    fn create() -> Option<Self> {
+        unsafe {
+            let mut device: Option<ID3D11Device> = None;
+            let mut context: Option<ID3D11DeviceContext> = None;
+            // 优先带 VIDEO_SUPPORT（部分驱动/DXVA 路径需要）；失败则退到 BGRA。
+            let mut flags = D3D11_CREATE_DEVICE_FLAG(
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 | D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0,
+            );
+            let mut r = D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                flags,
+                Some(&[D3D_FEATURE_LEVEL_11_0]),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            );
+            if r.is_err() {
+                flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+                r = D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    HMODULE::default(),
+                    flags,
+                    Some(&[D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                );
+            }
+            r.ok()?;
+            let device = device?;
+            let context = context?;
+            let mut token = 0u32;
+            let mut manager: Option<IMFDXGIDeviceManager> = None;
+            MFCreateDXGIDeviceManager(&mut token, &mut manager).ok()?;
+            let manager = manager?;
+            let unk: windows::core::IUnknown = device.cast().ok()?;
+            manager.ResetDevice(&unk, token).ok()?;
+            Some(Dxva {
+                device,
+                context,
+                manager,
+                staging: None,
+                staging_size: (0, 0),
+            })
+        }
+    }
+
+    /// 取（或重建）指定尺寸的 NV12 staging 纹理。
+    fn staging(&mut self, w: u32, h: u32) -> Option<ID3D11Texture2D> {
+        if self.staging.is_none() || self.staging_size != (w, h) {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: w,
+                Height: h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut tex: Option<ID3D11Texture2D> = None;
+            unsafe {
+                self.device
+                    .CreateTexture2D(&desc, None, Some(&mut tex))
+                    .ok()?
+            };
+            self.staging = tex;
+            self.staging_size = (w, h);
+        }
+        self.staging.clone()
+    }
 }
 
 // SAFETY: MfDecoder 只在解码线程（创建线程）内使用；标记 Send 以便放入
@@ -130,6 +247,29 @@ impl MfDecoder {
                 .SetInputType(0, &it, 0)
                 .map_err(|e| format!("SetInputType(H264): {e}"))?;
 
+            // DXVA：默认尝试启用硬解（可用环境变量 GAME_SCANNER_DXVA=0 强制软解，
+            // 供对照测试/疑难排查）。任一步失败 → 软解，行为与旧实现一致。
+            let want_dxva = std::env::var("GAME_SCANNER_DXVA")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            let mut dxva = if want_dxva { Dxva::create() } else { None };
+            let manager_ptr = dxva
+                .as_ref()
+                .map(|d| Interface::as_raw(&d.manager) as usize);
+            match manager_ptr {
+                Some(ptr) => {
+                    // MFT_MESSAGE_SET_D3D_MANAGER 的 ulParam = 设备管理器 IUnknown 指针
+                    //（MFT 会自行 AddRef；我们保持 manager 存活到解码器销毁）。
+                    match transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, ptr) {
+                        Ok(()) => log::info!("DXVA 设备管理器已设置，尝试硬件解码"),
+                        Err(e) => {
+                            log::warn!("设置 D3D 设备管理器失败，回退软解: {e}");
+                            dxva = None;
+                        }
+                    }
+                }
+                None => log::info!("DXVA 不可用（或已禁用），使用 MF 软解路径"),
+            }
             let mut dec = Self {
                 transform,
                 mft_provides_samples: false,
@@ -139,6 +279,7 @@ impl MfDecoder {
                 disp_h: 0,
                 stride: 0,
                 out_sample: None,
+                dxva,
             };
             dec.negotiate_output()?;
 
@@ -148,6 +289,26 @@ impl MfDecoder {
             let _ = t.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
             let _ = t.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
             Ok(dec)
+        }
+    }
+
+    /// 当前是否走 DXVA 硬件解码（日志与诊断用）。
+    pub fn dxva_active(&self) -> bool {
+        self.dxva.is_some()
+    }
+
+    /// 运行时降级：解绑 D3D 设备管理器并重新协商输出类型（回系统内存 NV12）。
+    /// 仅在「已启用 DXVA 但输出不是 DXGI 缓冲」时调用（部分驱动/环境），
+    /// 保证画面与扫码不中断（下一帧起走软解路径）。
+    unsafe fn disable_dxva(&mut self) {
+        if self.dxva.take().is_some() {
+            let _ = self
+                .transform
+                .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, 0);
+            if let Err(e) = self.negotiate_output() {
+                log::warn!("降级软解后重新协商输出类型失败: {e}");
+            }
+            log::warn!("DXVA 输出非 DXGI 缓冲，已自动降级为 MF 软解（画面/扫码不受影响）");
         }
     }
 
@@ -317,7 +478,12 @@ impl MfDecoder {
                     let s: Option<IMFSample> =
                         std::mem::ManuallyDrop::take(&mut outputs[0].pSample);
                     if let Some(s) = s {
-                        match self.read_nv12(&s) {
+                        let r = if self.dxva.is_some() {
+                            self.read_nv12_dxva(&s)
+                        } else {
+                            self.read_nv12(&s)
+                        };
+                        match r {
                             Ok(Some(f)) => frames.push(f),
                             Ok(None) => {} // 尺寸未知（首帧前）——忽略该帧
                             Err(e) => log::warn!("MF 输出帧读取失败: {e}"),
@@ -359,8 +525,8 @@ impl MfDecoder {
         Ok(sample)
     }
 
-    /// 读取 NV12 输出并转为紧凑 I420：Y 平面逐行拷贝（跳跨距），UV 交错区
-    /// 拆分为 U/V 两个平面。返回 `Ok(None)` 表示尺寸未知（忽略此帧）。
+    /// 读取 NV12 输出并转为紧凑 I420（软解 copy-back 路径）。
+    /// 返回 `Ok(None)` 表示尺寸未知（忽略此帧）。
     unsafe fn read_nv12(&self, sample: &IMFSample) -> Result<Option<DecodedFrame>, String> {
         let (w, h) = (self.width, self.height);
         if w == 0 || h == 0 {
@@ -377,10 +543,7 @@ impl MfDecoder {
         let result = (|| {
             let (w, h) = (w as usize, h as usize);
             let stride = self.stride.max(w as u32) as usize;
-            // 输出尺寸 = 显示孔径（去除编码对齐填充行，避免绿条）。
-            let ow = (self.disp_w as usize).min(w).max(2);
-            let oh = (self.disp_h as usize).min(h).max(2);
-            let (cw, ch) = (ow / 2, oh / 2);
+            let (ow, oh) = output_size(self.disp_w, self.disp_h, w as u32, h as u32);
             // 尺寸合法性（防 MFT 输出异常数据）。
             if (cur as usize) < stride * h + stride * (h / 2) {
                 return Err(format!(
@@ -388,38 +551,118 @@ impl MfDecoder {
                     stride * h + stride * (h / 2)
                 ));
             }
-            let mut y = Vec::with_capacity(ow * oh);
-            for row in 0..oh {
-                let base = p.add(row * stride);
-                y.extend_from_slice(std::slice::from_raw_parts(base, ow));
-            }
-            let uv_base = p.add(stride * h);
-            let mut u = vec![0u8; cw * ch];
-            let mut v = vec![0u8; cw * ch];
-            for row in 0..ch {
-                let rowp = std::slice::from_raw_parts(uv_base.add(row * stride), ow);
-                let u_row = &mut u[row * cw..(row + 1) * cw];
-                let v_row = &mut v[row * cw..(row + 1) * cw];
-                // zip 迭代 + 定长 chunk 拆解：比逐字节 push 快数倍（无容量检查、
-                // 利于向量化；测试/低配环境的差距最明显）。
-                for ((du, dv), src) in u_row
-                    .iter_mut()
-                    .zip(v_row.iter_mut())
-                    .zip(rowp.as_chunks::<2>().0)
-                {
-                    *du = src[0];
-                    *dv = src[1];
-                }
-            }
-            Ok(DecodedFrame {
-                w: ow as u32,
-                h: oh as u32,
-                y,
-                u,
-                v,
-            })
+            Ok(nv12_to_i420(p, stride, h, ow as usize, oh as usize))
         })();
         let _ = buf.Unlock();
         result.map(Some)
+    }
+
+    /// DXVA 路径读取：输出 sample 携带 D3D11 NV12 纹理（DPB 纹理数组中的一片），
+    /// 拷到 CPU 可读 staging 纹理后读取。返回 `Ok(None)` 表示尺寸未知。
+    ///
+    /// `IMFDXGIBuffer::GetResource` 取到的是纹理数组，必须用 `GetSubresourceIndex`
+    /// 选出本帧所在层，否则拷到的是别的参考帧（画面错乱/花屏）。
+    unsafe fn read_nv12_dxva(
+        &mut self,
+        sample: &IMFSample,
+    ) -> Result<Option<DecodedFrame>, String> {
+        let (w, h) = (self.width, self.height);
+        if w == 0 || h == 0 {
+            return Ok(None);
+        }
+        let buf = match sample.GetBufferByIndex(0) {
+            Ok(b) => b,
+            Err(e) => {
+                self.disable_dxva();
+                return Err(format!("GetBufferByIndex: {e}"));
+            }
+        };
+        let dxgi: IMFDXGIBuffer = match buf.cast() {
+            Ok(d) => d,
+            Err(_) => {
+                // 环境不支持 DXVA 输出纹理：降级软解，本帧丢弃（下一帧起正常）。
+                self.disable_dxva();
+                return Ok(None);
+            }
+        };
+        let mut raw: *mut core::ffi::c_void = std::ptr::null_mut();
+        dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw)
+            .map_err(|e| format!("GetResource(纹理): {e}"))?;
+        if raw.is_null() {
+            return Err("DXGI 资源为空".to_string());
+        }
+        // 接管引用（GetResource 已 AddRef）。
+        let tex = ID3D11Texture2D::from_raw(raw);
+        let sub = dxgi
+            .GetSubresourceIndex()
+            .map_err(|e| format!("GetSubresourceIndex: {e}"))?;
+        let Some(dxva) = self.dxva.as_mut() else {
+            return Err("DXVA 状态缺失".to_string());
+        };
+        let Some(staging) = dxva.staging(w, h) else {
+            return Err("创建 NV12 staging 纹理失败".to_string());
+        };
+        // GPU 内拷贝（同设备；解码器由本进程 D3D11 设备管理器创建，资源同域）。
+        dxva.context
+            .CopySubresourceRegion(&staging, 0, 0, 0, 0, &tex, sub, None);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        dxva.context
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .map_err(|e| format!("Map(staging): {e}"))?;
+        let pitch = mapped.RowPitch as usize;
+        let (ow, oh) = output_size(self.disp_w, self.disp_h, w, h);
+        let frame = nv12_to_i420(
+            mapped.pData as *const u8,
+            pitch,
+            h as usize,
+            ow as usize,
+            oh as usize,
+        );
+        dxva.context.Unmap(&staging, 0);
+        Ok(Some(frame))
+    }
+}
+
+/// 输出尺寸 = 显示孔径（去除编码对齐填充行，避免绿条），并夹到编码尺寸内。
+fn output_size(disp_w: u32, disp_h: u32, w: u32, h: u32) -> (u32, u32) {
+    (disp_w.min(w).max(2), disp_h.min(h).max(2))
+}
+
+/// NV12（Y 平面 + UV 交错平面，行跨距 `pitch`）→ 紧凑 I420，取显示孔径区域。
+/// 软件（copy-back）与 DXVA（staging 回读）路径共用。
+///
+/// # Safety
+/// `p` 必须指向至少 `pitch * h * 3 / 2` 字节的可读内存（NV12 完整帧）。
+unsafe fn nv12_to_i420(p: *const u8, pitch: usize, h: usize, ow: usize, oh: usize) -> DecodedFrame {
+    let (cw, ch) = (ow / 2, oh / 2);
+    let mut y = Vec::with_capacity(ow * oh);
+    for row in 0..oh {
+        let base = p.add(row * pitch);
+        y.extend_from_slice(std::slice::from_raw_parts(base, ow));
+    }
+    let uv_base = p.add(pitch * h);
+    let mut u = vec![0u8; cw * ch];
+    let mut v = vec![0u8; cw * ch];
+    for row in 0..ch {
+        let rowp = std::slice::from_raw_parts(uv_base.add(row * pitch), ow);
+        let u_row = &mut u[row * cw..(row + 1) * cw];
+        let v_row = &mut v[row * cw..(row + 1) * cw];
+        // zip 迭代 + 定长 chunk 拆解：比逐字节 push 快数倍（无容量检查、
+        // 利于向量化；测试/低配环境的差距最明显）。
+        for ((du, dv), src) in u_row
+            .iter_mut()
+            .zip(v_row.iter_mut())
+            .zip(rowp.as_chunks::<2>().0)
+        {
+            *du = src[0];
+            *dv = src[1];
+        }
+    }
+    DecodedFrame {
+        w: ow as u32,
+        h: oh as u32,
+        y,
+        u,
+        v,
     }
 }

@@ -15,9 +15,19 @@ use windows::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, SRCCOPY,
 };
 
-/// 一帧截图的 RGB 数据。
+/// 一帧截图的 RGB 数据（预览 GDI 兜底路径用；扫码路径用 `GrayFrame`）。
 pub struct Frame {
     pub rgb: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// 一帧截图的灰度数据（1 字节/像素，紧凑布局：行跨距 = w）。
+///
+/// 扫码只依赖亮度信息，直接产出灰度可省去「RGB 三通道写入 + 二次 RGB→灰度
+/// 遍历」的重复开销（GDI 兜底路径同样受益）。
+pub struct GrayFrame {
+    pub gray: Vec<u8>,
     pub w: u32,
     pub h: u32,
 }
@@ -74,10 +84,15 @@ pub fn screen_rects() -> Vec<(i32, i32, i32, i32)> {
     rects
 }
 
-/// 截取虚拟桌面指定区域（绝对物理像素），返回 RGB，失败返回 None。
-/// 源 DC 用虚拟屏 DC（`CreateDCW("DISPLAY", null)`），BitBlt 源坐标即虚拟桌面绝对坐标，
-/// 天然支持负坐标的多显示器布局。
-pub fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Option<Frame> {
+/// 截取虚拟桌面指定区域并执行像素转换（RGB / 灰度共用 BitBlt 骨架）。
+/// `convert` 拿到 BGRA 原始像素（自上而下，行跨距 = w*4）与像素数，返回转换结果。
+fn capture_region_with<T>(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    convert: impl FnOnce(&[u8], u32, u32) -> T,
+) -> Option<T> {
     let w = w.max(1);
     let h = h.max(1);
     unsafe {
@@ -85,7 +100,7 @@ pub fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Option<Frame> {
         if src.is_invalid() {
             return None;
         }
-        let frame = (|| {
+        let out = (|| {
             let mem = CreateCompatibleDC(Some(src));
             if mem.is_invalid() {
                 return None;
@@ -110,18 +125,7 @@ pub fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Option<Frame> {
             if BitBlt(mem, 0, 0, w, h, Some(src), x, y, SRCCOPY | CAPTUREBLT).is_ok() {
                 let n = (w as usize) * (h as usize);
                 let px = std::slice::from_raw_parts(bits as *const u8, n * 4);
-                // GDI 32bpp 内存序为 B,G,R,X → 转为 RGB。
-                let mut rgb = Vec::with_capacity(n * 3);
-                for p in px.as_chunks::<4>().0 {
-                    rgb.push(p[2]);
-                    rgb.push(p[1]);
-                    rgb.push(p[0]);
-                }
-                out = Some(Frame {
-                    rgb,
-                    w: w as u32,
-                    h: h as u32,
-                });
+                out = Some(convert(px, w as u32, h as u32));
             }
             SelectObject(mem, old);
             let _ = DeleteObject(hbmp.into());
@@ -129,6 +133,35 @@ pub fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Option<Frame> {
             out
         })();
         let _ = DeleteDC(src);
-        frame
+        out
     }
+}
+
+/// 截取虚拟桌面指定区域（绝对物理像素），返回 RGB，失败返回 None。
+/// 源 DC 用虚拟屏 DC（`CreateDCW("DISPLAY", null)`），BitBlt 源坐标即虚拟桌面绝对坐标，
+/// 天然支持负坐标的多显示器布局。
+pub fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Option<Frame> {
+    capture_region_with(x, y, w, h, |px, w, h| {
+        // GDI 32bpp 内存序为 B,G,R,X → 转为 RGB。
+        let mut rgb = Vec::with_capacity((w * h) as usize * 3);
+        for p in px.as_chunks::<4>().0 {
+            rgb.push(p[2]);
+            rgb.push(p[1]);
+            rgb.push(p[0]);
+        }
+        Frame { rgb, w, h }
+    })
+}
+
+/// 截取虚拟桌面指定区域并直接转为灰度（扫码 GDI 兜底路径用）。
+/// 灰度权重与 `qr` 侧 `(77R+151G+28B)>>8` 完全一致，跳过 RGB 中间缓冲。
+pub fn capture_region_gray(x: i32, y: i32, w: i32, h: i32) -> Option<GrayFrame> {
+    capture_region_with(x, y, w, h, |px, w, h| {
+        let mut gray = Vec::with_capacity((w * h) as usize);
+        for p in px.as_chunks::<4>().0 {
+            // BGRA：p[2]=R, p[1]=G, p[0]=B。
+            gray.push(((p[2] as u32 * 77 + p[1] as u32 * 151 + p[0] as u32 * 28) >> 8) as u8);
+        }
+        GrayFrame { gray, w, h }
+    })
 }

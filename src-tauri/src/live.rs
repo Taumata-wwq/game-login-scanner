@@ -662,16 +662,17 @@ pub fn strip_sps_vui(annexb: &[u8]) -> (Vec<u8>, bool) {
     (out, changed)
 }
 
-/// 紧凑 YUV420 裁剪区 → RGB（3 字节/像素），面积平均降采样到 tw×th。
+/// 紧凑 YUV420 裁剪区 → 灰度（1 字节/像素），面积平均降采样到 tw×th（扫码用）。
 ///
-/// **只转换输出像素所需的源区域**（对比早先「全帧转 RGBA 再降采样」），
-/// 预览 320 宽时转换量约为全帧的 1/16。Y 取箱内平均，U/V 取对应色度箱平均。
-/// `src_w` 为源帧宽（紧凑布局，Y 跨距 = src_w，UV 跨距 = src_w/2）。
+/// **扫码只需亮度**：直接取 Y（编码 luma）输出灰度，跳过「YUV→RGB→灰度」两步
+/// 与 RGB 中间缓冲（1080p 每帧少写 2/3 字节、少一次全图加权遍历）。
+/// 与 `qr` 侧 BT.601 加权灰度相比仅差一个全局线性亮度变换（Y 为有限范围、
+/// 权重近似全范围），二维码二值化对全局线性变换不敏感，识别行为不变。
+/// 箱映射与既有实现一致（`sx0 = cx + ox*cw/tw`），step 为采样步长（热路径 1）。
+/// `src_w` 为源帧宽（紧凑布局，Y 跨距 = src_w）。
 #[allow(clippy::too_many_arguments)]
-fn yuv_crop_to_rgb(
+fn yuv_crop_to_gray(
     y: &[u8],
-    u: &[u8],
-    v: &[u8],
     src_w: usize,
     src_h: usize,
     crop: (u32, u32, u32, u32),
@@ -689,24 +690,23 @@ fn yuv_crop_to_rgb(
     let ch = ch.min(src_h.saturating_sub(cy)).max(1);
     let (tw, th) = (tw.max(1), th.max(1));
     let step = step.max(1);
-    let cw2 = src_w / 2; // 色度跨距
-                         // 预分配 + 直接按下标写（原逐像素 push 有容量检查开销，热路径上明显）。
-    let mut out = vec![0u8; tw * th * 3];
-    let mut oi = 0usize;
-    // 预计算行映射（sy0/sy1/cys0/cys1），避免内层重复除法。
+    let mut out = vec![0u8; tw * th];
+    // 预计算行/列映射（避免内层重复除法）。
     let mut row_ys: Vec<(usize, usize)> = Vec::with_capacity(th);
     for oy in 0..th {
         let sy0 = cy + oy * ch / th;
         let sy1 = (cy + (oy + 1) * ch / th).max(sy0 + 1);
         row_ys.push((sy0, sy1));
     }
+    let mut col_xs: Vec<(usize, usize)> = Vec::with_capacity(tw);
+    for ox in 0..tw {
+        let sx0 = cx + ox * cw / tw;
+        let sx1 = (cx + (ox + 1) * cw / tw).max(sx0 + 1);
+        col_xs.push((sx0, sx1));
+    }
+    let mut oi = 0usize;
     for &(sy0, sy1) in row_ys.iter() {
-        let cys0 = sy0 / 2;
-        let cys1 = (sy1 / 2).max(cys0 + 1);
-        let cstep = step.div_ceil(2).max(1);
-        for ox in 0..tw {
-            let sx0 = cx + ox * cw / tw;
-            let sx1 = (cx + (ox + 1) * cw / tw).max(sx0 + 1);
+        for &(sx0, sx1) in col_xs.iter() {
             let mut ysum = 0u32;
             let mut yn = 0u32;
             let mut yy = sy0;
@@ -720,31 +720,8 @@ fn yuv_crop_to_rgb(
                 }
                 yy += step;
             }
-            let cxs0 = sx0 / 2;
-            let cxs1 = (sx1 / 2).max(cxs0 + 1);
-            let mut us = 0u32;
-            let mut vs = 0u32;
-            let mut cn = 0u32;
-            let mut cyy = cys0;
-            while cyy < cys1 {
-                let base = cyy * cw2;
-                let mut cxx = cxs0;
-                while cxx < cxs1 {
-                    us += u[base + cxx] as u32;
-                    vs += v[base + cxx] as u32;
-                    cn += 1;
-                    cxx += cstep;
-                }
-                cyy += cstep;
-            }
-            let yv = (ysum / yn.max(1)) as i32;
-            let uv = (us / cn.max(1)) as i32 - 128;
-            let vv = (vs / cn.max(1)) as i32 - 128;
-            let yy = yv - 16;
-            out[oi] = ((1192 * yy + 1634 * vv) >> 10).clamp(0, 255) as u8;
-            out[oi + 1] = ((1192 * yy - 400 * uv - 833 * vv) >> 10).clamp(0, 255) as u8;
-            out[oi + 2] = ((1192 * yy + 2066 * uv) >> 10).clamp(0, 255) as u8;
-            oi += 3;
+            out[oi] = (ysum / yn.max(1)) as u8;
+            oi += 1;
         }
     }
     out
@@ -867,12 +844,12 @@ struct Frames {
 /// 减 2 帧即省 ~33~67ms 延迟。
 const FRAME_BUFFER_MAX: usize = 4;
 
-/// 扫码 RGB 缓存：键为 (帧序号, 裁剪区)，视口不变且无新帧时直接复用。
-/// rgb 用 Arc：命中时只克隆指针（零拷贝），避免在持锁路径上复制整块图像。
+/// 扫码灰度缓存：键为 (帧序号, 裁剪区)，视口不变且无新帧时直接复用。
+/// gray 用 Arc：命中时只克隆指针（零拷贝），避免在持锁路径上复制整块图像。
 struct ScanCache {
     seq: u64,
     crop: Option<(u32, u32, u32, u32)>,
-    rgb: Arc<Vec<u8>>,
+    gray: Arc<Vec<u8>>,
     w: u32,
     h: u32,
 }
@@ -1334,12 +1311,27 @@ pub fn scan_output_size(cw: u32, ch: u32) -> (u32, u32) {
     }
 }
 
+/// 扫码帧的内容标识：`(帧序号, 裁剪区)`。相同表示像素完全未变。
+pub type ScanKey = (u64, Option<(u32, u32, u32, u32)>);
+
+/// 扫码用的一帧：灰度像素 + 变化标识。
+pub struct ScanFrame {
+    /// 灰度像素（1 字节/像素，紧凑布局：行跨距 = w）。Arc 共享：命中缓存时
+    /// 只克隆指针（零拷贝），避免每轮 60Hz 轮询复制整帧（1080p ~2MB）。
+    pub gray: Arc<Vec<u8>>,
+    pub w: u32,
+    pub h: u32,
+    /// 内容标识：与上轮相同表示像素完全未变（缓存命中）。扫码侧据此跳过对
+    /// 同一帧的重复解码（流帧率低于轮询频率时的纯浪费）。
+    pub key: ScanKey,
+}
+
 /// 扫码消费者（多会话）：取指定会话的最新帧**当前显示视口**区域
-/// （原分辨率 RGB，超上限才等比缩小）。视口未知时用全帧。
-pub fn take_scan_frame(id: &str) -> Option<(Vec<u8>, u32, u32)> {
+/// （原分辨率灰度，超上限才等比缩小）。视口未知时用全帧。
+pub fn take_scan_frame(id: &str) -> Option<ScanFrame> {
     let s = get_session(id)?;
     let view = *s.last_view.lock().unwrap_or_else(PoisonError::into_inner);
-    // 只在锁内取「帧引用 + 缓存命中判断」，**不在锁内做 YUV→RGB 转换**：
+    // 只在锁内取「帧引用 + 缓存命中判断」，**不在锁内做 YUV→灰度转换**：
     // 转换（原分辨率 1080p ~2M 像素）耗时远大于取引用，而解码线程 push 新帧
     // 需要同一把锁——持锁转换会把解码线程堵住 → 不读 socket → 延迟堆积，
     // 追帧也回不到低点。frame 是 Arc，clone 出来即可在锁外转换。
@@ -1363,26 +1355,25 @@ pub fn take_scan_frame(id: &str) -> Option<(Vec<u8>, u32, u32)> {
             let ch0 = (h as u32).min(fh - y0).max(2);
             Some((x0, y0, cw0, ch0))
         });
-        // 无新帧且缓存命中（视口未变）：复用上次 RGB，保证供帧率 100%。
+        // 无新帧且缓存命中（视口未变）：复用上次灰度，保证供帧率 100%。
         let cached = f
             .scan_cache
             .as_ref()
             .filter(|c| c.seq == frame.seq && c.crop == crop)
-            .map(|c| (c.rgb.clone(), c.w, c.h));
+            .map(|c| (c.gray.clone(), c.w, c.h));
         (frame, crop, cached)
     };
-    if let Some((rgb, w, h)) = cached {
-        return Some((rgb.as_ref().clone(), w, h));
+    let key = (frame.seq, crop);
+    if let Some((gray, w, h)) = cached {
+        return Some(ScanFrame { gray, w, h, key });
     }
     let (fw, fh) = (frame.w, frame.h);
     // 原分辨率输出（保二维码模块细节），仅超上限才等比缩小。
     // 此前无条件减半，导致全屏视口下二维码模块明显过小、无法识别（放大才可识别）。
     let crop_rect = crop.unwrap_or((0, 0, fw, fh));
     let (ow, oh) = scan_output_size(crop_rect.2, crop_rect.3);
-    let rgb = yuv_crop_to_rgb(
+    let gray = yuv_crop_to_gray(
         &frame.y,
-        &frame.u,
-        &frame.v,
         fw as usize,
         fh as usize,
         crop_rect,
@@ -1390,19 +1381,24 @@ pub fn take_scan_frame(id: &str) -> Option<(Vec<u8>, u32, u32)> {
         oh as usize,
         1,
     );
-    let rgb = Arc::new(rgb);
+    let gray = Arc::new(gray);
     // 回写缓存（短锁）。
     {
         let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
         f.scan_cache = Some(ScanCache {
             seq: frame.seq,
             crop,
-            rgb: rgb.clone(),
+            gray: gray.clone(),
             w: ow,
             h: oh,
         });
     }
-    Some((rgb.as_ref().clone(), ow, oh))
+    Some(ScanFrame {
+        gray,
+        w: ow,
+        h: oh,
+        key,
+    })
 }
 
 /// 预览消费者：按视口裁剪 + 面积降采样，组装 24 字节头 + RGBA 负载。

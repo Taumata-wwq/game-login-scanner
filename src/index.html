@@ -269,10 +269,11 @@
   #log .info { color: var(--muted); }
   #log .time { color: #5a5a5a; margin-right: 6px; }
 
-  ::-webkit-scrollbar { width: 8px; }
-  ::-webkit-scrollbar-thumb { background: #363636; border-radius: 4px; }
-  ::-webkit-scrollbar-thumb:hover { background: #454545; }
-  ::-webkit-scrollbar-track { background: transparent; }
+  /* 隐藏全部滚动条（保留滚动能力）：列表/日志区内容超出时不再显示滚动条占据宽度，
+     滚轮与拖拽滚动照常工作。scrollbar-width 覆盖标准实现，::-webkit-scrollbar
+     覆盖 Chromium 旧路径（WebView2 两套并存时任一命中即不渲染）。 */
+  * { scrollbar-width: none; }
+  ::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
   /* ===== 横版布局骨架（阶段1）===== */
   .app { flex: 1; display: flex; min-height: 0; }
@@ -1578,6 +1579,9 @@
   let prevRegionStr = null;
   let previewTimer = null;
   let previewErrShown = false;
+  // 画布内容是否已被清空（尺寸重建 / 强制重栅格化）：供 drawView 的冻结守卫
+  // 放行一次兜底绘制，避免「画布已清空 + 冻结」组合下整屏保持黑色。
+  let canvasBlank = false;
   const canvas = $('previewCanvas');
   // 缓存 2D 上下文（getContext 每帧调用有查找开销）。
   const canvasCtx = canvas.getContext('2d');
@@ -1613,6 +1617,9 @@
     if (w !== canvas.width || h !== canvas.height) {
       canvas.width = w;
       canvas.height = h;
+      // 改 width/height 会清空画布内容。若此时恰逢底图冻结守卫（见 drawView），
+      // 不重绘就会整屏保持黑——标记「画布为空」让守卫放行一次兜底绘制。
+      canvasBlank = true;
     }
   }
   sizeCanvasToDisplay();
@@ -1624,6 +1631,7 @@
     if (w === 0 || h === 0) return;
     canvas.width = 0; canvas.height = 0;
     canvas.width = w; canvas.height = h;
+    canvasBlank = true;
     drawView();
   }
   const canvasRO = new ResizeObserver(() => {
@@ -1949,12 +1957,14 @@
       for (const r of rooms) {
         try {
           const m = await invoke('live_refresh_meta', { platform: r.platform, room: r.room });
-          // 更新本地缓存 + 重渲染。
+          // 更新本地缓存 + 仅在**状态变化**时重渲染（此前每轮每间都整表重建 DOM，
+          // 封面 img 反复重建 → 无谓的解析/布局/图片解码开销）。
           const local = liveRooms.find((x) => x.platform === r.platform && x.room === r.room);
           if (local && m) {
             // 轮询只更新「开播状态」；标题/封面/主播名仅在点击或开播变化时更新
             // （避免抖音签名封面 URL 每次刷新导致图片反复重载）。
             const went_live = local.live_status !== 1 && m.live_status === 1;
+            const status_changed = local.live_status !== m.live_status;
             local.live_status = m.live_status;
             if (went_live) {
               local.title = m.title || local.title;
@@ -1962,8 +1972,10 @@
               local.cover = m.cover || local.cover;
               local.room_id = m.room_id || local.room_id;
             }
-            renderLiveTabs();
-            if ((r.platform + ':' + r.room) === activeLiveId) updateVpInfo();
+            if (status_changed || went_live) {
+              renderLiveTabs();
+              if ((r.platform + ':' + r.room) === activeLiveId) updateVpInfo();
+            }
           }
         } catch (e) { /* 忽略单个失败 */ }
         await new Promise((res) => setTimeout(res, 2000));
@@ -2519,7 +2531,9 @@
     // 拖拽/缩放刚启动、新底图刷新中：冻结当前画面，不重绘。
     // 旧底图已作废（可能还停留在上一轮会话的内容），此时若强行取帧会闪现
     // 上一轮拖拽/缩放的最后一帧；冻结 1~2 帧后全量瓦片帧到达即恢复。
-    if (viewDirty && baseMapActive && !baseMapReady) return;
+    // 例外：画布刚被重建/清空（canvasBlank）时冻结已无内容可保留，必须绘制
+    // 兜底（退到 srcCanvas 实时帧）——否则画布全黑。
+    if (viewDirty && baseMapActive && !baseMapReady && !canvasBlank) return;
     const ctx = canvasCtx;
     ctx.fillStyle = '#101010';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -2540,6 +2554,7 @@
       ctx.imageSmoothingQuality = dragging ? 'low' : 'high';
       ctx.drawImage(srcCanvas, r.ox, r.oy, r.cw, r.ch);
     }
+    canvasBlank = false;
   }
 
   function updateRegion() {

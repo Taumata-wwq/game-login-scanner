@@ -123,6 +123,11 @@ struct MonitorDup {
     /// 消费者是否请求了新帧：总线只在为 true 时拷贝（消费者 30Hz 读取，
     /// 避免总线 60Hz 拷贝一半被丢弃），拷完置回 false。
     tile_want: bool,
+    /// 本次瓦片模式会话需要「无条件全量重发」：前端每次开始拖拽都会重建底图
+    /// canvas（内容为空），而后端 `tiles.base` 跨会话保留、内容比对会跳过未变化
+    /// 瓦片——只发增量会让前端新画布的大片区域停留在透明（黑块）。置位后
+    /// `tile_delta` 跳过内容比对，把全部瓦片发一遍（一次全量 pass 完成后复位）。
+    tiles_fresh: bool,
 }
 
 /// staging 的只读 Map 守卫：Drop 时 Unmap（持有 COM 引用计数，不借 MonitorDup）。
@@ -472,8 +477,12 @@ impl MonitorDup {
         Ok(f(m.ptr, m.pitch))
     }
 
-    /// 扫码取帧：仅当出现新帧时转换，返回裁剪后的 RGB。
-    fn scan_frame(&mut self, key: MonitorKey) -> Result<Option<crate::screenshot::Frame>, ()> {
+    /// 扫码取帧：仅当出现新帧时转换，返回裁剪后的灰度（1 字节/像素）。
+    ///
+    /// 扫码只依赖亮度：直接产出灰度省去「RGB 三通道写入 + 二次 RGB→灰度遍历」
+    /// （1080p 整屏每帧少写约 2/3 字节、少一次全图转换）。权重与 `qr` 侧
+    /// `(77R+151G+28B)>>8` 完全一致，识别行为不变。
+    fn scan_frame(&mut self, key: MonitorKey) -> Result<Option<crate::screenshot::GrayFrame>, ()> {
         if self.scan_roi != Some(key) {
             self.scan_roi = Some(key);
             self.roi_dirty = true;
@@ -486,7 +495,9 @@ impl MonitorDup {
             return Ok(None);
         };
         let frame = self.with_mapped(|ptr, pitch| {
-            let mut out = Vec::with_capacity(cw as usize * ch as usize * 3);
+            let n = cw as usize * ch as usize;
+            let mut out = vec![0u8; n];
+            let mut oi = 0usize;
             for y in 0..ch as usize {
                 let row = unsafe {
                     std::slice::from_raw_parts(
@@ -495,13 +506,14 @@ impl MonitorDup {
                     )
                 };
                 for px in row.as_chunks::<4>().0 {
-                    out.push(px[2]);
-                    out.push(px[1]);
-                    out.push(px[0]);
+                    // BGRA：px[2]=R, px[1]=G, px[0]=B。
+                    out[oi] =
+                        ((px[2] as u32 * 77 + px[1] as u32 * 151 + px[0] as u32 * 28) >> 8) as u8;
+                    oi += 1;
                 }
             }
-            crate::screenshot::Frame {
-                rgb: out,
+            crate::screenshot::GrayFrame {
+                gray: out,
                 w: cw,
                 h: ch,
             }
@@ -618,6 +630,9 @@ impl MonitorDup {
     fn tile_delta(&mut self, max_tw: u32) -> Option<TileDelta> {
         // 请求下一帧：本次读完释放锁后，总线会为下一次调用拷贝一帧。
         self.tile_want = true;
+        // 本会话是否需全量重发（见 tiles_fresh 文档）。只读快照：全量 pass 未完成
+        // 前保持置位，提前返回（如 copied 与期望不符）不影响后续重试。
+        let fresh = self.tiles_fresh;
         let tw = max_tw.min(self.w).max(1);
         let th = ((self.h as u64 * tw as u64) / self.w as u64).max(1) as u32;
         if self.tiles.tw != tw || self.tiles.th != th {
@@ -718,8 +733,10 @@ impl MonitorDup {
                     }
                     // 降采样结果与持久底图中已有像素对比：完全相同则视为未变，
                     // 不重绘、不传输（DXGI 脏矩形常过度报告，这一步消除无效增量）。
+                    // 全量重发会话（fresh）跳过该比对：前端画布是新建的，未变化
+                    // 瓦片也必须发送，否则该区域无内容可绘（黑块）。
                     let mut tile_rgba = Vec::with_capacity(n * 4);
-                    let mut same = true;
+                    let mut same = !fresh;
                     for yy in 0..dh as usize {
                         for xx in 0..dw as usize {
                             let i = yy * dw as usize + xx;
@@ -766,6 +783,11 @@ impl MonitorDup {
         drop(mapped);
         // 只保留「落到 bbox 外、待下一帧处理」的脏标记；其余清除。
         self.tiles.dirty = remaining;
+        // 全量 pass 完成（无瓦片留待下一帧）后复位：只需保证每次会话开启后的
+        // 首个响应铺满全部瓦片。
+        if fresh && !self.tiles.dirty.iter().any(|d| *d) {
+            self.tiles_fresh = false;
+        }
         if changed.is_empty() {
             return None;
         }
@@ -990,6 +1012,7 @@ fn create_monitor(key: MonitorKey) -> Result<MonitorDup, ()> {
             tiles: TileState::new(),
             tile_mode: false,
             tile_want: false,
+            tiles_fresh: false,
         };
         if matches!(m.grab_new(), Grab::New) {
             m.frame_id = 1;
@@ -1049,7 +1072,11 @@ pub fn set_tile_mode(region: MonitorKey, on: bool) {
         if on {
             // 每次开启（新一次拖拽）都强制全量：前端起手会重建底图 canvas，
             // 需一次性铺满全部瓦片，否则只收到零星脏瓦片 → 大面积黑屏。
+            // 注意：仅「标脏」不够——tile_delta 会对未变化瓦片做内容比对并跳过
+            // 发送，而 tiles.base 跨会话保留；必须同时置 tiles_fresh 无条件重发
+            //（每次拖拽起手的黑块根因）。
             m.tiles.dirty.iter_mut().for_each(|d| *d = true);
+            m.tiles_fresh = true;
             m.tile_want = true; // 请求首帧
         }
     }
@@ -1062,9 +1089,13 @@ pub fn tile_frame(region: MonitorKey, max_tw: u32) -> Result<Option<TileDelta>, 
     let entry = get_or_create(mkey)?;
     let mut m: MutexGuard<MonitorDup> = entry.dup.lock().unwrap_or_else(PoisonError::into_inner);
     if !m.tile_mode {
+        // 兜底路径（前端未先调 set_tile_mode）：与开启语义一致——标脏全部瓦片
+        // 并要求全量重发，保证首个响应铺满。
         m.tile_mode = true;
         m.roi_dirty = true;
         m.tile_want = true;
+        m.tiles.dirty.iter_mut().for_each(|d| *d = true);
+        m.tiles_fresh = true;
     }
     Ok(m.tile_delta(max_tw))
 }
@@ -1100,9 +1131,9 @@ pub fn clear_scan_roi(region: MonitorKey) {
     }
 }
 
-/// 扫码取帧：区域画面自上次调用以来有变化时返回 RGB 帧；无变化返回 None。
+/// 扫码取帧：区域画面自上次调用以来有变化时返回灰度帧；无变化返回 None。
 /// Err = 桌面复制不可用（调用方走 GDI 兜底）。
-pub fn scan_frame(region: MonitorKey) -> Result<Option<crate::screenshot::Frame>, Unavailable> {
+pub fn scan_frame(region: MonitorKey) -> Result<Option<crate::screenshot::GrayFrame>, Unavailable> {
     let mkey = monitor_key_for(region).ok_or(Unavailable)?;
     let entry = get_or_create(mkey)?;
     let mut m: MutexGuard<MonitorDup> = entry.dup.lock().unwrap_or_else(PoisonError::into_inner);

@@ -96,6 +96,19 @@ pub fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+/// RGB 字节转灰度（BT.601 加权整数实现，`(77R+151G+28B)>>8`）。
+/// 扫码热路径已直接产出灰度（见 `decode_gray_hit`），本函数供一次性路径
+/// （剪贴板图片、测试）与仍持有 RGB 缓冲的调用方使用；结果与历史实现逐位一致。
+pub fn rgb_to_gray(rgb: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let n = width as usize * height as usize;
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
+        .take(n)
+        .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 151 + p[2] as u32 * 28) >> 8) as u8)
+        .collect()
+}
+
 /// 解码结果：文本 + 二维码在图像中的轴对齐包围盒（像素坐标，用于 ROI 加速）。
 ///
 /// bounds 为 None 表示 zedbar 未记录位置（对 QR 码通常都有）。
@@ -106,24 +119,16 @@ pub struct QrHit {
     pub bounds: Option<(i32, i32, u32, u32)>,
 }
 
-/// zedbar（ZBar 算法纯 Rust 移植）解码 RGB 图片，返回文本与位置。
+/// zedbar（ZBar 算法纯 Rust 移植）解码灰度图，返回文本与位置。
 ///
-/// 本项目唯一解码器（2026-10-08 移除 rqrr）。真实 2560x1440 游戏登录截图实测：
-/// 全屏 ~128ms 且 100% 命中。
-///
-/// 开启 retry_undecoded_regions：对检测到 finder 但未解出的区域自动裁剪+放大
-/// 重试（等价「放大到二维码附近」），提升小二维码识别率。
-///
-/// 开启 position_tracking：让 zedbar 记录二维码四个角点，Symbol::bounds() 由此
-/// 算出包围盒——调用方可据此把下一轮解码限定在「上次命中位置」附近（ROI）。
-///
-/// 本函数为**保真配置**（不抽样扫描线）：识别率下限与历史行为一致。
-/// 整屏热路径用 `decode_rgb_hit_fast`（提速 ~43%），快路径失败后回来兜底。
-pub fn decode_rgb_hit(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
-    decode_impl(rgb, width, height, false)
+/// **扫码热路径入口**：QR 识别只需亮度信息，扫描链路（桌面复制 / 直播 YUV）
+/// 直接产出灰度缓冲，避免「RGB 三通道写入 + 二次 RGB→灰度遍历」的重复开销
+/// （1080p 每帧省约 2/3 写入量与一次全图转换）。
+pub fn decode_gray_hit(gray: &[u8], width: u32, height: u32) -> Option<QrHit> {
+    decode_impl(gray, width, height, false)
 }
 
-/// 快配置解码：`scan_density(2,2)` 隔行扫描（每 2 行/列抽 1）。
+/// 快配置灰度解码：`scan_density(2,2)` 隔行扫描（每 2 行/列抽 1）。
 ///
 /// 2026-10-11 实测（tests/bench_qr.rs，两张真机验证截图）：
 /// - 2K 整屏 2569×1445：128ms → 73ms（-43%），命中；
@@ -133,22 +138,31 @@ pub fn decode_rgb_hit(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
 /// 1/2 面积平均降采样会导致两张截图均漏检，已否决该方案），对游戏登录码这种
 /// 模块尺寸较大的目标无识别损失；小码漏检风险由调用方「周期性精确兜底」覆盖
 /// （见 scan.rs `decode_full_with_fallback`）。
-pub fn decode_rgb_hit_fast(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
-    decode_impl(rgb, width, height, true)
+pub fn decode_gray_hit_fast(gray: &[u8], width: u32, height: u32) -> Option<QrHit> {
+    decode_impl(gray, width, height, true)
 }
 
-fn decode_impl(rgb: &[u8], width: u32, height: u32, fast: bool) -> Option<QrHit> {
+/// RGB 便捷入口（内部转灰度）：剪贴板等一次性路径用，勿在热路径调用。
+pub fn decode_rgb_hit(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
     if width == 0 || height == 0 {
         return None;
     }
-    // zedbar 只吃灰度：BT.601 亮度。
-    let gray: Vec<u8> = rgb
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|p| ((p[0] as u32 * 77 + p[1] as u32 * 151 + p[2] as u32 * 28) >> 8) as u8)
-        .collect();
-    let mut img = zedbar::Image::from_gray(&gray, width, height).ok()?;
+    decode_impl(&rgb_to_gray(rgb, width, height), width, height, false)
+}
+
+/// 同 `decode_rgb_hit`，快配置。
+pub fn decode_rgb_hit_fast(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    decode_impl(&rgb_to_gray(rgb, width, height), width, height, true)
+}
+
+fn decode_impl(gray: &[u8], width: u32, height: u32, fast: bool) -> Option<QrHit> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut img = zedbar::Image::from_gray(gray, width, height).ok()?;
     // 所有游戏登录码均为白底黑码（正常极性），无需 test_inverted。
     // 0.7 起 DecoderConfig::new() 默认全禁，显式 enable 二维码即可。
     let mut config = zedbar::DecoderConfig::new()
