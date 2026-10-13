@@ -275,7 +275,11 @@ impl LivePipe {
                     let need = slot_prod.lock().map(|g| g.is_none()).unwrap_or(false);
                     if need {
                         if let Some(aid) = crate::live::active_id() {
-                            if let Some(frame) = crate::live::take_scan_frame(&aid) {
+                            // 主档取半分辨率帧（`LIVE_SCAN_SCALE`）：解码成本 ∝ 像素数，
+                            // 720p 逐帧从 5.5ms 降到 2.45ms，检出率实测持平。
+                            if let Some(frame) =
+                                crate::live::take_scan_frame(&aid, crate::live::LIVE_SCAN_SCALE)
+                            {
                                 if last_key.as_ref() != Some(&frame.key) {
                                     last_key = Some(frame.key);
                                     if let Ok(mut g) = slot_prod.lock() {
@@ -411,12 +415,84 @@ const ROI_MIN_SIDE: u32 = 32;
 /// 均值压在快路径水平（约每 10 轮多付一次精确扫描）。
 const EXACT_FALLBACK_INTERVAL: Duration = Duration::from_millis(800);
 
+/// 屏幕（桌面复制）扫码主档的降采样倍率（1/2）。
+///
+/// 依据（2026-10-13 真机截图复核，`tests/bench_qr_screen.rs`，**推翻旧结论**）：
+/// `bench_qr.rs` 曾记「1/2 降采样两张截图均漏检、方案已否决」，但当时用的是
+/// **面积平均（box）**降采样；改用**步长采样**后两张真机截图**均命中**，
+/// 2569x1445 解码 **20.7ms → 6.2ms（-70%）**。
+/// （直播侧同结论见 `live::LIVE_SCAN_SCALE`；1/3 在真机截图上漏检，不采用。）
+///
+/// 屏幕路径有 400ms 节流 + ROI 加速，本项收益是「进一步压低桌面模式占用」，
+/// 识别率下限由全分辨率兜底（`FullSource::Screen`）锚定。
+const SCREEN_SCAN_SCALE: u32 = 2;
+
+/// 步长（最近邻）降采样：每 k×k 窗口取首点。
+///
+/// **必须用步长而非面积平均**：箱平均抹平模块边缘对比度，而 rxing 的
+/// HybridBinarizer 依赖局部对比度——真机截图实测 1/2 箱平均两张均未命中、
+/// 1/2 步长两张均命中；直播帧上 90px 码箱平均 0/8、步长 8/8。
+fn stride_downsample(gray: &[u8], w: u32, h: u32, k: u32) -> (Vec<u8>, u32, u32) {
+    let k = k.max(1);
+    let (dw, dh) = ((w / k).max(1), (h / k).max(1));
+    let mut out = Vec::with_capacity((dw as usize) * (dh as usize));
+    for y in 0..dh {
+        let row = (y * k) as usize * w as usize;
+        for x in 0..dw {
+            out.push(gray[row + (x * k) as usize]);
+        }
+    }
+    (out, dw, dh)
+}
+
+/// 兜底档的**全分辨率**帧来源。
+///
+/// 主档为了压 CPU 用降采样帧（直播 1/2、屏幕 1/2），而降采样会漏掉小码
+/// （实测 90px 以下），故周期性兜底必须回到全分辨率：**哪档取帧、哪档解码**
+/// 要配套，不能拿降采样帧跑保真档（那是自欺：保真档再强也救不回已丢的细节）。
+pub enum FullSource<'a> {
+    /// 主档即全分辨率（或该路径不做降采样）。
+    None,
+    /// 直播：兜底时按会话 id 现取一帧全分辨率（800ms 一次，串行成本可接受）。
+    Live(&'a str),
+    /// 屏幕：本轮已抓到全分辨率灰度，直接复用。
+    Screen(&'a [u8], u32, u32),
+}
+
+/// 把全分辨率坐标系的包围盒换算到主档（降采样）坐标系。
+///
+/// ROI 存的是「主档帧坐标系」的位置，后续在主档帧上裁剪；兜底档跑在
+/// 全分辨率帧上，其 bounds 必须先除以倍率，否则 ROI 会锁到错误位置。
+fn scale_bounds(mut hit: qr::QrHit, scale: u32) -> qr::QrHit {
+    if scale > 1 {
+        if let Some((x, y, w, h)) = hit.bounds {
+            hit.bounds = Some((
+                x / scale as i32,
+                y / scale as i32,
+                (w / scale).max(1),
+                (h / scale).max(1),
+            ));
+        }
+    }
+    hit
+}
+
 /// 全幅解码（非 ROI 路径）：快路径优先，失败后按节流间隔用保真解码兜底。
 ///
 /// 快路径 `scan_density(2,2)` 对模块尺寸较大的游戏登录码无识别损失（两张
 /// 真机验证截图均命中，提速 ~43%）；小码/低对比目标存在漏检可能，故保留
 /// 周期性精确兜底。兜底只在快路径**失败**后触发，命中路径零额外开销。
-fn decode_full_with_fallback(st: &mut LoopState, gray: &[u8], w: u32, h: u32) -> Option<qr::QrHit> {
+///
+/// `scale`：主档帧的降采样倍率（兜底命中后需把 bounds 换算回该坐标系）。
+/// `full`：兜底档的全分辨率帧来源（见 `FullSource`）。
+fn decode_full_with_fallback(
+    st: &mut LoopState,
+    gray: &[u8],
+    w: u32,
+    h: u32,
+    scale: u32,
+    full: FullSource,
+) -> Option<qr::QrHit> {
     if let Some(hit) = qr::decode_gray_hit_fast(gray, w, h) {
         return Some(hit);
     }
@@ -427,6 +503,22 @@ fn decode_full_with_fallback(st: &mut LoopState, gray: &[u8], w: u32, h: u32) ->
         return None;
     }
     st.last_exact_scan = Some(tokio::time::Instant::now());
+    match full {
+        // 直播兜底：现取一帧全分辨率（不走流水线，800ms 一次，串行成本可接受）。
+        FullSource::Live(aid) => {
+            if let Some(f) = crate::live::take_scan_frame(aid, 1) {
+                if let Some(hit) = qr::decode_gray_hit(&f.gray, f.w, f.h) {
+                    return Some(scale_bounds(hit, scale));
+                }
+            }
+        }
+        FullSource::Screen(g, fw, fh) => {
+            if let Some(hit) = qr::decode_gray_hit(g, fw, fh) {
+                return Some(scale_bounds(hit, scale));
+            }
+        }
+        FullSource::None => {}
+    }
     qr::decode_gray_hit(gray, w, h)
 }
 
@@ -498,16 +590,20 @@ fn decode_with_roi(
     gray: &[u8],
     w: u32,
     h: u32,
+    scale: u32,
+    full: FullSource,
 ) -> Option<(qr::QrHit, bool)> {
     if st.last_hits.len() <= idx {
         st.last_hits.resize(idx + 1, None);
         st.roi_misses.resize(idx + 1, 0);
     }
-    // 1) ROI 优先：上次命中位置外扩 ROI_PAD，裁剪后单独解码。
+    // ROI 坐标存于主档（可能已降采样）坐标系，外扩边距同步缩放。
+    let pad = (ROI_PAD / scale as i32).max(4);
+    // 1) ROI 优先：上次命中位置外扩 pad，裁剪后单独解码。
     if let Some((x, y, rw, rh)) = st.last_hits[idx] {
-        let rx = (x - ROI_PAD).max(0);
-        let ry = (y - ROI_PAD).max(0);
-        let pad2 = (ROI_PAD * 2) as u32;
+        let rx = (x - pad).max(0);
+        let ry = (y - pad).max(0);
+        let pad2 = (pad * 2) as u32;
         if let Some((sub, sw, sh)) = crop_region(gray, w, h, rx, ry, rw + pad2, rh + pad2) {
             if let Some(hit) = qr::decode_gray_hit(&sub, sw, sh) {
                 let full = hit
@@ -527,7 +623,7 @@ fn decode_with_roi(
     }
     // 2) 回退全屏：快路径（scan_density）优先，失败后周期性精确兜底；
     //    是否锁定 ROI 由调用方决定。
-    let hit = decode_full_with_fallback(st, gray, w, h)?;
+    let hit = decode_full_with_fallback(st, gray, w, h, scale, full)?;
     Some((hit, false))
 }
 
@@ -799,7 +895,16 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                 let (w, h) = (frame.w, frame.h);
                 // zedbar 解码（唯一解码器）：快路径 + 周期性精确兜底
                 // （与屏幕路径同一策略，快路径对直播 720p 帧提速 ~40%）。
-                let decoded = decode_full_with_fallback(&mut st, &frame.gray, w, h).map(|h| h.text);
+                // 兜底档取全分辨率帧（主档是半分辨率），覆盖降质小码。
+                let decoded = decode_full_with_fallback(
+                    &mut st,
+                    &frame.gray,
+                    w,
+                    h,
+                    crate::live::LIVE_SCAN_SCALE,
+                    FullSource::Live(&aid),
+                )
+                .map(|h| h.text);
                 if let Some(text) = decoded {
                     if let Some(qrc) = qr::extract(&text) {
                         if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
@@ -916,8 +1021,19 @@ async fn process_screen(
     }
     st.last_thumbs[idx] = Some(thumb);
 
-    // 2) zedbar 解码（唯一解码器）：优先上次命中的 ROI，未命中回退全屏。
-    let Some((hit, from_roi)) = decode_with_roi(st, idx, &frame.gray, frame.w, frame.h) else {
+    // 2) 解码：优先上次命中的 ROI，未命中回退全屏。
+    //    主档跑在 1/2 步长降采样帧上（真机截图实测命中、-70% 耗时），
+    //    全分辨率帧保留给周期性兜底（覆盖降采样会漏掉的小码）。
+    let (sgray, sw, sh) = stride_downsample(&frame.gray, frame.w, frame.h, SCREEN_SCAN_SCALE);
+    let Some((hit, from_roi)) = decode_with_roi(
+        st,
+        idx,
+        &sgray,
+        sw,
+        sh,
+        SCREEN_SCAN_SCALE,
+        FullSource::Screen(&frame.gray, frame.w, frame.h),
+    ) else {
         return false;
     };
     let text = hit.text;

@@ -158,6 +158,8 @@ windows = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Variant",
+    # CPU 分项探针（tests/probe_live_profile.rs）用 GetProcessTimes 取进程级 CPU 时间。
+    "Win32_System_Threading",
 ] }
 
 # 仅测试/基准使用（不进发布二进制）：zxing-cpp（C++，bundled 构建，Apache-2.0）

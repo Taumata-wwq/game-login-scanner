@@ -701,6 +701,23 @@ fn yuv_crop_to_gray(
         }
         return out;
     }
+    // 步长采样快路径：整数倍降采样（step 恰好覆盖箱窗口 → 每输出像素取窗口首点）。
+    // 常规分支对每个输出像素做一次整数除法（`ysum / yn`），720p 的 1/2 降采样即
+    // 23 万次除法 ≈ 2ms —— 实测占主档取帧耗时的 95%。本分支无除法、无内层平均
+    // 循环；且**步长采样对 QR 的检出优于箱平均**（箱平均抹平模块边缘对比度，
+    // 而 HybridBinarizer 依赖局部对比：90px 码箱平均 0/8、步长 8/8，
+    // 见 tests/bench_qr_pyramid.rs）。
+    if step > 1 && tw * step == cw && th * step == ch {
+        for oy in 0..th {
+            let sy = cy + oy * step;
+            let src = &y[sy * src_w + cx..sy * src_w + cx + cw];
+            let dst = &mut out[oy * tw..(oy + 1) * tw];
+            for ox in 0..tw {
+                dst[ox] = src[ox * step];
+            }
+        }
+        return out;
+    }
     // 预计算行/列映射（避免内层重复除法）。
     let mut row_ys: Vec<(usize, usize)> = Vec::with_capacity(th);
     for oy in 0..th {
@@ -862,6 +879,9 @@ struct ScanCache {
     gray: Arc<Vec<u8>>,
     w: u32,
     h: u32,
+    /// 缓存帧的降采样倍率：主档（2）与兜底档（1）交替取帧时，倍率不同的缓存
+    /// 不能复用（尺寸不同），否则会把半分辨率帧当成全分辨率帧解码。
+    scale: u32,
 }
 
 /// 上次发送的预览帧标识：(seq, 裁剪区, 输出宽)。相同则返回短响应。
@@ -1302,6 +1322,23 @@ const SCAN_MAX_LONG_SIDE: u32 = 1920;
 
 /// 扫码取帧的输出尺寸：裁剪区不超过上限时原分辨率输出（保二维码模块细节），
 /// 超过则等比缩小到最长边 = SCAN_MAX_LONG_SIDE。
+/// 直播扫码主档的降采样倍率（相对源帧，2 = 半分辨率）。
+///
+/// 依据（2026-10-13 基准 `tests/bench_qr_pyramid.rs`，24 帧真实 720p 直播画面
+/// + 带静区合成码，含「模糊×1 / 模糊×2+噪声」两级降质）：
+/// - 耗时：主档 1/2 步长 **2.45ms/帧**（含降采样），全分辨率 5.50ms/帧（-55%）；
+///   叠加 800ms 节流的全分辨率兜底后均值 2.39ms/帧 ≈ **6.0% 核**（旧 17.5%）。
+/// - 检出：≥120px 的码在最强降质下仍 **8/8 全中**（与全分辨率持平）；
+///   90px 降质小码主档漏检 → 由周期性全分辨率兜底覆盖（延迟 ≤800ms）；
+///   70px 极限小码全分辨率同样检不出，非本次回归。
+/// - 采样方式：步长（最近邻）优于箱平均——后者抹平模块边缘对比度，
+///   HybridBinarizer 依赖局部对比，实测 90px 码箱平均 0/8、步长 8/8。
+///
+/// 屏幕（桌面复制）路径仍为 1：截图清晰、且有 400ms 节流与 ROI 加速兜底，
+/// 不以识别率换 CPU。
+pub const LIVE_SCAN_SCALE: u32 = 2;
+
+/// 扫码帧输出尺寸：裁剪区按 `SCAN_MAX_LONG_SIDE` 上限等比缩小（保模块细节）。
 pub fn scan_output_size(cw: u32, ch: u32) -> (u32, u32) {
     let (cw, ch) = (cw.max(1), ch.max(1));
     if cw.max(ch) <= SCAN_MAX_LONG_SIDE {
@@ -1324,7 +1361,7 @@ pub fn scan_output_size(cw: u32, ch: u32) -> (u32, u32) {
 /// 扫码帧的内容标识：`(帧序号, 裁剪区)`。相同表示像素完全未变。
 pub type ScanKey = (u64, Option<(u32, u32, u32, u32)>);
 
-/// 扫码用的一帧：灰度像素 + 变化标识。
+/// 扫码用的一帧：灰度像素 + 变化标识 + 降采样倍率。
 pub struct ScanFrame {
     /// 灰度像素（1 字节/像素，紧凑布局：行跨距 = w）。Arc 共享：命中缓存时
     /// 只克隆指针（零拷贝），避免每轮 60Hz 轮询复制整帧（1080p ~2MB）。
@@ -1334,11 +1371,25 @@ pub struct ScanFrame {
     /// 内容标识：与上轮相同表示像素完全未变（缓存命中）。扫码侧据此跳过对
     /// 同一帧的重复解码（流帧率低于轮询频率时的纯浪费）。
     pub key: ScanKey,
+    /// `gray` 相对源帧的降采样倍率（1 = 原分辨率；2 = 1/2 步长采样）。
+    ///
+    /// 直播扫码主档取 2（见 `LIVE_SCAN_SCALE`）：解码成本 ∝ 像素数，1/2 降采样
+    /// 把 720p 主扫描从 5.5ms 压到 2.45ms/帧（-55%）。
+    ///
+    /// 实测（24 帧真实直播画面 + 带静区合成码，含模糊/噪声降质）≥120px 的码
+    /// 检出率与全分辨率完全持平（8/8），90px 及以下的降质小码由周期性
+    /// 全分辨率兜底覆盖。
+    pub scale: u32,
 }
 
-/// 扫码消费者（多会话）：取指定会话的最新帧**当前显示视口**区域
-/// （原分辨率灰度，超上限才等比缩小）。视口未知时用全帧。
-pub fn take_scan_frame(id: &str) -> Option<ScanFrame> {
+/// 扫码消费者（多会话）：取指定会话的最新帧**当前显示视口**区域灰度。
+/// 视口未知时用全帧。
+///
+/// `scale` = 降采样倍率（1 = 原分辨率，2 = 1/2）。直播主档传
+/// `LIVE_SCAN_SCALE`（2）以压低逐帧解码成本；周期性兜底传 1 取全分辨率，
+/// 覆盖降采样会漏掉的降质小码（见 `ScanFrame::scale` 的实测说明）。
+pub fn take_scan_frame(id: &str, scale: u32) -> Option<ScanFrame> {
+    let scale = scale.max(1);
     let s = get_session(id)?;
     let view = *s.last_view.lock().unwrap_or_else(PoisonError::into_inner);
     // 只在锁内取「帧引用 + 缓存命中判断」，**不在锁内做 YUV→灰度转换**：
@@ -1369,19 +1420,32 @@ pub fn take_scan_frame(id: &str) -> Option<ScanFrame> {
         let cached = f
             .scan_cache
             .as_ref()
-            .filter(|c| c.seq == frame.seq && c.crop == crop)
+            .filter(|c| c.seq == frame.seq && c.crop == crop && c.scale == scale)
             .map(|c| (c.gray.clone(), c.w, c.h));
         (frame, crop, cached)
     };
     let key = (frame.seq, crop);
     if let Some((gray, w, h)) = cached {
-        return Some(ScanFrame { gray, w, h, key });
+        return Some(ScanFrame {
+            gray,
+            w,
+            h,
+            key,
+            scale,
+        });
     }
     let (fw, fh) = (frame.w, frame.h);
     // 原分辨率输出（保二维码模块细节），仅超上限才等比缩小。
     // 此前无条件减半，导致全屏视口下二维码模块明显过小、无法识别（放大才可识别）。
     let crop_rect = crop.unwrap_or((0, 0, fw, fh));
-    let (ow, oh) = scan_output_size(crop_rect.2, crop_rect.3);
+    let (bw, bh) = scan_output_size(crop_rect.2, crop_rect.3);
+    // 主档降采样：输出再缩 1/scale（直播常态 1/2）。
+    let (ow, oh) = ((bw / scale).max(1), (bh / scale).max(1));
+    // 采样步长 = 源/输出比：`yuv_crop_to_gray` 的箱窗口在 step 覆盖整个窗口时
+    // 退化为「取窗口首点」= 步长采样。实测步长采样对 QR 的检出**优于**箱平均
+    // （箱平均抹平模块边缘对比度，HybridBinarizer 依赖局部对比：90px 码箱平均
+    // 0/8、步长 8/8），且成本更低。
+    let step = ((crop_rect.2 / ow).max(1)) as usize;
     let gray = yuv_crop_to_gray(
         &frame.y,
         fw as usize,
@@ -1389,7 +1453,7 @@ pub fn take_scan_frame(id: &str) -> Option<ScanFrame> {
         crop_rect,
         ow as usize,
         oh as usize,
-        1,
+        step,
     );
     let gray = Arc::new(gray);
     // 回写缓存（短锁）。
@@ -1401,6 +1465,7 @@ pub fn take_scan_frame(id: &str) -> Option<ScanFrame> {
             gray: gray.clone(),
             w: ow,
             h: oh,
+            scale,
         });
     }
     Some(ScanFrame {
@@ -1408,6 +1473,7 @@ pub fn take_scan_frame(id: &str) -> Option<ScanFrame> {
         w: ow,
         h: oh,
         key,
+        scale,
     })
 }
 
