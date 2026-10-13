@@ -699,7 +699,7 @@
         </div>
 
         <div id="buildTag" style="font-size:9.5px;color:var(--faint);letter-spacing:0.02em;">
-          构建 2026-10-13.3（硬解 / 帧率自适应 / 有界重试 / 界面）
+          版本 0.3.1 · 构建 2026-10-13.4（DXVA 硬解 / 帧率自适应 / 有界重试 / 界面）
         </div>
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
@@ -2283,30 +2283,29 @@
   function previewIntervalMs() {
     return 1000 / (fpsSetting || 60);
   }
-  // 直播预览节拍：**按实测「新帧到达率」跟随流帧率**（16~50ms 夹取）。
+  // 直播预览节拍：**增减式自适应**跟随流帧率。
   //
-  // 旧实现固定 40ms（≈25fps）、连续无新帧降到 50ms（20fps）——这是「直播最多
-  // 20 多帧」的直接原因：即便流是 30/60fps，显示也被轮询节拍限住。
-  // 现改为每秒统计一次真实新帧数：30fps 流 → 33ms、60fps 流 → 16ms、
-  // 20fps 流 → 50ms；无新帧（暂停/断流）退到 50ms 省资源。
-  // 同时受设置里的「显示区域帧率」上限约束（与屏幕预览同一口径）。
-  let liveEstInterval = 33;   // 初始 ≈30fps；首秒窗口结束后按实测调整
-  let liveWin = { t0: performance.now(), frames: 0 };
-  // 刚进入直播模式的第一个节拍：重置统计窗口——否则会沿用「页面早先活动」的
-  // 旧窗口（其中没有直播帧）→ fps 误判为 0 → 首秒退到 50ms（20fps）。
+  // 历史坑：早先固定 40ms（25fps）/闲置 50ms（20fps）；上一版改为「按每秒新帧数
+  // 估算流帧率」——但该估算自指：一旦轮询间隔长于流帧间隔（如 50ms > 33ms），
+  // 每轮都能拿到新帧，估出的「帧率」恒等于轮询率 → 间隔永远收不回来，卡死在
+  // 20fps（实测流 29.2fps、显示 17fps）。
+  //
+  // 现改为 AIMD（加减式）控制：
+  // - 本轮拿到新帧 → 认为「流还能更快」，间隔 −3ms（下限 16ms ≈60fps）；
+  // - 连续两轮无新帧 → 认为「已追上流」，间隔 +6ms（上限 50ms ≈20fps）。
+  // 稳态会在「流的帧间隔」附近小幅摆动（30fps 流 ≈33ms、60fps 流 ≈16ms），
+  // 且不会因估算自指而钉死。同时受设置里「显示区域帧率」约束（见 previewIntervalMs）。
+  let liveEstInterval = 33;   // 初始 ≈30fps
+  let liveMiss = 0;           // 连续「无新帧」计数
   let liveWasOn = false;
   function liveAdaptiveInterval(changed) {
-    if (!liveWasOn) {
-      liveWasOn = true;
-      liveEstInterval = 33;
-      liveWin = { t0: performance.now(), frames: 0 };
-    }
-    if (changed) liveWin.frames++;
-    const el = performance.now() - liveWin.t0;
-    if (el >= 1000) {
-      const fps = (liveWin.frames * 1000) / el;
-      liveWin = { t0: performance.now(), frames: 0 };
-      liveEstInterval = fps >= 1 ? Math.min(Math.max(Math.round(1000 / fps), 16), 50) : 50;
+    if (!liveWasOn) { liveWasOn = true; liveEstInterval = 33; liveMiss = 0; }
+    if (changed) {
+      liveMiss = 0;
+      liveEstInterval = Math.max(16, liveEstInterval - 3);
+    } else if (++liveMiss >= 2) {
+      liveMiss = 0;
+      liveEstInterval = Math.min(50, liveEstInterval + 6);
     }
     return Math.max(liveEstInterval, previewIntervalMs());
   }
@@ -2314,8 +2313,10 @@
   let idleFrames = 0;
   let previewActive = false;
   let fpsFrames = 0, fpsLast = performance.now();
-  function tickFps() {
-    fpsFrames++;
+  // 帧率徽标：直播模式统计「真实渲染的新帧数」（有意义的显示帧率；轮询快于流时
+  // 不应把重复帧算进去）；屏幕预览沿用轮询节拍（静止画面下也反映预览在跑）。
+  function tickFps(changed) {
+    if (changed || !liveOn()) fpsFrames++;
     const now = performance.now();
     if (now - fpsLast >= 1000) {
       const el = $('fpsMeter');
@@ -2332,7 +2333,7 @@
     if (!previewActive || gen !== previewGen) return;
     const t0 = performance.now();
     const changed = await refreshPreview();
-    tickFps();
+    tickFps(changed);
     if (!previewActive || gen !== previewGen) return;
     if (changed) idleFrames = 0; else idleFrames++;
     // 直播：固定 33ms（≈30fps）；连续无新帧时进一步降频省 CPU。
@@ -2582,8 +2583,9 @@
       ctx.drawImage(sc, sx, sy, sw, sh, r.ox, r.oy, r.cw, r.ch);
     } else if (srcCanvas) {
       ctx.imageSmoothingEnabled = r.cw <= srcCanvas.width + 0.5;
-      // 拖拽/缩放动画中降质量（GPU 缩放；静止时用 high 保清晰度）。
-      ctx.imageSmoothingQuality = dragging ? 'low' : 'high';
+      // 拖拽/缩放动画中、以及直播（视频）画面降质量：GPU 缩放成本更低，
+      // 帧率更稳；屏幕预览静止时仍用 high 保清晰度。
+      ctx.imageSmoothingQuality = (dragging || liveOn()) ? 'low' : 'high';
       ctx.drawImage(srcCanvas, r.ox, r.oy, r.cw, r.ch);
     }
     canvasBlank = false;
