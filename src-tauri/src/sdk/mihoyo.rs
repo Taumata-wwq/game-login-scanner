@@ -47,10 +47,17 @@ pub async fn verify_cached(uid: &str, access_key: &str) -> Result<BhInfo, String
     Ok(info)
 }
 
-/// 清空 bh_info 缓存（登出 / 切换账号 / 令牌更新时调用）。
-pub fn clear_bh_info_cache() {
+/// 清除**指定账号**的 bh_info 缓存（删除账号时调用）。
+///
+/// 只在该 uid 与缓存持有者一致时才清空——缓存是单槽位，无条件清空会连带
+/// 让其它账号的缓存失效（多一次网络往返），故按 uid 匹配。
+pub fn clear_bh_info_cache(uid: &str) {
     if let Ok(mut c) = BH_INFO_CACHE.write() {
-        *c = None;
+        if c.as_ref()
+            .is_some_and(|(cached_uid, _, _, _)| cached_uid == uid)
+        {
+            *c = None;
+        }
     }
 }
 

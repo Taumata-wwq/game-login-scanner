@@ -81,11 +81,6 @@ fn ensure_mf_started() -> Result<(), String> {
         .clone()
 }
 
-/// 系统 H.264 解码 MFT 是否可用（Windows N/K 版缺 Media Feature Pack 时为否）。
-pub fn available() -> bool {
-    MfDecoder::new().is_ok()
-}
-
 /// MF H.264 解码器：一次会话持有 `IMFTransform`，逐访问单元（Annex-B）解码。
 ///
 /// 仅限创建它的线程使用（COM 对象按 MTA 服务；本管线解码线程自持自用）。

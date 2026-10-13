@@ -912,7 +912,6 @@
   ];
   function gameMeta(id) { return GAMES.find((g) => g.id === id) || GAMES[0]; }
   function gameLabel(id) { return gameMeta(id).name; }
-  function vendorOf(id) { const g = gameMeta(id); return g.vendor; }
   // 游戏选择列（左列）：直接列全部游戏，点击切换。
   function renderGame() {
     if (!config) return;

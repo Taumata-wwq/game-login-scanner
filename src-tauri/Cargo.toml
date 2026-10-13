@@ -80,7 +80,7 @@ lto = true
 codegen-units = 1
 
 # 本 crate 用 "z"（体积优先）：热路径解码在系统 MF 组件（零体积），
-# QR 解码在 zedbar（独立 crate），Rust 侧主要是 IPC 与整数转换。
+# QR 解码在 rxing（独立 crate），Rust 侧主要是 IPC 与整数转换。
 [profile.release.package.game-login-scanner]
 opt-level = "z"
 
@@ -123,10 +123,6 @@ opt-level = "z"
 [profile.release.package.base64]
 opt-level = "z"
 [profile.release.package.windows]
-opt-level = "z"
-[profile.release.package.windows-core]
-opt-level = "z"
-[profile.release.package.windows-strings]
 opt-level = "z"
 [profile.release.package.webview2-com-sys]
 opt-level = "z"

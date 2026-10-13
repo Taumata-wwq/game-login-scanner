@@ -15,6 +15,9 @@
   - zxing-cpp（C++，Apache-2.0，经 `zxing-cpp` Rust 封装）：26.7ms/帧（其默认选项含
     旋转/降采样多遍扫描，且封装未暴露调优开关），未采用。
 
+  > zedbar 与 zxing-cpp 仍以 **dev-dependencies** 形式保留，仅用于解码器对照基准
+  > （`tests/bench_qr*.rs`），**不进发布二进制**（零体积影响），是上述结论可复现的基础。
+
 ## 系统组件（随 Windows 提供，不随本项目分发）
 
 - **Media Foundation H.264 解码器**（`CLSID_CMSH264DecoderMFT`）：直播视频解码。

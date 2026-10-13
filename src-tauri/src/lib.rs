@@ -293,7 +293,12 @@ fn delete_account(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     match channel {
         Channel::Bilibili => cfg.remove_bili(&game, &uid),
-        Channel::Official => cfg.remove_official(&game, &uid),
+        Channel::Official => {
+            cfg.remove_official(&game, &uid);
+            // 同步清掉该账号的 bh_info 缓存（缓存带 uid 键，本不会串号，
+            // 但账号已删除就无需再占着槽位）。
+            crate::sdk::mihoyo::clear_bh_info_cache(&uid);
+        }
     }
     let _ = cfg.save();
     Ok(())
