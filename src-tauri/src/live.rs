@@ -691,6 +691,16 @@ fn yuv_crop_to_gray(
     let (tw, th) = (tw.max(1), th.max(1));
     let step = step.max(1);
     let mut out = vec![0u8; tw * th];
+    // 快路径：1:1 无缩放（扫码常态——输出尺寸上限 1920 ≥ 直播流宽，不缩放）且不抽样
+    // → 逐行 memcpy。原实现对每个输出像素做一次整数除法（`ysum / yn`），1080p 达 200 万
+    // 次除法、约 10ms+；这是扫描链路上灰度转换耗时的主因。
+    if tw == cw && th == ch && step == 1 {
+        for row in 0..ch {
+            let src0 = (cy + row) * src_w + cx;
+            out[row * cw..(row + 1) * cw].copy_from_slice(&y[src0..src0 + cw]);
+        }
+        return out;
+    }
     // 预计算行/列映射（避免内层重复除法）。
     let mut row_ys: Vec<(usize, usize)> = Vec::with_capacity(th);
     for oy in 0..th {

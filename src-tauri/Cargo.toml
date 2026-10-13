@@ -41,11 +41,12 @@ env_logger = { version = "0.11", default-features = false }
 base64 = "0.22"
 
 
-# 二维码解码 zedbar（ZBar 算法纯 Rust 移植，真实游戏截图实测最快最准）；
-# 生成 qrcodegen（零依赖）。
-# 注意：zedbar 为 LGPL-3.0-or-later（与其余 MIT/Apache 依赖不同，商用分发需评估）。
+# 二维码解码：rxing（ZXing 的纯 Rust 移植，Apache-2.0）。
+# 2026-10-13 实测（24 帧真实 720p 直播画面 + 小码回归样本）：rxing 4.5ms/帧
+# vs 旧 zedbar 11.3ms/帧（-60%），检出矩阵（180/300/120/90px，含左右边缘位置）全过，
+# 70~200px 小码回归全过；且许可证由 LGPL-3.0 换为 Apache-2.0。
 qrcodegen = "1.8"
-zedbar = { version = "0.7", default-features = false, features = ["qrcode"] }
+rxing = { version = "0.9", default-features = false, features = ["qrcode", "decoders", "encoding_rs"] }
 
 # 加密与编码
 sha2 = "0.10"
@@ -158,3 +159,11 @@ windows = { version = "0.61", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
 ] }
+
+# 仅测试/基准使用（不进发布二进制）：zxing-cpp（C++，bundled 构建，Apache-2.0）
+# 用于与 zedbar 在**真实直播帧**上做解码器对照基准（docs/调研-QR解码性能-*.md）。
+[dev-dependencies]
+# 对照基准用（不进发布二进制）：zxing-cpp（C++ 参考实现，需 bundled 编译 C++ 内核）、
+# zedbar（旧生产解码器，保留用于回归对照基准）
+zxing-cpp = { version = "0.5", features = ["bundled"] }
+zedbar = { version = "0.7", default-features = false, features = ["qrcode"] }

@@ -2173,11 +2173,13 @@
     const region = viewportMonRect() || { x: 0, y: 0, w: 0, h: 0 };
     // 预览转换上限（避免按显示分辨率逐像素转 YUV→RGBA 的高开销；
     // 画布放大由 GPU drawImage 完成，质量足够）。
+    const _t0 = performance.now();
     const buf = await invoke('capture_live_frame', {
       id: s.id,
       x: region.x, y: region.y, w: region.w, h: region.h,
       maxWidth: Math.min(canvas.width, 480),
     });
+    PERF.invoke += performance.now() - _t0;
     if (!(buf instanceof ArrayBuffer)) throw new Error('直播数据异常');
     if (buf.byteLength === 0) {
       // 该会话已结束（下播/断流）：从列表移除，回退到剩余会话或屏幕。
@@ -2200,11 +2202,17 @@
       srcCanvas.width = pw;
       srcCanvas.height = ph;
     }
+    const _t1 = performance.now();
     const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
     srcCanvas.getContext('2d').putImageData(img, 0, 0);
+    PERF.apply += performance.now() - _t1;
     clearPendingRealtime();
     viewDirty = false;
+    const _t2 = performance.now();
     drawView();
+    PERF.draw += performance.now() - _t2;
+    PERF.n++;
+    perfMaybeFlush();
     previewErrShown = false;
     // 无封面房间：首次进入记录首帧缩略图。
     const room = liveRooms.find((r) => (r.platform + ':' + r.room) === s.id);
@@ -2213,6 +2221,22 @@
       if (t) frameThumbs.set(s.id, t);
     }
     return true;
+  }
+
+  // ---------- [PERF] 临时性能探针（测量完成后移除）----------
+  // 累计直播预览各阶段耗时，每 3 秒经 frontend_log 落到应用日志，便于离线分析。
+  const PERF = { invoke: 0, apply: 0, draw: 0, n: 0, t0: performance.now() };
+  function perfMaybeFlush() {
+    const el = performance.now() - PERF.t0;
+    if (el < 3000 || PERF.n === 0) return;
+    const n = PERF.n;
+    invoke('frontend_log', {
+      level: 'info',
+      msg: `[PERF] 直播预览 ${n} 帧/ ${(el / 1000).toFixed(1)}s（${(n * 1000 / el).toFixed(1)} fps）`
+        + ` | 取帧IPC ${(PERF.invoke / n).toFixed(2)}ms | 提交画布 ${(PERF.apply / n).toFixed(2)}ms`
+        + ` | 主画布绘制 ${(PERF.draw / n).toFixed(2)}ms | 单帧合计 ${((PERF.invoke + PERF.apply + PERF.draw) / n).toFixed(2)}ms`,
+    }).catch(() => {});
+    PERF.invoke = 0; PERF.apply = 0; PERF.draw = 0; PERF.n = 0; PERF.t0 = performance.now();
   }
 
   let previewBusy = false;

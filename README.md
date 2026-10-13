@@ -59,7 +59,7 @@ src-tauri/src/
   decode.rs             解码器抽象（Media Foundation H.264 硬解）
   mf_decode.rs          Media Foundation H.264 硬解（MFT 封装，NV12→I420）
   hls.rs                HLS（LL-HLS + fMP4）解析（HLS-only 房间回退路径）
-  qr.rs                 二维码识别（zedbar）与生成（qrcodegen）
+  qr.rs                 二维码识别（rxing，ZXing 纯 Rust 移植）与生成（qrcodegen）
   screenshot.rs         GDI 截屏（兜底路径）
   duplication.rs        DXGI 桌面复制（低开销取帧）
   clipboard.rs          剪贴板读图
@@ -80,10 +80,10 @@ src-tauri/src/
 - [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：B站 API 文档（直播流解析依据）
 - [mihoyo-api-collect](https://github.com/UIGF-org/mihoyo-api-collect)：米哈游 API 文档（登录协议依据）
 - [MHY_Scanner](https://github.com/DSVVA/MHY_Scanner)：同类工具（协议与实现思路参考）
-- [zedbar](https://github.com/eventualbuddha/zedbar)：二维码解码库（ZBar 算法纯 Rust 移植）
+- [rxing](https://github.com/rxing-core/rxing)：二维码/条码解码库（ZXing 的纯 Rust 移植，Apache-2.0）
 - [H.264 Video Decoder · Media Foundation](https://learn.microsoft.com/windows/win32/medfound/h-264-video-decoder)：系统硬件解码器文档（直播解码依据）
 
 ## 许可证
 
-本项目以 [MIT](LICENSE) 许可发布。二维码解码库 zedbar 为 LGPL-3.0-or-later，
-其余依赖均为宽松许可——商用分发前请阅读 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
+本项目以 [MIT](LICENSE) 许可发布，全部依赖均为宽松许可（MIT / Apache-2.0）——
+商用分发前请阅读 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。

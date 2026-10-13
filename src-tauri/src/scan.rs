@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -238,6 +238,75 @@ impl ScanContext {
                 )
                 .await
             }
+        }
+    }
+}
+
+/// 直播扫码的取帧流水线：把「取最新帧 + YUV→灰度转换」放到独立线程，
+/// 与解码循环并行（同一 CPU 预算下检测频率 ≈ 提升到 max(转换, 解码) 的倒数）。
+///
+/// 背景（2026-10-13 基准实测，720p 真实直播帧）：主扫描 20.7ms/帧，灰度转换
+/// （`take_scan_frame` 内的 YUV→灰度）约 12ms/帧；两者原本在扫码线程上**串行**
+/// （合计 ≈33ms/轮）→ 检测频率被两者之和限制。流水线后一轮 ≈ max(20.7, 12) ≈ 21ms，
+/// 相同 CPU 占用下检测频率提升约 40%（扫码等待"码出现"的时延同步缩短）。
+///
+/// 只做 1 帧深度的手递手：槽位非空时不转换（避免转换出消费者来不及解码的帧白白烧 CPU）。
+struct LivePipe {
+    slot: Arc<std::sync::Mutex<Option<crate::live::ScanFrame>>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LivePipe {
+    /// 启动生产者线程（随 `stop` 停止；Drop 时 join）。
+    fn start(stop: Arc<AtomicBool>) -> Self {
+        let slot: Arc<std::sync::Mutex<Option<crate::live::ScanFrame>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let slot_prod = Arc::clone(&slot);
+        let stop_prod = Arc::clone(&stop);
+        let handle = std::thread::Builder::new()
+            .name("game-scanner-scan-pipe".into())
+            .spawn(move || {
+                let mut last_key: Option<crate::live::ScanKey> = None;
+                loop {
+                    if stop_prod.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let need = slot_prod.lock().map(|g| g.is_none()).unwrap_or(false);
+                    if need {
+                        if let Some(aid) = crate::live::active_id() {
+                            if let Some(frame) = crate::live::take_scan_frame(&aid) {
+                                if last_key.as_ref() != Some(&frame.key) {
+                                    last_key = Some(frame.key);
+                                    if let Ok(mut g) = slot_prod.lock() {
+                                        *g = Some(frame);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // 3ms 节拍：远快于流帧间隔（≥10ms），且空转成本可忽略。
+                    std::thread::sleep(Duration::from_millis(3));
+                }
+            })
+            .ok();
+        LivePipe { slot, stop, handle }
+    }
+
+    /// 取走当前准备好的帧（无则 None）。
+    fn take(&self) -> Option<crate::live::ScanFrame> {
+        self.slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+}
+
+impl Drop for LivePipe {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
         }
     }
 }
@@ -662,6 +731,8 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         display_name,
     };
     let mut st = LoopState::new();
+    // 直播取帧流水线（与解码并行；随 stop 停止，函数返回时自动 join）。
+    let live_pipe = LivePipe::start(stop.clone());
 
     // 1) 剪贴板优先（限时 500ms：剪贴板被其它进程长时间占用时直接跳过，
     //    否则表现为「点了开始扫码很久没反应」）。
@@ -713,7 +784,8 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                 st.live_prev_id = Some(aid.clone());
                 st.live_last_key = None;
             }
-            if let Some(frame) = crate::live::take_scan_frame(&aid) {
+            // 取帧走流水线（生产者已并行完成 YUV→灰度转换，本线程专注解码）。
+            if let Some(frame) = live_pipe.take() {
                 live_seen = true;
                 // 同一帧去重：无新帧（标识相同）时跳过解码——重复解码同一像素
                 // 不会更早发现二维码，只是白白烧 CPU。新帧必定解码一次，

@@ -1174,8 +1174,22 @@ fn preview_payload(tw: u32, th: u32, mx: i32, my: i32, mw: i32, mh: i32, rgba: V
 /// 瓦片（拖拽底图）增量帧。开启瓦片模式后，每次返回自上次以来变化的瓦片。
 /// 负载：8 字节头（tw,th）+ 每瓦片 16 字节头（col,row,w,h）+ RGBA。
 #[tauri::command]
-fn capture_tiles(
+async fn capture_tiles(
     app: tauri::AppHandle,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    max_width: u32,
+) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || capture_tiles_sync(&app, x, y, w, h, max_width))
+        .await
+        .map_err(|e| format!("瓦片任务失败: {e}"))?
+}
+
+/// `capture_tiles` 的同步实现（在阻塞池执行；拖拽时 30Hz 调用，含整屏降采样）。
+fn capture_tiles_sync(
+    app: &tauri::AppHandle,
     x: i32,
     y: i32,
     w: i32,
@@ -1405,8 +1419,13 @@ async fn live_refresh_meta(
 
 /// 直播预览帧：按前端视口裁剪最新解码帧并降采样，
 /// 24 字节头（w,h,mon.x,mon.y,mon.w=流宽,mon.h=流高）+ RGBA；暂无帧返回 24 字节零头。
+///
+/// **必须 async**：Tauri 的**同步**命令在 IPC 消息线程（Windows 上即主线程/WebView2
+/// 消息循环）内联执行——本命令每帧要做 YUV→RGBA 裁剪转换（数毫秒），同步实现会
+/// 每帧阻塞主线程 → 界面卡顿、掉帧。改为 async 后由 tokio 线程池执行
+/// （内部再 spawn_blocking，避免占住异步工作线程）。
 #[tauri::command]
-fn capture_live_frame(
+async fn capture_live_frame(
     id: String,
     x: i32,
     y: i32,
@@ -1414,14 +1433,18 @@ fn capture_live_frame(
     h: i32,
     max_width: Option<u32>,
 ) -> Result<tauri::ipc::Response, String> {
-    let mw = max_width.unwrap_or(384).clamp(80, 4096);
-    match crate::live::crop_frame(&id, x, y, w, h, mw) {
-        // 会话不存在（未启动/下播被移除）：0 字节 = 前端自动切回屏幕。
-        crate::live::FrameOut::NoSession => Ok(tauri::ipc::Response::new(Vec::new())),
-        // 欠载或帧未变：24 字节零头 = 沿用上一帧。
-        crate::live::FrameOut::Empty => Ok(tauri::ipc::Response::new(vec![0u8; 24])),
-        crate::live::FrameOut::Frame(payload) => Ok(tauri::ipc::Response::new(payload)),
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mw = max_width.unwrap_or(384).clamp(80, 4096);
+        match crate::live::crop_frame(&id, x, y, w, h, mw) {
+            // 会话不存在（未启动/下播被移除）：0 字节 = 前端自动切回屏幕。
+            crate::live::FrameOut::NoSession => Ok(tauri::ipc::Response::new(Vec::new())),
+            // 欠载或帧未变：24 字节零头 = 沿用上一帧。
+            crate::live::FrameOut::Empty => Ok(tauri::ipc::Response::new(vec![0u8; 24])),
+            crate::live::FrameOut::Frame(payload) => Ok(tauri::ipc::Response::new(payload)),
+        }
+    })
+    .await
+    .map_err(|e| format!("直播取帧任务失败: {e}"))?
 }
 
 /// 设置扫描区域（虚拟桌面绝对坐标，物理像素）；w/h 非正表示恢复全屏。
