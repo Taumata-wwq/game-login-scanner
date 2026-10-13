@@ -478,7 +478,7 @@
         <div class="vp-fit" id="vpFit">
           <div class="vp-stage" id="vpStage">
             <canvas id="previewCanvas" width="384" height="216"></canvas>
-            <span class="fps" id="fpsMeter" title="预览帧率（点击暂停/继续）">--</span>
+            <span class="fps" id="fpsMeter" title="预览帧率（点击暂停/继续）。直播模式跟随直播流帧率，上限为设置中的「显示区域帧率」">--</span>
             <button class="region-reset" id="btnRegionReset" title="重置视图">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/><path d="M3 12h18"/></svg>
             </button>
@@ -698,6 +698,9 @@
           </div>
         </div>
 
+        <div id="buildTag" style="font-size:9.5px;color:var(--faint);letter-spacing:0.02em;">
+          构建 2026-10-13.3（硬解 / 帧率自适应 / 有界重试 / 界面）
+        </div>
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
         </div>
@@ -1710,10 +1713,8 @@
     // 与左列同规则：有备注时显示「备注（原标题）」。
     const note = (room && room.note) || '';
     ttl.textContent = note ? (note + '（' + title + '）') : title;
-    // 副标题：主播名 · 平台 房间号 · 时长。
+    // 副标题：平台 房间号 · 时长（主播名只在左列与悬浮提示出现）。
     const parts = [];
-    const nickname = (room && room.nickname) || (sess && sess.nickname) || '';
-    if (nickname) parts.push(nickname);
     parts.push(livePlatformLabel(platform) + ' ' + roomNo);
     const duration = (room && room.live_start) ? fmtDuration(room.live_start) : (sess && sess.duration ? sess.duration : '');
     if (duration) parts.push('时长 ' + duration);
@@ -1825,8 +1826,8 @@
       rn.textContent = dispName;
       const rs = document.createElement('div');
       rs.className = 'rsub';
-      // 第二行：平台 + 直播间号（不再显示主播名，主播名见悬浮提示）。
-      rs.textContent = livePlatformLabel(s.platform) + ' ' + s.room;
+      // 第二行：主播名（无主播名时退化为「平台 + 房间号」）。
+      rs.textContent = s.nickname || (livePlatformLabel(s.platform) + ' ' + s.room);
       // 悬浮提示：备注（直播间名）-主播名（无主播名时省略后缀）。
       card.title = s.nickname ? (dispName + '-' + s.nickname) : dispName;
       meta.append(rn, rs);
