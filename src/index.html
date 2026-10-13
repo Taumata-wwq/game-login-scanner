@@ -2292,7 +2292,15 @@
   // 同时受设置里的「显示区域帧率」上限约束（与屏幕预览同一口径）。
   let liveEstInterval = 33;   // 初始 ≈30fps；首秒窗口结束后按实测调整
   let liveWin = { t0: performance.now(), frames: 0 };
+  // 刚进入直播模式的第一个节拍：重置统计窗口——否则会沿用「页面早先活动」的
+  // 旧窗口（其中没有直播帧）→ fps 误判为 0 → 首秒退到 50ms（20fps）。
+  let liveWasOn = false;
   function liveAdaptiveInterval(changed) {
+    if (!liveWasOn) {
+      liveWasOn = true;
+      liveEstInterval = 33;
+      liveWin = { t0: performance.now(), frames: 0 };
+    }
     if (changed) liveWin.frames++;
     const el = performance.now() - liveWin.t0;
     if (el >= 1000) {
@@ -2333,6 +2341,7 @@
       : idleFrames > 2
         ? PREVIEW_IDLE_INTERVAL
         : previewIntervalMs();
+    if (!liveOn()) liveWasOn = false;   // 退出直播：下次进入时重置统计窗口
     const elapsed = performance.now() - t0;
     previewTimer = setTimeout(() => previewLoop(gen), Math.max(0, interval - elapsed));
   }
