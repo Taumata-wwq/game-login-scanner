@@ -1,21 +1,36 @@
 //! 游戏扫码器库入口：模块声明 + Tauri 命令 + 运行时装配。
 
-pub mod clipboard;
 pub mod config;
 pub mod constants;
 pub mod crypto;
 pub mod decode;
 pub mod douyin;
-pub mod duplication;
 pub mod hls;
 pub mod http;
 pub mod live;
-pub mod mf_decode;
 pub mod qr;
 pub mod scan;
-pub mod screenshot;
 pub mod sdk;
 pub mod watch;
+
+// ---------- Windows 专有模块（DXGI / GDI / 剪贴板 / MF 硬解）----------
+#[cfg(windows)]
+pub mod clipboard;
+#[cfg(windows)]
+pub mod duplication;
+#[cfg(windows)]
+pub mod mf_decode;
+#[cfg(windows)]
+pub mod screenshot;
+
+// ---------- Android 专有模块（MediaProjection / Camera2 / MediaCodec / Keystore）----------
+#[cfg(target_os = "android")]
+pub mod android;
+
+// 平台门面：Android 下把 screenshot / duplication / clipboard 重定向到 android::* 实现，
+// 使 lib.rs / scan.rs / qr.rs 中的 crate::screenshot::* 等调用点在两平台均可用。
+#[cfg(target_os = "android")]
+pub use android::{clipboard, duplication, screenshot};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -414,12 +429,16 @@ fn check_update(app: tauri::AppHandle, manual: bool) {
     });
 }
 
-/// 应用窗口置顶设置。
+/// 应用窗口置顶设置（桌面特性；Android 无此概念，空实现）。
+#[cfg(not(target_os = "android"))]
 fn apply_always_on_top(app: &tauri::AppHandle, on_top: bool) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_always_on_top(on_top);
     }
 }
+
+#[cfg(target_os = "android")]
+fn apply_always_on_top(_app: &tauri::AppHandle, _on_top: bool) {}
 
 /// 记住主窗口当前坐标与尺寸（关闭 / 移动 / 缩放后调用，供下次启动恢复）。
 ///
@@ -1989,11 +2008,14 @@ async fn open_captcha_window(
     if let Some(w) = app.get_webview_window("captcha") {
         let _ = w.close();
     }
-    WebviewWindowBuilder::new(&app, "captcha", url)
+    let builder = WebviewWindowBuilder::new(&app, "captcha", url)
         .title("人机验证")
         .inner_size(600.0, 640.0)
-        .resizable(true)
-        .center()
+        .resizable(true);
+    // center() 为桌面专有方法（Android 无独立窗口居中概念）。
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.center();
+    builder
         .build()
         .map_err(|e| format!("打开验证窗口失败: {e}"))?;
     Ok(())

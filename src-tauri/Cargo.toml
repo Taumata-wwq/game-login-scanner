@@ -64,7 +64,8 @@ rsa = { version = "0.9", features = ["sha2"] }
 # 直播流拉取：rustls（纯 Rust TLS，Windows schannel 对 B站 CDN 长连接有读乱码/EOF）
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8.4"
-schannel = "0.1.29"
+# 注：schannel 为 Windows 系统 TLS 栈（http.rs 的 rustls 回退路径），仅 Windows 使用；
+# 已移至下方 [target.'cfg(windows)'.dependencies]，Android 用 rustls 单栈。
 # 弹幕 WS（开播/下播即时监测，watch.rs）：B站下行批次可能为 zlib（protover=2）。
 # 纯 Rust 解压，无 C 依赖；同版本已在依赖树中（tauri-codegen → png → flate2）。
 miniz_oxide = "0.8"
@@ -144,6 +145,8 @@ lto = false
 codegen-units = 16
 
 [target.'cfg(windows)'.dependencies]
+# Windows 系统 TLS 栈（http.rs 的 rustls 回退路径；B站/抖音 CDN 指纹兼容）。
+schannel = "0.1.29"
 # 截屏（GDI 兜底）、剪贴板（读图/清空）替代 screenshots / arboard 两个重依赖
 # （二者各拖一份 image 全家桶 + 重复的 windows 绑定），全部走系统 API。
 windows = { version = "0.61", features = [
@@ -164,6 +167,17 @@ windows = { version = "0.61", features = [
     # CPU 分项探针（tests/probe_live_profile.rs）用 GetProcessTimes 取进程级 CPU 时间。
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# MediaCodec 硬件解码绑定（直播解码后端；替代桌面端 mf_decode.rs）。
+# 0.1.11，含 MediaCodec/MediaExtractor/MediaMuxer 的安全 buffer 抽象。
+anodecs = "0.1"
+# JNI 桥接（Kotlin 插件层 ↔ Rust）。
+jni = "0.22"
+# Android 日志输出（转发 log crate 到 logcat）。
+android_logger = { version = "0.15", default-features = false }
+# NDK 上下文（JNI 环境中获取 JavaVM / Context）。
+ndk-context = "0.1"
 
 # 仅测试/基准使用（不进发布二进制）：zxing-cpp（C++，bundled 构建，Apache-2.0）
 # 用于与 zedbar 在**真实直播帧**上做解码器对照基准（docs/调研-QR解码性能-*.md）。

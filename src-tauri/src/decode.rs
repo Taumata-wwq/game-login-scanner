@@ -14,6 +14,7 @@
 //! 平台要求：Windows 10/11 全系内置 H.264 解码 MFT；**Windows N/K 版**
 //! 需安装 Media Feature Pack，否则 `new_decoder()` 返回明确错误（前端展示）。
 
+#[cfg(windows)]
 use crate::mf_decode::MfDecoder;
 
 /// 解码产出的一帧：**紧凑 I420**（三平面，行跨距 = 宽）。
@@ -51,6 +52,7 @@ impl VideoDecoder for Box<dyn VideoDecoder> {
 /// 失败时返回带操作指引的错误（供直播启动错误提示直接展示）：
 /// - Windows N/K 版缺少 Media Feature Pack 时 MFT 不可用；
 /// - 极端老驱动初始化异常。
+#[cfg(windows)]
 pub fn new_decoder() -> Result<Box<dyn VideoDecoder>, String> {
     match MfDecoder::new() {
         Ok(inner) => {
@@ -72,12 +74,26 @@ pub fn new_decoder() -> Result<Box<dyn VideoDecoder>, String> {
     }
 }
 
-// ---------- Media Foundation 硬解 ----------
+/// Android：MediaCodec 硬件解码（见 android/mediacodec_decode.rs）。
+#[cfg(target_os = "android")]
+pub fn new_decoder() -> Result<Box<dyn VideoDecoder>, String> {
+    match crate::android::mediacodec_decode::MediaCodecDecoder::new() {
+        Ok(inner) => {
+            log::info!("直播解码器：Android MediaCodec H.264 硬解（系统组件）");
+            Ok(Box::new(inner))
+        }
+        Err(e) => Err(format!("MediaCodec 解码器初始化失败：{e}")),
+    }
+}
 
+// ---------- Media Foundation 硬解（Windows）----------
+
+#[cfg(windows)]
 struct HwDecoder {
     inner: MfDecoder,
 }
 
+#[cfg(windows)]
 impl VideoDecoder for HwDecoder {
     fn decode(&mut self, annexb: &[u8], ts_ms: u32) -> Result<Vec<DecodedFrame>, String> {
         self.inner.decode(annexb, ts_ms)

@@ -314,7 +314,7 @@ fn api_tls_connect(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, String> 
                 Ok(_) => Ok(Box::new(t)),
                 Err(alert) => {
                     log::info!("rustls 握手被拒（{alert}），回退 schannel");
-                    tls_connect_schannel(host, port, READ_TIMEOUT)
+                    tls_connect_fallback(host, port, READ_TIMEOUT)
                 }
             }
         }
@@ -322,8 +322,12 @@ fn api_tls_connect(host: &str, port: u16) -> Result<Box<dyn ReadWrite>, String> 
     }
 }
 
-/// schannel 回退（Windows 系统栈）。
-fn tls_connect_schannel(
+/// TLS 回退路径：rustls 握手被服务端拒绝时启用。
+///
+/// - Windows：schannel 系统栈（指纹与 curl/浏览器系一致）；
+/// - 其他平台（Android 等）：无系统栈回退，返回明确错误（由上层展示）。
+#[cfg(windows)]
+fn tls_connect_fallback(
     host: &str,
     port: u16,
     read_timeout: Duration,
@@ -349,6 +353,16 @@ fn tls_connect_schannel(
     Ok(Box::new(stream))
 }
 
+/// 非 Windows 平台的 TLS 回退（无系统栈可用）。
+#[cfg(not(windows))]
+fn tls_connect_fallback(
+    _host: &str,
+    _port: u16,
+    _read_timeout: Duration,
+) -> Result<Box<dyn ReadWrite>, String> {
+    Err("当前平台无 TLS 回退路径（rustls 握手被拒）".to_string())
+}
+
 /// Read + Write 组合 trait（双 TLS 栈的统一流类型）。
 /// 需要 Send：连接池为进程级 static（跨线程共享/归还）。
 pub(crate) trait ReadWrite: Read + Write + Send {}
@@ -370,7 +384,7 @@ pub(crate) fn stream_tls_connect(
             Ok(_) => Ok(Box::new(t)),
             Err(alert) => {
                 log::info!("流 rustls 握手被拒（{alert}），回退 schannel");
-                tls_connect_schannel(host, port, read_timeout)
+                tls_connect_fallback(host, port, read_timeout)
             }
         },
         Err(e) => Err(e),

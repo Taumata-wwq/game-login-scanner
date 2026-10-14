@@ -13,6 +13,9 @@ node_modules/
 # 参考项目与第三方工具（只读参照，不入库）
 /reference/
 
+# Android 交叉编译临时探测 crate（阶段0验证用，验证完毕后可手动删除）
+/probe-android/
+
 # 内部记录与验证设施（本地保留，不入库；2026-10-12 撤出版本控制）。
 # 含：docs/（决策记录与调研/测试报告）、scripts/（采集与素材转换）、
 # src-tauri/tests/（单元测试/探针/基准/批量测试）、.workbuddy/（工作记忆）。
