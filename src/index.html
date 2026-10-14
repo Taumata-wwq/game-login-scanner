@@ -311,6 +311,7 @@
   /* 卡片：封面缩略图 + 文本信息。 */
   .room-card {
     position: relative; overflow: hidden;
+    flex: none;   /* 不收缩：窗口变矮时列表滚动而不是把卡片压扁 */
     display: flex; gap: 7px; align-items: center;
     padding: 5px; border: 1px solid var(--line); border-radius: var(--radius);
     background: var(--panel-2); cursor: pointer; user-select: none;
@@ -329,16 +330,19 @@
   .room-card .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .room-card .rname { font-size: 10.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .room-card .rsub { font-size: 9px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* 状态徽标：叠在封面正中（不再占用右侧文字宽度）。 */
+  /* 状态徽标：叠在封面正中（不再占用右侧文字宽度）。
+     背景统一为「背景色系」（半透明深色），仅用文字颜色区分状态并拉大对比。 */
   .room-card .st {
     position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
     white-space: nowrap; font-size: 9px; font-weight: 700;
-    padding: 1px 6px; border-radius: 2px; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+    padding: 1px 6px; border-radius: 2px;
+    background: rgba(22, 22, 22, 0.82);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
   }
-  .st.live { background: rgba(92,176,117,0.18); color: var(--ok); }
-  .st.off { background: var(--panel-3); color: var(--faint); }
-  .st.scan { background: rgba(217,169,74,0.2); color: var(--warn); }
-  .st.done { background: rgba(92,176,117,0.35); color: #b8f0c8; }
+  .st.live { color: #6ff0a2; }   /* 直播中：亮绿 */
+  .st.off  { color: #8f8f8f; }   /* 未开播：中灰 */
+  .st.scan { color: #ffd44d; }   /* 识别中：亮琥珀 */
+  .st.done { color: #5fd8ff; }   /* 已确认：亮青 */
   /* 移除直播间：不常驻占位，鼠标落在卡片上时自右侧滑出。 */
   .room-card .x {
     position: absolute; right: 0; top: 0; bottom: 0; width: 22px;
@@ -398,7 +402,7 @@
   /* 账号区：占剩余空间。 */
   /* 账号区：保最小高度（窗口变小时由上方视窗压缩让位）。 */
   .acct-area { flex: 1 1 auto; min-height: 120px; display: flex; padding: 8px 10px 10px; }
-  /* 左列：渠道切换（官服/B 服，拉伸对齐）+ 游戏列表；整列宽度由分界条调整。 */
+  /* 右列：渠道切换（官服/B 服，拉伸对齐）+ 游戏列表；整列宽度由分界条调整。 */
   .game-wrap {
     width: 110px; flex: none; min-width: 0;
     display: flex; flex-direction: column; gap: 6px;
@@ -545,6 +549,10 @@
       </div>
 
       <div class="acct-area">
+        <div class="acct-col">
+          <div class="acct-list" id="acctList"></div>
+        </div>
+        <div class="gsplit" id="gSplit"></div>
         <div class="game-wrap">
           <div class="chan-seg" id="filterSeg">
             <button data-f="official" class="on"><span class="t-full">官服</span><span class="t-short">官</span></button>
@@ -552,10 +560,6 @@
             <button data-f="hypergryph" class="wide" hidden><span class="t-full">鹰角账号</span><span class="t-short">鹰角</span></button>
           </div>
           <div class="game-col" id="gameCol"></div>
-        </div>
-        <div class="gsplit" id="gSplit"></div>
-        <div class="acct-col">
-          <div class="acct-list" id="acctList"></div>
         </div>
       </div>
     </section>
@@ -754,7 +758,7 @@
         </div>
 
         <div id="buildTag" style="font-size:9.5px;color:var(--faint);letter-spacing:0.02em;">
-          版本 0.3.1 · 构建 2026-10-14.1（瓦片模式残留致预览冻结修复 / 状态徽标叠封面 / 删除按钮滑出 / 游戏列分界条 / 扫码按钮与渠道切换位置调整）
+          版本 0.3.1 · 构建 2026-10-14.2（直播间列表滚动修复 / 状态徽标统一底色提高对比 / 游戏列移至账号右侧 / 窗口上限 900×600 / 开播与下播即时监测）
         </div>
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
@@ -1620,8 +1624,8 @@
     });
   })();
 
-  // ---------- 游戏列 / 账号列 分界拖拽 ----------
-  // 拖动调整左列（渠道切换 + 游戏列表）宽度，限幅 70~140px（默认 110px，见 CSS）。
+  // ---------- 账号列 / 游戏列 分界拖拽 ----------
+  // 拖动调整右列（渠道切换 + 游戏列表）宽度，限幅 70~140px（默认 110px，见 CSS）。
   // 宽度仅会话内有效（与侧栏拖拽一致，不落盘）。
   const GAME_COL_MIN = 70, GAME_COL_MAX = 140;
   // 左列宽度低于该值时：渠道按钮文案降级为「官 / B」（两个中文字在窄列里放不下）。
@@ -1643,8 +1647,9 @@
     });
     window.addEventListener('mousemove', (e) => {
       if (!dragging) return;
-      const left = wrap.getBoundingClientRect().left;
-      const w = Math.min(Math.max(Math.round(e.clientX - left), GAME_COL_MIN), GAME_COL_MAX);
+      // 游戏列在账号列右侧：宽度 = 列右缘 − 光标（向左拖变宽）。
+      const right = wrap.getBoundingClientRect().right;
+      const w = Math.min(Math.max(Math.round(right - e.clientX), GAME_COL_MIN), GAME_COL_MAX);
       wrap.style.width = w + 'px';
       updateChanLabels();
     });
@@ -1849,6 +1854,7 @@
       liveRooms = merged;
     } catch (e) { /* 忽略 */ }
     renderLiveTabs();
+    syncWatchers();
   }
 
   // 渲染侧栏直播间列表（"桌面"卡片 + 已保存直播间卡片 + 添加按钮）。
@@ -2041,7 +2047,9 @@
     refreshPreview().catch(() => {});
   }
 
-  // 元数据轮询：每 10s 一轮，逐个刷新已保存直播间（每个间隔 2s）。
+  // 元数据轮询（兜底对账）：每 30s 一轮——开播/下播已由弹幕 WS 即时推送
+  // （见 bindLiveStatusEvents），轮询只负责兜底（WS 失败/漏事件）与抖音房间；
+  // 逐个刷新已保存直播间（每个间隔 2s）。
   let metaPollTimer = null;
   let metaPollRunning = false;
   async function pollMetaRound() {
@@ -2081,7 +2089,43 @@
   }
   function startMetaPoll() {
     if (metaPollTimer) return;
-    metaPollTimer = setInterval(pollMetaRound, 10000);
+    metaPollTimer = setInterval(pollMetaRound, 30000);
+  }
+
+  // ---------- 开播/下播即时监测（后端弹幕 WS，见 src-tauri/src/watch.rs）----------
+  // 同步监测列表（幂等）：房间列表变化时调用；非 B站（抖音）后端会自行过滤。
+  function syncWatchers() {
+    const rooms = liveRooms
+      .filter((r) => r.platform === 'bilibili')
+      .map((r) => ({ platform: r.platform, room: r.room }));
+    invoke('live_watch_sync', { rooms }).catch(() => {});
+  }
+  // 弹幕 WS 的实时状态推送：即时更新状态徽标与封面（轮询降为 30s 兜底）。
+  function bindLiveStatusEvents() {
+    if (!listen) return;
+    listen('live-status', (ev) => {
+      const p = (ev && ev.payload) || {};
+      const local = liveRooms.find((x) => x.platform === p.platform && x.room === p.room);
+      if (!local || local.live_status === p.live_status) return;
+      const went_live = local.live_status !== 1 && p.live_status === 1;
+      local.live_status = p.live_status;
+      log((local.nickname || local.room) + (went_live ? ' 已开播' : ' 已下播'),
+        went_live ? 'success' : 'info');
+      renderLiveTabs();
+      if ((p.platform + ':' + p.room) === activeLiveId) updateVpInfo();
+      if (went_live) {
+        // 开播后拉一次权威元数据（标题/封面/主播名随开播更新）。
+        invoke('live_refresh_meta', { platform: p.platform, room: p.room }).then((m) => {
+          if (!m) return;
+          local.title = m.title || local.title;
+          local.nickname = m.nickname || local.nickname;
+          local.cover = m.cover || local.cover;
+          local.room_id = m.room_id || local.room_id;
+          renderLiveTabs();
+          if ((p.platform + ':' + p.room) === activeLiveId) updateVpInfo();
+        }).catch(() => {});
+      }
+    });
   }
 
   // 双击直播间编辑备注（自定义弹窗，非浏览器 prompt）。
@@ -2880,7 +2924,9 @@
     }
     renderAll();
     invoke('refresh_official_unames').catch(() => {});
-    // 加载已保存直播间（含未开播）并启动元数据轮询。
+    // 弹幕 WS 的实时开播/下播推送（先绑事件，再同步监测列表，避免漏首报）。
+    bindLiveStatusEvents();
+    // 加载已保存直播间（含未开播）并启动元数据轮询（兜底对账）。
     await reloadLiveRooms();
     pollMetaRound();
     startMetaPoll();
