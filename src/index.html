@@ -278,6 +278,21 @@
   #log .info { color: var(--muted); }
   #log .time { color: #5a5a5a; margin-right: 6px; }
 
+  /* 项目信息（日志下方）：作者 / 仓库 / 参考引用 / 许可证 / 注意事项。 */
+  .proj-info {
+    margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line);
+    font-size: 9.5px; line-height: 1.75; color: var(--faint);
+  }
+  .proj-info .pi-head {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 10.5px; color: var(--text); margin-bottom: 3px;
+  }
+  .proj-info .pi-ver { color: var(--faint); font-size: 9.5px; }
+  .proj-info .pi-line { word-break: break-word; }
+  .proj-info .pi-warn { color: var(--warn); opacity: 0.85; }
+  .proj-info .pi-link { color: #7fa3d0; text-decoration: none; cursor: pointer; }
+  .proj-info .pi-link:hover { text-decoration: underline; }
+
   /* 隐藏全部滚动条（保留滚动能力）：列表/日志区内容超出时不再显示滚动条占据宽度，
      滚轮与拖拽滚动照常工作。scrollbar-width 覆盖标准实现，::-webkit-scrollbar
      覆盖 Chromium 旧路径（WebView2 两套并存时任一命中即不渲染）。 */
@@ -775,6 +790,10 @@
           <label class="switch"><input type="checkbox" id="stopOthersOnSuccess" /><span class="track"></span></label>
         </div>
         <div class="opt-row">
+          <span class="lbl">自动检查更新</span>
+          <label class="switch"><input type="checkbox" id="autoCheckUpdate" /><span class="track"></span></label>
+        </div>
+        <div class="opt-row">
           <span class="lbl">显示区域帧率</span>
           <div class="filter-seg" id="fpsSeg">
             <button data-fps="30">30</button>
@@ -783,13 +802,34 @@
           </div>
         </div>
 
-        <div id="buildTag" style="font-size:9.5px;color:var(--faint);letter-spacing:0.02em;">
-          版本 0.3.1 · 构建 2026-10-14.5（直播拖拽/缩放：mon 锚定平滑跟手，帧到达只更新覆盖区，不再整屏跳变）
-        </div>
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
         </div>
         <div id="log"></div>
+        <div class="proj-info">
+          <div class="pi-head">
+            <span>游戏扫码器</span>
+            <span class="pi-ver" id="piVer">v…</span>
+            <span class="spacer"></span>
+            <button class="btn ghost tiny" id="btnCheckUpdate">检查更新</button>
+          </div>
+          <div class="pi-line">
+            作者 <a class="pi-link" data-url="https://github.com/Taumata-wwq">Taumata-wwq</a> ·
+            仓库 <a class="pi-link" data-url="https://github.com/Taumata-wwq/game-login-scanner">GitHub</a> ·
+            许可证 MIT（第三方依赖许可见 THIRD-PARTY-NOTICES）
+          </div>
+          <div class="pi-line">
+            参考与引用：
+            <a class="pi-link" data-url="https://github.com/SocialSisterYi/bilibili-API-collect">bilibili-API-collect</a> ·
+            <a class="pi-link" data-url="https://github.com/UIGF-org/mihoyo-api-collect">mihoyo-api-collect</a> ·
+            <a class="pi-link" data-url="https://github.com/DSVVA/MHY_Scanner">MHY_Scanner</a> ·
+            <a class="pi-link" data-url="https://github.com/rxing-core/rxing">rxing</a> ·
+            <a class="pi-link" data-url="https://learn.microsoft.com/windows/win32/medfound/h-264-video-decoder">Media Foundation</a>
+          </div>
+          <div class="pi-line pi-warn">
+            注意事项：仅用于登录本人游戏账号，请勿用于非授权用途；「操作过于频繁」等提示为服务端正常限流，稍后重试。
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -818,6 +858,15 @@
 
   const $ = (id) => document.getElementById(id);
   const logEl = $('log');
+
+  // 顶层自检：脚本在初始化途中中断（元素缺失等模块级异常不触发 window.onerror，
+  // 表现为「界面能渲染但全部 JS 失效」）时，3 秒后主动上报，避免静默失败。
+  let moduleOk = false;
+  setTimeout(() => {
+    if (!moduleOk) {
+      try { invoke('frontend_log', { level: 'error', msg: '[自检] 前端模块未完成初始化：可能有元素缺失或脚本中断' }); } catch (e) {}
+    }
+  }, 3000);
 
   // 全局错误捕获：仅记录脚本运行时错误（e.target 为 window）。
   // 资源加载失败（img/script 等，e.target 为元素、message 为空）不记录——
@@ -1207,6 +1256,7 @@
     if ('always_on_top' in patch) args.always_on_top = patch.always_on_top;
     if ('auto_close' in patch) args.auto_close = patch.auto_close;
     if ('stop_others_on_scan_success' in patch) args.stop_others_on_scan_success = patch.stop_others_on_scan_success;
+    if ('auto_check_update' in patch) args.auto_check_update = patch.auto_check_update;
     if ('display_fps' in patch) args.display_fps = patch.display_fps;
     if ('display_name' in patch) args.display_name = patch.display_name;
     await invoke('set_options', { patch: args });
@@ -3045,6 +3095,7 @@
     $('autoClose').checked = !!config.auto_close;
     $('stopOthersOnSuccess').checked = config.stop_others_on_scan_success !== false;
     stopOthersOnScanSuccess = config.stop_others_on_scan_success !== false;
+    $('autoCheckUpdate').checked = config.auto_check_update !== false;
     $('displayName').value = config.display_name || '';
     // 显示帧率页签（30/60/120）。
     const fps = config.display_fps || 60;
@@ -3071,6 +3122,21 @@
     $('stopOthersOnSuccess').addEventListener('change', (e) => {
       stopOthersOnScanSuccess = e.target.checked;
       saveCfg({ stop_others_on_scan_success: e.target.checked });
+    });
+    $('autoCheckUpdate').addEventListener('change', (e) => saveCfg({ auto_check_update: e.target.checked }));
+    // 项目信息：链接用系统默认浏览器打开；「检查更新」手动触发一次检查。
+    const pi = $('projInfo') || document.querySelector('.proj-info');
+    if (pi) {
+      pi.addEventListener('click', (e) => {
+        const a = e.target.closest('a[data-url]');
+        if (!a) return;
+        e.preventDefault();
+        invoke('open_url', { url: a.dataset.url }).catch(() => {});
+      });
+    }
+    $('btnCheckUpdate').addEventListener('click', () => {
+      log('正在检查更新…', 'info');
+      invoke('check_update', { manual: true }).catch((e) => log(String(e), 'error'));
     });
     document.querySelectorAll('#fpsSeg button').forEach((b) => {
       b.addEventListener('click', () => {
@@ -3123,6 +3189,11 @@
         }
         if (!quiet) log(p.message || '', p.type === 'started' ? 'info' : (p.type || 'info'));
       });
+      // 更新检查结果（自动检查/手动检查共用：把结果写进日志面板）。
+      await listen('update-status', (ev) => {
+        const p = ev.payload || {};
+        log(p.message || '', p.kind === 'error' ? 'error' : 'info');
+      });
     }
     try { config = await invoke('get_config'); } catch (e) { config = null; log('加载配置失败: ' + e, 'error'); }
     if (config) {
@@ -3159,9 +3230,18 @@
       }
     }
     log('应用就绪。添加账号后点击「开始扫码」即可自动识别并登录', 'info');
+    // 版本号（单一来源：Cargo.toml）。
+    invoke('get_app_version').then((v) => {
+      if ($('piVer')) $('piVer').textContent = 'v' + v;
+    }).catch(() => {});
+    // 自动检查更新：延迟 5 秒（让启动期资源先就位）；无更新/失败时后端静默。
+    if (config && config.auto_check_update !== false) {
+      setTimeout(() => invoke('check_update', { manual: false }).catch(() => {}), 5000);
+    }
     startPreview();
   }
 
+  moduleOk = true;   // 脚本求值完成（自检哨兵）
   init();
 })();
 </script>

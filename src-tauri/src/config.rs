@@ -235,6 +235,10 @@ pub struct AppConfig {
     /// 扫码成功后自动停止其他直播间的扫码（默认开）。
     #[serde(default = "default_true")]
     pub stop_others_on_scan_success: bool,
+    /// 启动后自动检查 GitHub Release 更新（发现新正式版：下载 → 启动安装包 →
+    /// 关闭当前窗口；默认开）。
+    #[serde(default = "default_true")]
+    pub auto_check_update: bool,
     pub device_id: String,
     /// 真实设备指纹（米哈游登录风控必需；空则由 getFp 接口获取后写入）。
     #[serde(default)]
@@ -291,6 +295,7 @@ impl Default for AppConfig {
             sidebar_w: None,
             game_col_w: None,
             stop_others_on_scan_success: true,
+            auto_check_update: true,
             device_id: String::new(),
             device_fp: String::new(),
             fp_seed_id: String::new(),
