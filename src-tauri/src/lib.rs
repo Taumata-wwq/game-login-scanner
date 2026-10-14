@@ -2094,6 +2094,9 @@ fn init_file_logging() {
     }));
 }
 
+// Tauri v2 移动端入口点：Android/iOS 需要由该宏生成 JNI 导出符号
+// （否则 .so 校验报 "does not include required runtime symbols"）。
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_file_logging();
 

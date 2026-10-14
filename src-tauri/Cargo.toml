@@ -6,7 +6,9 @@ edition = "2021"
 
 [lib]
 name = "game_login_scanner_lib"
-crate-type = ["rlib"]
+# rlib：桌面端 bin 通过 lib 调用；
+# cdylib：Android 端 Tauri 需要 .so 动态库产物（libgame_login_scanner_lib.so）。
+crate-type = ["rlib", "cdylib"]
 # 内联测试 harness 链接 tauri 后因缺 manifest 在 Windows 启动即崩（见 build.rs），
 # 统一改为 tests/ 集成测试，故禁用 lib/bin 的默认测试目标。
 test = false
