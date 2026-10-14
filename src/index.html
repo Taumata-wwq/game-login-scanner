@@ -121,6 +121,7 @@
     overflow-y: auto; overscroll-behavior: contain;
   }
   .acct-item {
+    position: relative; overflow: hidden;
     display: flex; align-items: center; gap: 7px;
     height: 27px; flex: none; padding: 0 5px 0 8px;
     background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
@@ -142,9 +143,17 @@
   .acct-item.on .nm { color: var(--text-strong); font-weight: 600; }
   .remark { font-size: 10px; color: var(--faint); flex: none; max-width: 90px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .acct-item.dragging { opacity: 0.5; }
-  .acct-item .ibtn { width: 18px; height: 18px; visibility: hidden; }
-  .acct-item:hover .ibtn { visibility: visible; }
-  .acct-item .ibtn:hover { color: #ff8f8f; background: rgba(207, 74, 74, 0.12); }
+  /* 删除按钮：不常驻占位，鼠标落在行上时自右侧滑出（覆盖备注区）。 */
+  .acct-item .ibtn {
+    position: absolute; right: 0; top: 0; bottom: 0;
+    width: 20px; height: auto; border-radius: var(--radius);
+    display: grid; place-items: center;
+    background: linear-gradient(90deg, rgba(35, 35, 35, 0), var(--hover) 45%);
+    transform: translateX(100%); opacity: 0;
+    transition: transform 0.13s ease, opacity 0.13s ease;
+  }
+  .acct-item:hover .ibtn { transform: translateX(0); opacity: 1; }
+  .acct-item .ibtn:hover { color: #ff8f8f; background: rgba(207, 74, 74, 0.16); }
 
   .btn {
     height: 24px; padding: 0 11px;
@@ -301,6 +310,7 @@
   }
   /* 卡片：封面缩略图 + 文本信息。 */
   .room-card {
+    position: relative; overflow: hidden;
     display: flex; gap: 7px; align-items: center;
     padding: 5px; border: 1px solid var(--line); border-radius: var(--radius);
     background: var(--panel-2); cursor: pointer; user-select: none;
@@ -310,6 +320,7 @@
   .room-card.on { border-color: var(--primary-bg); background: var(--panel-3); }
   .room-card.dragging { opacity: 0.45; }
   .room-card .thumb {
+    position: relative;
     width: 48px; height: 30px; flex: none; border-radius: 2px; overflow: hidden;
     background: #101010; display: grid; place-items: center;
   }
@@ -318,12 +329,27 @@
   .room-card .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .room-card .rname { font-size: 10.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .room-card .rsub { font-size: 9px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* 状态徽标：固定宽度 + 不换行（文案仅在 直播中/识别中/已确认/未开播 间切换）。 */
-  .room-card .st { flex: none; width: 38px; text-align: center; white-space: nowrap; font-size: 8.5px; font-weight: 700; padding: 1px 0; border-radius: 2px; }
+  /* 状态徽标：叠在封面正中（不再占用右侧文字宽度）。 */
+  .room-card .st {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    white-space: nowrap; font-size: 9px; font-weight: 700;
+    padding: 1px 6px; border-radius: 2px; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+  }
   .st.live { background: rgba(92,176,117,0.18); color: var(--ok); }
   .st.off { background: var(--panel-3); color: var(--faint); }
   .st.scan { background: rgba(217,169,74,0.2); color: var(--warn); }
   .st.done { background: rgba(92,176,117,0.35); color: #b8f0c8; }
+  /* 移除直播间：不常驻占位，鼠标落在卡片上时自右侧滑出。 */
+  .room-card .x {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 22px;
+    display: grid; place-items: center;
+    background: linear-gradient(90deg, rgba(50, 50, 50, 0), var(--hover) 45%);
+    color: var(--muted); cursor: pointer;
+    transform: translateX(100%); opacity: 0;
+    transition: transform 0.13s ease, opacity 0.13s ease;
+  }
+  .room-card:hover .x { transform: translateX(0); opacity: 1; }
+  .room-card .x:hover { color: #ff8f8f; background: rgba(207, 74, 74, 0.18); }
   .room-add {
     display: flex; align-items: center; justify-content: center; gap: 4px;
     height: 28px; flex: none; margin-top: 2px;
@@ -346,9 +372,8 @@
   .vp-info .ttl { color: var(--text-strong); font-weight: 600; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .vp-info .sep { color: var(--faint); }
   .vp-info .spacer { flex: 1; }
-  /* 顶部状态徽标：固定宽度（防被标题挤压换行）。 */
-  .vp-info .badge { flex: none; width: 46px; text-align: center; white-space: nowrap; font-size: 9px; font-weight: 700; padding: 1px 0; border-radius: 2px; background: var(--panel-3); color: var(--muted); }
-  .vp-info .badge.live { background: rgba(92,176,117,0.18); color: var(--ok); }
+  /* 「开始扫码」常驻在信息栏右端（原状态徽标位置）。 */
+  .vp-info #btnStart { flex: none; }
   /* 视窗适配容器：尺寸由 JS 设置（16:9 适配结果），居中放置 stage。 */
   .vp-fit { flex: 0 0 auto; width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
   /* 16:9 视窗：尺寸由 JS 按 16:9 在容器内等比适配（letterbox），不变形。 */
@@ -372,12 +397,46 @@
   .vp-stage .region-reset:hover { background: var(--hover); color: var(--text-strong); }
   /* 账号区：占剩余空间。 */
   /* 账号区：保最小高度（窗口变小时由上方视窗压缩让位）。 */
-  .acct-area { flex: 1 1 auto; min-height: 120px; display: flex; padding: 8px 10px 10px; gap: 8px; }
-  /* 左列游戏选择（阶段4 填充）。 */
+  .acct-area { flex: 1 1 auto; min-height: 120px; display: flex; padding: 8px 10px 10px; }
+  /* 左列：渠道切换（官服/B 服，拉伸对齐）+ 游戏列表；整列宽度由分界条调整。 */
+  .game-wrap {
+    width: 110px; flex: none; min-width: 0;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  /* 渠道切换段：两列等宽拉伸；「鹰角」为独立整行按钮。 */
+  .chan-seg {
+    flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 2px;
+  }
+  .chan-seg button {
+    height: 22px; border: none; border-radius: 2px; padding: 0 2px;
+    background: transparent; color: var(--muted);
+    font: 500 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    white-space: nowrap; overflow: hidden; cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+  }
+  .chan-seg button:hover { color: var(--text); background: var(--hover); }
+  .chan-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  .chan-seg button[hidden] { display: none; }
+  /* 鹰角账号：独占一行。 */
+  .chan-seg button.wide { grid-column: 1 / -1; }
+  /* 列宽不足时降级为「官 / B」（见 updateChanLabels）。 */
+  .chan-seg .t-short { display: none; }
+  .chan-seg.narrow .t-full { display: none; }
+  .chan-seg.narrow .t-short { display: inline; }
+  /* 游戏列 / 账号列 分界拖拽条：拖动调整左列宽度（70–140px）。 */
+  .gsplit {
+    flex: none; width: 7px; cursor: col-resize; background: transparent;
+    position: relative; z-index: 10;
+  }
+  .gsplit:hover, .gsplit.dragging { background: rgba(138,138,138,0.25); }
   .game-col {
-    width: 125px; flex: none; display: flex; flex-direction: column; gap: 3px;
+    flex: 1 1 auto; min-height: 0;
+    display: flex; flex-direction: column; gap: 3px;
     overflow-y: auto; overscroll-behavior: contain;
   }
+  .game-col .gitem span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .game-col .gitem {
     height: 27px; padding: 0 9px; border: 1px solid var(--line); border-radius: var(--radius);
     background: var(--panel); cursor: pointer; font-size: 11px; color: var(--muted);
@@ -385,12 +444,8 @@
   }
   .game-col .gitem:hover { background: var(--hover); color: var(--text); }
   .game-col .gitem.on { border-color: var(--primary-bg); color: var(--text-strong); font-weight: 600; }
-  /* 右列账号列表 + 开始按钮。 */
+  /* 右列账号列表（开始扫码按钮已移到视窗信息栏右端）。 */
   .acct-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
-  /* 筛选行：官服/B服 左，扫码按钮右对齐。 */
-  .acct-filter { display: flex; align-items: center; gap: 6px; }
-  .acct-filter #btnStart { margin-left: auto; width: auto; }
-  /* 扫码按钮改为小尺寸（与筛选段同高）。 */
   #btnStart {
     height: 24px; padding: 0 12px;
     background: var(--primary-bg); color: var(--primary-fg);
@@ -473,7 +528,10 @@
           <span class="sep">·</span>
           <span id="vpSub">未连接直播</span>
           <span class="spacer"></span>
-          <span class="badge" id="vpBadge">待机</span>
+          <button id="btnStart" title="开始 / 停止扫码">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
+            <span>开始扫码</span>
+          </button>
         </div>
         <div class="vp-fit" id="vpFit">
           <div class="vp-stage" id="vpStage">
@@ -487,19 +545,16 @@
       </div>
 
       <div class="acct-area">
-        <div class="game-col" id="gameCol"></div>
-        <div class="acct-col">
-          <div class="acct-filter">
-            <div class="filter-seg" id="filterSeg">
-              <button data-f="official" class="on">官服</button>
-              <button data-f="bilibili">B 服</button>
-              <button data-f="hypergryph" hidden>鹰角</button>
-            </div>
-            <button id="btnStart" title="开始 / 停止扫码">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
-              <span>开始扫码</span>
-            </button>
+        <div class="game-wrap">
+          <div class="chan-seg" id="filterSeg">
+            <button data-f="official" class="on"><span class="t-full">官服</span><span class="t-short">官</span></button>
+            <button data-f="bilibili"><span class="t-full">B 服</span><span class="t-short">B</span></button>
+            <button data-f="hypergryph" class="wide" hidden><span class="t-full">鹰角账号</span><span class="t-short">鹰角</span></button>
           </div>
+          <div class="game-col" id="gameCol"></div>
+        </div>
+        <div class="gsplit" id="gSplit"></div>
+        <div class="acct-col">
           <div class="acct-list" id="acctList"></div>
         </div>
       </div>
@@ -699,7 +754,7 @@
         </div>
 
         <div id="buildTag" style="font-size:9.5px;color:var(--faint);letter-spacing:0.02em;">
-          版本 0.3.1 · 构建 2026-10-13.6（扫码主档降采样 / rxing 换代 / DXVA 硬解 / 帧率自适应）
+          版本 0.3.1 · 构建 2026-10-14.1（瓦片模式残留致预览冻结修复 / 状态徽标叠封面 / 删除按钮滑出 / 游戏列分界条 / 扫码按钮与渠道切换位置调整）
         </div>
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
@@ -766,7 +821,7 @@
     const tag = el.tagName;
     if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'CANVAS' || tag === 'A' || tag === 'SELECT' || tag === 'TEXTAREA') return true;
     if (el.isContentEditable) return true;
-    if (el.closest('.rz, button, input, canvas, a, .room-card, .live-h-list, .acct-item, .gitem, .ibtn, .vsplit, .overlay, .fps, .region-reset, .startbar, .acct-filter, .game-col, .acct-list, .room-list')) return true;
+    if (el.closest('.rz, button, input, canvas, a, .room-card, .live-h-list, .acct-item, .gitem, .ibtn, .vsplit, .gsplit, .overlay, .fps, .region-reset, .startbar, .game-col, .acct-list, .room-list')) return true;
     return false;
   }
   document.addEventListener('mousedown', (e) => {
@@ -1565,6 +1620,43 @@
     });
   })();
 
+  // ---------- 游戏列 / 账号列 分界拖拽 ----------
+  // 拖动调整左列（渠道切换 + 游戏列表）宽度，限幅 70~140px（默认 110px，见 CSS）。
+  // 宽度仅会话内有效（与侧栏拖拽一致，不落盘）。
+  const GAME_COL_MIN = 70, GAME_COL_MAX = 140;
+  // 左列宽度低于该值时：渠道按钮文案降级为「官 / B」（两个中文字在窄列里放不下）。
+  const CHAN_NARROW_AT = 76;
+  function updateChanLabels() {
+    const seg = $('filterSeg'), wrap = document.querySelector('.game-wrap');
+    if (!seg || !wrap) return;
+    seg.classList.toggle('narrow', wrap.clientWidth < CHAN_NARROW_AT);
+  }
+  (function initGSplit() {
+    const sp = $('gSplit'), wrap = document.querySelector('.game-wrap');
+    if (!sp || !wrap) return;
+    let dragging = false;
+    sp.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dragging = true;
+      sp.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const left = wrap.getBoundingClientRect().left;
+      const w = Math.min(Math.max(Math.round(e.clientX - left), GAME_COL_MIN), GAME_COL_MAX);
+      wrap.style.width = w + 'px';
+      updateChanLabels();
+    });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      sp.classList.remove('dragging');
+      document.body.style.cursor = '';
+    });
+    updateChanLabels();
+  })();
+
   // ---------- 扫描 ----------
   let stopping = false;
   $('btnStart').addEventListener('click', () => {
@@ -1693,15 +1785,13 @@
   function activeSession() { return liveSessions.find((s) => s.id === activeLiveId) || null; }
   function livePlatformLabel(p) { return (p === 'douyin') ? '抖音' : 'B站'; }
 
-  // 更新视窗信息栏（标题/副标题/状态徽标）。数据源优先前台房间（含未开播）。
+  // 更新视窗信息栏（标题/副标题）。数据源优先前台房间（含未开播）。
   function updateVpInfo() {
-    const ttl = $('vpTitle'), sub = $('vpSub'), badge = $('vpBadge');
+    const ttl = $('vpTitle'), sub = $('vpSub');
     if (!ttl) return;
     if (!activeLiveId) {
       ttl.textContent = '屏幕预览';
       sub.textContent = '未连接直播';
-      badge.textContent = scanning ? '扫描中' : '待机';
-      badge.className = 'badge' + (scanning ? ' live' : '');
       return;
     }
     const room = liveRooms.find((r) => (r.platform + ':' + r.room) === activeLiveId);
@@ -1718,13 +1808,6 @@
     const duration = (room && room.live_start) ? fmtDuration(room.live_start) : (sess && sess.duration ? sess.duration : '');
     if (duration) parts.push('时长 ' + duration);
     sub.textContent = parts.join(' · ');
-    let stText = '直播中', stCls = 'live';
-    const status = sess ? sess.status : (room && room.live_status === 1 ? 'live' : 'off');
-    if (status === 'scan') { stText = '识别中'; stCls = 'live'; }
-    else if (status === 'done') { stText = '已确认'; stCls = 'live'; }
-    else if (status === 'off') { stText = '未开播'; stCls = ''; }
-    badge.textContent = stText;
-    badge.className = 'badge ' + stCls;
   }
 
   // 开播时长文本（H:MM:SS）。
@@ -1810,7 +1893,10 @@
         img.src = coverSrc;
         img.alt = '';
         img.referrerPolicy = 'no-referrer';
-        img.addEventListener('error', () => { thumb.innerHTML = '<span class="ph">●</span>'; });
+        img.addEventListener('error', (ev) => {
+          ev.target.remove();
+          thumb.insertAdjacentHTML('afterbegin', '<span class="ph">●</span>');
+        });
         thumb.appendChild(img);
       } else {
         thumb.innerHTML = '<span class="ph">●</span>';
@@ -1834,13 +1920,14 @@
       const stCls = live === 'scan' ? 'scan' : live === 'done' ? 'done' : live === 'live' ? 'live' : 'off';
       st.className = 'st ' + stCls;
       st.textContent = live === 'scan' ? '识别中' : live === 'done' ? '已确认' : live === 'live' ? '直播中' : '未开播';
+      // 状态徽标叠在封面正中；「移除直播间」自右侧滑出 —— 两者都不再占用文字宽度。
+      thumb.append(st);
       const x = document.createElement('span');
       x.className = 'x';
       x.textContent = '✕';
       x.title = '移除该直播间';
-      x.style.cssText = 'color:var(--faint);cursor:pointer;padding:0 3px;flex:none;';
       x.addEventListener('mousedown', (ev) => { ev.stopPropagation(); removeRoom(id); });
-      card.append(thumb, meta, st, x);
+      card.append(thumb, meta, x);
       card.addEventListener('mousedown', (ev) => {
         if (ev.target === x) return;
         // 未开播且无会话：不切换（保持在当前直播间）；否则切换。
@@ -2070,7 +2157,7 @@
     srcCanvas = null;
     baseMap = null; baseMapReady = false; baseMapActive = false;
     if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
-    if (tileMode) { invoke('set_tile_mode', { x: 0, y: 0, w: 0, h: 0, on: false }).catch(() => {}); tileMode = false; }
+    closeTileMode(false);
     renderLiveTabs();
     updateVpInfo();
   }
@@ -2131,7 +2218,7 @@
       liveSessions.push(info);
       baseMap = null; baseMapReady = false; baseMapActive = false;
       if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
-      if (tileMode) { invoke('set_tile_mode', { x: 0, y: 0, w: 0, h: 0, on: false }).catch(() => {}); tileMode = false; }
+      closeTileMode(false);
       invoke('set_preview_active', { active: false }).catch(() => {});
       log('已连接' + livePlatformLabel(platform) + '直播间 ' + room + '（' + info.w + '×' + info.h + '），预览与扫码已切换', 'success');
     } catch (e) {
@@ -2172,13 +2259,11 @@
     const region = viewportMonRect() || { x: 0, y: 0, w: 0, h: 0 };
     // 预览转换上限（避免按显示分辨率逐像素转 YUV→RGBA 的高开销；
     // 画布放大由 GPU drawImage 完成，质量足够）。
-    const _t0 = performance.now();
     const buf = await invoke('capture_live_frame', {
       id: s.id,
       x: region.x, y: region.y, w: region.w, h: region.h,
       maxWidth: Math.min(canvas.width, 480),
     });
-    PERF.invoke += performance.now() - _t0;
     if (!(buf instanceof ArrayBuffer)) throw new Error('直播数据异常');
     if (buf.byteLength === 0) {
       // 该会话已结束（下播/断流）：从列表移除，回退到剩余会话或屏幕。
@@ -2201,17 +2286,11 @@
       srcCanvas.width = pw;
       srcCanvas.height = ph;
     }
-    const _t1 = performance.now();
     const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
     srcCanvas.getContext('2d').putImageData(img, 0, 0);
-    PERF.apply += performance.now() - _t1;
     clearPendingRealtime();
     viewDirty = false;
-    const _t2 = performance.now();
     drawView();
-    PERF.draw += performance.now() - _t2;
-    PERF.n++;
-    perfMaybeFlush();
     previewErrShown = false;
     // 无封面房间：首次进入记录首帧缩略图。
     const room = liveRooms.find((r) => (r.platform + ':' + r.room) === s.id);
@@ -2220,22 +2299,6 @@
       if (t) frameThumbs.set(s.id, t);
     }
     return true;
-  }
-
-  // ---------- [PERF] 临时性能探针（测量完成后移除）----------
-  // 累计直播预览各阶段耗时，每 3 秒经 frontend_log 落到应用日志，便于离线分析。
-  const PERF = { invoke: 0, apply: 0, draw: 0, n: 0, t0: performance.now() };
-  function perfMaybeFlush() {
-    const el = performance.now() - PERF.t0;
-    if (el < 3000 || PERF.n === 0) return;
-    const n = PERF.n;
-    invoke('frontend_log', {
-      level: 'info',
-      msg: `[PERF] 直播预览 ${n} 帧/ ${(el / 1000).toFixed(1)}s（${(n * 1000 / el).toFixed(1)} fps）`
-        + ` | 取帧IPC ${(PERF.invoke / n).toFixed(2)}ms | 提交画布 ${(PERF.apply / n).toFixed(2)}ms`
-        + ` | 主画布绘制 ${(PERF.draw / n).toFixed(2)}ms | 单帧合计 ${((PERF.invoke + PERF.apply + PERF.draw) / n).toFixed(2)}ms`,
-    }).catch(() => {});
-    PERF.invoke = 0; PERF.apply = 0; PERF.draw = 0; PERF.n = 0; PERF.t0 = performance.now();
   }
 
   let previewBusy = false;
@@ -2313,22 +2376,27 @@
   // 每轮都能拿到新帧，估出的「帧率」恒等于轮询率 → 间隔永远收不回来，卡死在
   // 20fps（实测流 29.2fps、显示 17fps）。
   //
-  // 现改为 AIMD（加减式）控制：
-  // - 本轮拿到新帧 → 认为「流还能更快」，间隔 −3ms（下限 16ms ≈60fps）；
-  // - 连续两轮无新帧 → 认为「已追上流」，间隔 +6ms（上限 50ms ≈20fps）。
-  // 稳态会在「流的帧间隔」附近小幅摆动（30fps 流 ≈33ms、60fps 流 ≈16ms），
-  // 且不会因估算自指而钉死。同时受设置里「显示区域帧率」约束（见 previewIntervalMs）。
-  let liveEstInterval = 33;   // 初始 ≈30fps
+  // 现改为 AIMD（加减式）控制；**下限由 16ms 改为 0**：
+  // - 本轮拿到新帧 → 立即再取（间隔 0），由 IPC 往返自然限速；
+  // - 连续三轮无新帧 → 指数退避（4→8→16→24ms 上限），避免空转烧 CPU。
+  //
+  // 为什么下限必须是 0（2026-10-13 实测，739 个埋点采样）：
+  // 旧下限 16ms 使单帧 = 间隔(16~50) + 取帧 IPC(19.9ms) = 周期 67ms → 只有 15fps，
+  // 而流本身约 25~33fps（解码心跳），等于把消费速度压到流之下 —— 后端帧队列常年
+  // 满 4 帧，crop_frame 每轮只弹一帧，积压帧被丢弃（日志「队列 4」）。
+  // **间隔并不省 CPU**：await IPC 期间主线程是空闲的，它只是让画面变卡。
+  // 退避上限 24ms 保证低帧率流（~40ms/帧）仍能跟上。
+  let liveEstInterval = 0;    // 有帧即 0（尽快取下一帧）
   let liveMiss = 0;           // 连续「无新帧」计数
   let liveWasOn = false;
   function liveAdaptiveInterval(changed) {
-    if (!liveWasOn) { liveWasOn = true; liveEstInterval = 33; liveMiss = 0; }
+    if (!liveWasOn) { liveWasOn = true; liveEstInterval = 0; liveMiss = 0; }
     if (changed) {
       liveMiss = 0;
-      liveEstInterval = Math.max(16, liveEstInterval - 3);
-    } else if (++liveMiss >= 2) {
+      liveEstInterval = 0;
+    } else if (++liveMiss >= 3) {
       liveMiss = 0;
-      liveEstInterval = Math.min(50, liveEstInterval + 6);
+      liveEstInterval = Math.min(24, liveEstInterval ? liveEstInterval * 2 : 4);
     }
     return Math.max(liveEstInterval, previewIntervalMs());
   }
@@ -2359,7 +2427,7 @@
     tickFps(changed);
     if (!previewActive || gen !== previewGen) return;
     if (changed) idleFrames = 0; else idleFrames++;
-    // 直播：固定 33ms（≈30fps）；连续无新帧时进一步降频省 CPU。
+    // 直播：AIMD 自适应节拍（见 liveAdaptiveInterval）；连续无新帧时指数退避省 CPU。
     const interval = liveOn()
       ? liveAdaptiveInterval(changed)
       : idleFrames > 2
@@ -2509,6 +2577,8 @@
   let baseMapTimer = null;
   let baseMapActive = false;
   let tileMode = false;
+  // 开启瓦片模式时所用的显示器矩形（关闭时按同一矩形回传，见 closeTileMode）。
+  let tileMon = null;
 
   function patchTiles(buf) {
     if (!(buf instanceof ArrayBuffer) || buf.byteLength < 8) return false;
@@ -2539,6 +2609,15 @@
 
   const BASE_MAP_INTERVAL = 33;
   let baseMapFails = 0;
+  // 关闭瓦片模式（幂等）。必须用「开启时同一显示器矩形」回传：早先用 (0,0,0,0) 会命中
+  // (0,0) 所在显示器，在副屏上会漏关。force=true 用于补偿竞态（见 tileLoop）。
+  function closeTileMode(force) {
+    if (!force && !tileMode) return;
+    tileMode = false;
+    const m = tileMon || (preview ? preview.mon : null);
+    if (!m) return;
+    invoke('set_tile_mode', { x: m.x, y: m.y, w: m.w, h: m.h, on: false }).catch(() => {});
+  }
   async function tileLoop() {
     if (!baseMapActive) return;
     const t0 = performance.now();
@@ -2553,7 +2632,11 @@
       // 回退实时帧拉伸绘制（解除冻结）。
       if (++baseMapFails >= 6) { stopBaseMap(); return; }
     }
-    if (!baseMapActive) return;
+    // 会话在本次请求期间结束（拖拽/缩放收尾）：后端 tile_frame 见到 tile_mode 为关会
+    // 自行把它重新开启（兜底分支），仅靠 stopBaseMap 的一次「关闭」覆盖不到 —— 必须在
+    // 本次请求副作用之后补发一次。否则瓦片模式残留 → 帧总线只拷「脏瓦片包围盒」→
+    // 预览请求区域永远覆盖不到 → 前端收到「未变化」→ 画面冻结，直到下次拖拽/缩放才恢复。
+    if (!baseMapActive) { closeTileMode(true); return; }
     const elapsed = performance.now() - t0;
     baseMapTimer = setTimeout(tileLoop, Math.max(0, BASE_MAP_INTERVAL - elapsed));
   }
@@ -2567,19 +2650,17 @@
     // 等后端 tile_mode 全量脏瓦片帧（首个 tileLoop 周期）刷新后再启用。
     baseMapReady = false;
     baseMap = null;
-    const m = preview.mon;
-    invoke('set_tile_mode', { x: m.x, y: m.y, w: m.w, h: m.h, on: true }).catch(() => {});
+    tileMon = preview.mon;
+    invoke('set_tile_mode', {
+      x: tileMon.x, y: tileMon.y, w: tileMon.w, h: tileMon.h, on: true,
+    }).catch(() => {});
     tileMode = true;
     tileLoop();
   }
   function stopBaseMap() {
     baseMapActive = false;
     if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
-    if (tileMode && preview) {
-      const m = preview.mon;
-      invoke('set_tile_mode', { x: m.x, y: m.y, w: m.w, h: m.h, on: false }).catch(() => {});
-      tileMode = false;
-    }
+    closeTileMode(false);
   }
 
   function drawView() {
