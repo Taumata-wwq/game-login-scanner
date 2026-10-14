@@ -513,9 +513,143 @@
     font: 500 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif; cursor: pointer;
   }
   .plat-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+
+  /* ===================== 移动端（html.mobile 生效；桌面完全不受影响） ===================== */
+  .m-topbar, .m-bottombar, .m-gamerow, .m-scrim { display: none; }
+
+  html.mobile body {
+    display: flex; flex-direction: column; height: 100vh;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    font-size: 13px;
+  }
+  /* 隐藏桌面专有元素 */
+  html.mobile .rz, html.mobile .vsplit, html.mobile .gsplit,
+  html.mobile .game-wrap, html.mobile .sidebar header .hbtns { display: none !important; }
+  html.mobile .app { flex: 1 1 auto; min-height: 0; }
+  html.mobile .main-col { width: 100%; }
+
+  /* 顶栏 */
+  html.mobile .m-topbar {
+    display: flex; align-items: center; gap: 4px;
+    height: 48px; flex: none; padding: 0 4px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  .m-iconbtn {
+    width: 40px; height: 40px; flex: none; display: grid; place-items: center;
+    background: transparent; color: var(--text); border: none; border-radius: 6px; cursor: pointer; padding: 0;
+  }
+  .m-iconbtn:active { background: var(--active); }
+  .m-titlewrap { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; }
+  .m-titlewrap.inline { flex-direction: row; gap: 7px; align-items: baseline; }
+  .m-title { font-size: 14px; font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .m-sub { font-size: 10.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+  /* 3:2 视口 */
+  html.mobile .viewport { flex: none; background: #000; }
+  html.mobile .vp-info { height: 28px; padding: 0 10px; }
+  html.mobile .vp-info #btnStart { display: none; }
+  html.mobile .vp-fit { width: 100%; height: auto; }
+  /* 3:2 视口：用 vw 高度（100vw * 2/3）比 aspect-ratio 更可靠。 */
+  html.mobile .vp-stage { width: 100% !important; height: 66.6667vw !important; }
+  /* 移动端空闲（无预览）时隐藏 fps / 重置浮标。 */
+  html.mobile .vp-stage .fps, html.mobile .vp-stage .region-reset { display: none; }
+  /* 移动端隐藏"窗口置顶"设置项（无意义）。 */
+  html.mobile #alwaysOnTop { display: none; }
+  html.mobile .opt-row:has(#alwaysOnTop) { display: none; }
+
+  /* 账号区 */
+  html.mobile .acct-area { flex: 1 1 auto; min-height: 0; flex-direction: column; padding: 8px; }
+  html.mobile .acct-col { flex: 1 1 auto; min-height: 0; }
+  html.mobile .acct-item { height: 40px; }
+  html.mobile .acct-list { gap: 6px; }
+
+  /* 游戏/区服选择行 */
+  html.mobile .m-gamerow { display: flex; gap: 8px; flex: none; margin-bottom: 8px; }
+  .m-game {
+    flex: 0 1 auto; max-width: 62%; height: 36px; padding: 0 14px;
+    display: inline-flex; align-items: center;
+    background: var(--panel-2); color: var(--text-strong); font: 600 13px/1 inherit;
+    border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .m-chan {
+    flex: 1 1 auto; height: 36px; padding: 0 14px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--panel-2); color: var(--text); font: 500 13px/1 inherit;
+    border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+  }
+  .m-game:active, .m-chan:active { background: var(--active); }
+
+  /* 底部操作栏 */
+  html.mobile .m-bottombar {
+    display: flex; align-items: center; gap: 10px;
+    height: 62px; flex: none; padding: 0 14px;
+    background: var(--panel); border-top: 1px solid var(--line);
+  }
+  .m-sqbtn {
+    width: 46px; height: 46px; flex: none; display: grid; place-items: center;
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; cursor: pointer; padding: 0;
+  }
+  .m-sqbtn:active { background: var(--active); }
+  .m-scanbtn {
+    flex: 1 1 auto; height: 46px; display: flex; align-items: center; justify-content: center; gap: 8px;
+    background: var(--primary-bg); color: var(--primary-fg); border: none;
+    border-radius: 10px; font: 700 15px/1 inherit; cursor: pointer;
+  }
+  .m-scanbtn:active { background: #ffffff; }
+  .m-scanbtn.running { background: var(--panel-2); color: #ff8f8f; box-shadow: inset 0 0 0 1px rgba(207,74,74,0.55); }
+
+  /* 左抽屉：侧栏 */
+  html.mobile .sidebar {
+    position: fixed; top: 0; bottom: 0; left: 0;
+    width: 82vw; max-width: 340px; z-index: 200;
+    background: var(--panel); border-right: 1px solid var(--line);
+    transform: translateX(-100%); transition: transform 0.25s ease;
+    padding-top: env(safe-area-inset-top, 0px);
+    box-shadow: 2px 0 16px rgba(0,0,0,0.5);
+  }
+  html.mobile .sidebar.open { transform: translateX(0); }
+  html.mobile .room-card { height: 56px; }
+
+  /* 右抽屉：设置（复用 toolsOverlay） */
+  html.mobile #toolsOverlay { justify-content: flex-end; align-items: stretch; padding: 0; }
+  html.mobile #toolsOverlay .dialog {
+    width: 90vw; max-width: 420px; height: 100%; max-height: none; border-radius: 0;
+    transform: translateX(100%); transition: transform 0.25s ease;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html.mobile #toolsOverlay.open .dialog { transform: translateX(0); }
+  html.mobile #toolsOverlay .dbody { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+
+  html.mobile .m-idle-art {
+    position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; display: block;
+  }
+  html.mobile .m-idle-art[hidden] { display: none; }
+
+  /* 遮罩 */
+  html.mobile .m-scrim { position: fixed; inset: 0; z-index: 150; background: rgba(0,0,0,0.55); display: block; }
+  html.mobile .m-scrim[hidden] { display: none; }
+
+  /* 移动端其它弹窗铺满度更高 */
+  html.mobile .dialog { max-width: 92vw; }
+  html.mobile .overlay { padding: 12px; }
+
 </style>
 </head>
 <body autocomplete="off">
+  <script>
+  // 平台检测：移动端（Android/iOS WebView）设 body.mobile，驱动响应式布局。
+  // 尽早执行（body 开头），避免桌面布局闪现后再切换。
+  (function () {
+    var ua = navigator.userAgent || "";
+    var isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+    if (isMobile) { document.documentElement.classList.add("mobile"); }
+    window.__MOBILE__ = isMobile;
+  })();
+  </script>
   <!-- 无边框窗口缩放热区：四边/四角（startResizeDragging 驱动）。 -->
   <div class="rz rz-n" data-rz="North"></div>
   <div class="rz rz-s" data-rz="South"></div>
@@ -525,6 +659,20 @@
   <div class="rz rz-nw" data-rz="NorthWest"></div>
   <div class="rz rz-se" data-rz="SouthEast"></div>
   <div class="rz rz-sw" data-rz="SouthWest"></div>
+  <!-- ===== 移动端顶栏（仅 body.mobile 显示）===== -->
+  <header class="m-topbar">
+    <button class="m-iconbtn" id="mBtnLeft" title="直播间">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
+    <div class="m-titlewrap">
+      <div class="m-title" id="mTitle">游戏扫码器</div>
+      <div class="m-sub" id="mSub"></div>
+    </div>
+    <button class="m-iconbtn" id="mBtnRight" title="设置">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="3"/></svg>
+    </button>
+  </header>
+
   <div class="app">
     <!-- 左栏：标题（标题栏）+ 直播间/桌面列表 -->
     <aside class="sidebar">
@@ -573,6 +721,15 @@
         <div class="vp-fit" id="vpFit">
           <div class="vp-stage" id="vpStage">
             <canvas id="previewCanvas" width="384" height="216"></canvas>
+            <svg class="m-idle-art" id="mIdleArt" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid meet" hidden>
+              <rect width="600" height="400" fill="#101418"/>
+              <g stroke="#3a4a5a" stroke-width="1">
+                <line x1="0" y1="0" x2="0" y2="400"/><line x1="50" y1="0" x2="50" y2="400"/><line x1="100" y1="0" x2="100" y2="400"/><line x1="150" y1="0" x2="150" y2="400"/><line x1="200" y1="0" x2="200" y2="400"/><line x1="250" y1="0" x2="250" y2="400"/><line x1="300" y1="0" x2="300" y2="400"/><line x1="350" y1="0" x2="350" y2="400"/><line x1="400" y1="0" x2="400" y2="400"/><line x1="450" y1="0" x2="450" y2="400"/><line x1="500" y1="0" x2="500" y2="400"/><line x1="550" y1="0" x2="550" y2="400"/><line x1="600" y1="0" x2="600" y2="400"/>
+                <line x1="0" y1="0" x2="600" y2="0"/><line x1="0" y1="50" x2="600" y2="50"/><line x1="0" y1="100" x2="600" y2="100"/><line x1="0" y1="150" x2="600" y2="150"/><line x1="0" y1="200" x2="600" y2="200"/><line x1="0" y1="250" x2="600" y2="250"/><line x1="0" y1="300" x2="600" y2="300"/><line x1="0" y1="350" x2="600" y2="350"/><line x1="0" y1="400" x2="600" y2="400"/>
+              </g>
+              <circle cx="300" cy="200" r="90" fill="none" stroke="#6a8aaa" stroke-width="2"/>
+              <text x="300" y="208" fill="#8aaaca" font-family="sans-serif" font-size="24" text-anchor="middle">测试图 3:2</text>
+            </svg>
             <div class="vp-cover" id="vpCover" hidden>
               <img id="vpCoverImg" alt="" referrerpolicy="no-referrer">
               <div class="vp-cover-tip" id="vpCoverTip"></div>
@@ -587,6 +744,11 @@
 
       <div class="acct-area">
         <div class="acct-col">
+          <!-- 移动端游戏/区服选择行（仅 body.mobile 显示） -->
+          <div class="m-gamerow">
+            <button class="m-game" id="mGameBtn"><span class="m-gname" id="mGameName">崩坏3</span></button>
+            <button class="m-chan" id="mChanBtn"><span id="mChanName">官服</span></button>
+          </div>
           <div class="acct-list" id="acctList"></div>
         </div>
         <div class="gsplit" id="gSplit"></div>
@@ -600,6 +762,43 @@
         </div>
       </div>
     </section>
+  </div>
+
+  <!-- ===== 移动端底部操作栏（仅 body.mobile 显示）===== -->
+  <footer class="m-bottombar">
+    <button class="m-sqbtn" id="mBtnScreenScan" title="扫描屏幕">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/><rect x="7" y="8" width="10" height="8" rx="1"/></svg>
+    </button>
+    <button class="m-scanbtn" id="mBtnScan">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
+      <span>开始扫码</span>
+    </button>
+    <button class="m-sqbtn" id="mBtnCameraScan" title="摄像头扫码">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+    </button>
+  </footer>
+
+  <!-- ===== 移动端抽屉遮罩 ===== -->
+  <div class="m-scrim" id="mScrim" hidden></div>
+
+  <!-- ===== 移动端游戏选择弹窗 ===== -->
+  <div class="overlay" id="mGameOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">选择游戏<span class="spacer"></span>
+        <button class="ibtn" data-close="mGameOverlay" title="关闭"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="dbody" id="mGameList"></div>
+    </div>
+  </div>
+
+  <!-- ===== 移动端区服选择弹窗 ===== -->
+  <div class="overlay" id="mChanOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">选择区服<span class="spacer"></span>
+        <button class="ibtn" data-close="mChanOverlay" title="关闭"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="dbody" id="mChanList"></div>
+    </div>
   </div>
 
   <!-- 添加直播间弹窗 -->
@@ -1066,9 +1265,11 @@
       it.addEventListener('click', () => switchGame(g.id));
       col.appendChild(it);
     }
+    const mgn = $('mGameName');
+    if (mgn) mgn.textContent = gameMeta(cur).name;
   }
   async function switchGame(id) {
-    if (!config || config.current_game === id) return;
+    if (!config || config.current_game === id) { if (window.__MOBILE__) closeMGameOverlay(); return; }
     try {
       await invoke('switch_game', { game: id });
       config = await invoke('get_config');
@@ -1083,6 +1284,7 @@
     else if (saved) filter = saved;
     renderGame();
     renderAll();
+    if (window.__MOBILE__) closeMGameOverlay();
     log('已切换到 ' + gameLabel(id), 'info');
   }
 
@@ -1103,6 +1305,9 @@
       b.hidden = !supported;
       b.classList.toggle('on', f === filter && supported);
     });
+    // 移动端区服名同步。
+    const mc = $('mChanName');
+    if (mc) mc.textContent = channelLabel(filter);
   }
 
   function renderAccounts() {
@@ -1793,6 +1998,8 @@
   const ACCT_MIN_H = 120;
   const VP_INFO_H = 34;
   function layoutViewport() {
+    // 移动端：宽高由 CSS（aspect-ratio: 3/2）控制，不走桌面 16:9 计算。
+    if (window.__MOBILE__) return;
     const main = document.querySelector('.main-col');
     const fit = $('vpFit'), stage = $('vpStage');
     if (!main || !fit || !stage) return;
@@ -1815,7 +2022,9 @@
     const dpr = window.devicePixelRatio || 1;
     let w = Math.round(Math.min(Math.max((rect.width || 480) * dpr, 320), 4096));
     w -= w % 4;
-    const h = Math.round((w / 16) * 9);
+    // 移动端按实际显示区比例算分辨率（3:2）；桌面固定 16:9。
+    const ar = (window.__MOBILE__ && rect.height > 0) ? (rect.width / rect.height) : (16 / 9);
+    const h = Math.round(w / ar);
     if (w !== canvas.width || h !== canvas.height) {
       canvas.width = w;
       canvas.height = h;
@@ -1898,6 +2107,7 @@
     if (!activeLiveId) {
       ttl.textContent = '屏幕预览';
       sub.textContent = '未连接直播';
+      if (window.updateMobileTitle) window.updateMobileTitle('屏幕预览', '未连接直播');
       return;
     }
     const room = liveRooms.find((r) => (r.platform + ':' + r.room) === activeLiveId);
@@ -1908,6 +2118,8 @@
     // 与左列同规则：有备注时显示「备注（原标题）」。
     const note = (room && room.note) || '';
     ttl.textContent = note ? (note + '（' + title + '）') : title;
+    // 移动端标题栏：主标题（含备注）+ 副标题（平台 房间号）。
+    if (window.updateMobileTitle) window.updateMobileTitle(ttl.textContent, livePlatformLabel(platform) + ' ' + roomNo);
     // 副标题：平台 房间号 · 时长（主播名只在左列与悬浮提示出现）。
     const parts = [];
     parts.push(livePlatformLabel(platform) + ' ' + roomNo);
@@ -1979,7 +2191,8 @@
     dmeta.append(dn, ds);
     desk.append(dthumb, dmeta);
     desk.addEventListener('mousedown', () => exitLiveMode());
-    box.appendChild(desk);
+    // 移动端不显示"桌面"卡片（手机无桌面屏幕预览场景）。
+    if (!window.__MOBILE__) box.appendChild(desk);
 
     // 2) 已保存直播间卡片（封面/标题/主播/状态）。含未开播。
     for (const s of liveRooms) {
@@ -2662,15 +2875,23 @@
     }
   });
 
-  // 内容绘制矩形：按流比例 letterbox 居中（16:9 流 = 全画布；竖屏/其他比例留黑边，不裁剪）。
+  // 内容绘制矩形：默认按流比例 letterbox 居中（留黑边，不裁剪）；
+  // coverFill=true（移动端双击切换）时改为填满画布并裁切多余部分。
+  let coverFill = false;
   function contentRect() {
     const cw0 = canvas.width, ch0 = canvas.height;
     if (!preview) return { cw: cw0, ch: ch0, ox: 0, oy: 0 };
     const ma = preview.mon.w / preview.mon.h;
     const ca = cw0 / ch0;
     let cw, ch;
-    if (ma >= ca) { cw = cw0; ch = Math.round(cw0 / ma); }
-    else { ch = ch0; cw = Math.round(ch0 * ma); }
+    if (ma >= ca) {
+      // 内容更宽：contain 横向填满+上下黑边；cover 纵向填满+横向裁切。
+      if (coverFill) { ch = ch0; cw = Math.round(ch0 * ma); }
+      else { cw = cw0; ch = Math.round(cw0 / ma); }
+    } else {
+      if (coverFill) { cw = cw0; ch = Math.round(cw0 / ma); }
+      else { ch = ch0; cw = Math.round(ch0 * ma); }
+    }
     return { cw, ch, ox: Math.round((cw0 - cw) / 2), oy: Math.round((ch0 - ch) / 2) };
   }
 
@@ -3086,6 +3307,14 @@
     btn.innerHTML = running
       ? '<span>' + (stopping ? '停止中…' : '停止扫描') + '</span>'
       : '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg><span>开始扫码</span>';
+    // 移动端底部扫码按钮同步状态。
+    const mb = $('mBtnScan');
+    if (mb) {
+      mb.classList.toggle('running', running);
+      mb.innerHTML = running
+        ? '<span>' + (stopping ? '停止中…' : '停止扫描') + '</span>'
+        : '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg><span>开始扫码</span>';
+    }
   }
 
   function renderOptions() {
@@ -3229,6 +3458,10 @@
         switchLive(lastLive);
       }
     }
+    // 移动端：初始化标题栏（无直播时显示应用名 + 提示）。
+    if (window.__MOBILE__ && window.updateMobileTitle) {
+      window.updateMobileTitle('游戏扫码器', '直播抢码 · 扫码登录');
+    }
     log('应用就绪。添加账号后点击「开始扫码」即可自动识别并登录', 'info');
     // 版本号（单一来源：Cargo.toml）。
     invoke('get_app_version').then((v) => {
@@ -3241,6 +3474,223 @@
     startPreview();
   }
 
+
+  // ===================== 移动端交互（仅 html.mobile 生效） =====================
+  if (window.__MOBILE__) {
+    // --- 标题栏：主标题 + 副标题；放不下时堆叠两行 ---
+    function updateMobileTitle(title, sub) {
+      const wrap = document.querySelector(".m-titlewrap");
+      const t = $("mTitle"), s = $("mSub");
+      if (!t || !s) return;
+      t.textContent = title || "";
+      s.textContent = sub || "";
+      if (!wrap) return;
+      // 先按一行试排，测量是否溢出；溢出则改两行堆叠。
+      wrap.classList.add("inline");
+      requestAnimationFrame(() => {
+        const tw = t.scrollWidth, sw = s.scrollWidth;
+        const avail = wrap.clientWidth - 8;
+        if (tw + sw > avail || tw > avail) wrap.classList.remove("inline");
+      });
+    }
+    window.updateMobileTitle = updateMobileTitle;
+
+    // --- 抽屉：左（直播间）/ 右（设置） ---
+    const scrim = $("mScrim");
+    const sidebar = document.querySelector(".sidebar");
+    const tools = $("toolsOverlay");
+    function openLeft() {
+      sidebar.classList.add("open");
+      scrim.hidden = false;
+      try { invoke("frontend_log", { level: "info", msg: "移动端：打开直播间抽屉" }); } catch (e) {}
+    }
+    function closeLeft() { sidebar.classList.remove("open"); maybeHideScrim(); }
+    function openRight() {
+      if (tools) { tools.hidden = false; tools.classList.add("open"); }
+      scrim.hidden = false;
+      $("btnTools") && $("btnTools").classList.add("open");
+    }
+    function closeRight() {
+      if (tools) { tools.classList.remove("open"); }
+      $("btnTools") && $("btnTools").classList.remove("open");
+      maybeHideScrim();
+    }
+    function maybeHideScrim() {
+      const anyOpen = (sidebar && sidebar.classList.contains("open")) || (tools && tools.classList.contains("open"));
+      if (!anyOpen) scrim.hidden = true;
+    }
+    window.closeMGameOverlay = function () { const o = $("mGameOverlay"); if (o) o.hidden = true; };
+    $("mBtnLeft").addEventListener("click", openLeft);
+    $("mBtnRight").addEventListener("click", openRight);
+    scrim.addEventListener("click", () => { closeLeft(); closeRight(); });
+    // 桌面端 setToolsOpen 与移动端 openRight 统一：toolsOverlay 关闭时同步清 open 类。
+    document.querySelectorAll('[data-close="toolsOverlay"]').forEach((b) => {
+      b.addEventListener("click", () => { closeRight(); });
+    });
+
+    // --- 游戏 / 区服选择弹窗 ---
+    const mGameBtn = $("mGameBtn"), mChanBtn = $("mChanBtn");
+    function renderMGameList() {
+      const box = $("mGameList");
+      if (!box) return;
+      box.textContent = "";
+      const cur = config ? (config.current_game || "bh3") : "bh3";
+      for (const g of GAMES) {
+        const it = document.createElement("div");
+        it.className = "gitem" + (g.id === cur ? " on" : "");
+        it.style.height = "40px";
+        it.style.display = "flex";
+        it.style.alignItems = "center";
+        it.style.padding = "0 12px";
+        it.style.borderRadius = "8px";
+        it.style.border = "1px solid var(--border)";
+        it.style.marginBottom = "6px";
+        it.textContent = g.name + "（" + g.desc + "）";
+        it.addEventListener("click", () => switchGame(g.id));
+        box.appendChild(it);
+      }
+    }
+    function renderMChanList() {
+      const box = $("mChanList");
+      if (!box) return;
+      box.textContent = "";
+      const g = gameMeta(config ? (config.current_game || "bh3") : "bh3");
+      const opts = [];
+      if (g.official) opts.push(["official", "官服"]);
+      if (g.bili) opts.push(["bilibili", "B 服"]);
+      if (g.hyper) opts.push(["hypergryph", "鹰角账号"]);
+      for (const [f, label] of opts) {
+        const it = document.createElement("div");
+        it.className = "gitem" + (f === filter ? " on" : "");
+        it.style.height = "40px";
+        it.style.display = "flex";
+        it.style.alignItems = "center";
+        it.style.padding = "0 12px";
+        it.style.borderRadius = "8px";
+        it.style.border = "1px solid var(--border)";
+        it.style.marginBottom = "6px";
+        it.textContent = label;
+        it.addEventListener("click", () => {
+          filter = f;
+          renderFilter();
+          renderAccounts();
+          $("mChanOverlay").hidden = true;
+        });
+        box.appendChild(it);
+      }
+    }
+    mGameBtn.addEventListener("click", () => { renderMGameList(); $("mGameOverlay").hidden = false; });
+    mChanBtn.addEventListener("click", () => { renderMChanList(); $("mChanOverlay").hidden = false; });
+
+    // --- 底部栏 ---
+    $("mBtnScan").addEventListener("click", () => { $("btnStart").click(); });
+    $("mBtnScreenScan").addEventListener("click", () => {
+      // 屏幕扫码：切到桌面目标（无直播会话时）并开始扫码。
+      exitLiveMode();
+      renderScan();
+      setTimeout(() => $("btnStart").click(), 50);
+    });
+    $("mBtnCameraScan").addEventListener("click", () => {
+      log("摄像头扫码将在后续版本提供", "info");
+      invoke("frontend_log", { level: "info", msg: "移动端：请求摄像头扫码（待实现）" }).catch(() => {});
+    });
+
+
+
+    // --- 空闲态测试图（无直播/屏幕预览时显示，便于验证缩放） ---
+    (function () {
+      const art = $("mIdleArt");
+      if (!art) return;
+      const cover = $("vpCover");
+      // 注意：SVG 元素不是 HTMLElement，无 .hidden 属性，必须用 setAttribute/removeAttribute。
+      const upd = () => {
+        const show = cover ? cover.hasAttribute("hidden") : true;
+        if (show) art.removeAttribute("hidden");
+        else art.setAttribute("hidden", "");
+      };
+      if (cover) { new MutationObserver(upd).observe(cover, { attributes: true, attributeFilter: ["hidden"] }); }
+      upd();
+    })();
+
+    // --- 3:2 视口：双击切换 contain/cover + 触摸手势 ---
+    (function bindViewportTouch() {
+      const cv = $("previewCanvas");
+      if (!cv) return;
+      // 双击切换 contain/cover
+      let lastTap = 0;
+      cv.addEventListener("touchend", (e) => {
+        const now = Date.now();
+        if (now - lastTap < 280 && e.changedTouches.length === 1) {
+          window.__coverFill__ = !window.__coverFill__;
+          try { invoke("frontend_log", { level: "info", msg: "视口双击 -> cover=" + window.__coverFill__ }); } catch (x) {}
+          coverFill = window.__coverFill__;
+          drawView();
+        }
+        lastTap = now;
+      }, { passive: true });
+      // 单指平移 / 双指捏合缩放
+      let t0 = null, t1 = null, pinchDist0 = 0, scale0 = 1;
+      cv.addEventListener("touchstart", (e) => {
+        if (!preview) return;
+        if (e.touches.length === 1) {
+          t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+          if (preview) enterDrag();
+        } else if (e.touches.length === 2) {
+          t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+          t1 = { x: e.touches[1].clientX, y: e.touches[1].clientY };
+          pinchDist0 = Math.hypot(t1.x - t0.x, t1.y - t0.y);
+          scale0 = viewT.scale;
+        }
+      }, { passive: true });
+      cv.addEventListener("touchmove", (e) => {
+        if (!preview) return;
+        e.preventDefault();
+        if (e.touches.length === 1 && t0 && !t1) {
+          const dx = e.touches[0].clientX - t0.x;
+          const dy = e.touches[0].clientY - t0.y;
+          t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+          const rect = cv.getBoundingClientRect();
+          const k = cv.width / rect.width;
+          const r = contentRect();
+          const v = viewportFrac();
+          viewT.fx -= (dx * k * v.fw) / r.cw;
+          viewT.fy -= (dy * k * v.fh) / r.ch;
+          viewDirty = true;
+          clampViewT();
+          ensureViewAnim();
+        } else if (e.touches.length === 2 && t1) {
+          const d = Math.hypot(e.touches[1].clientX - e.touches[0].clientX, e.touches[1].clientY - e.touches[0].clientY);
+          const ratio = pinchDist0 > 0 ? d / pinchDist0 : 1;
+          viewT.scale = Math.min(Math.max(scale0 * ratio, 1), 8);
+          viewDirty = true;
+          clampViewT();
+          ensureViewAnim();
+        }
+      }, { passive: false });
+      cv.addEventListener("touchend", (e) => {
+        if (e.touches.length === 0) { t0 = null; t1 = null; dragging = false; ensureViewAnim(); }
+        else if (e.touches.length === 1) { t1 = null; t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
+      }, { passive: true });
+    })();
+    // --- 账号区左右滑动触发抽屉 ---
+    (function bindAcctSwipe() {
+      const area = document.querySelector(".acct-area");
+      if (!area) return;
+      let sx = 0, sy = 0, tracking = false;
+      area.addEventListener("touchstart", (e) => {
+        if (e.touches.length !== 1) return;
+        sx = e.touches[0].clientX; sy = e.touches[0].clientY; tracking = true;
+      }, { passive: true });
+      area.addEventListener("touchend", (e) => {
+        if (!tracking) return;
+        tracking = false;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - sx, dy = t.clientY - sy;
+        if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+        if (dx > 0) openLeft(); else openRight();
+      }, { passive: true });
+    })();
+  }
   moduleOk = true;   // 脚本求值完成（自检哨兵）
   init();
 })();
