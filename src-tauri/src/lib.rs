@@ -51,8 +51,11 @@ struct QrLoginSlots {
 
 /// 共享运行时状态。
 pub struct AppState {
-    pub stop: Arc<AtomicBool>,
-    pub scanning: Arc<AtomicBool>,
+    /// 并行扫码任务注册表：key = `"screen"` / `"live:{会话id}"` → 停止标志。
+    /// 支持同时多路（最多 5 路直播 + 1 路桌面），各自独立启停。
+    pub scans: Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+    /// 跨扫码目标共享的「已尝试票据」集（同一码被多路发现时不重复确认）。
+    pub tried_tickets: Arc<Mutex<std::collections::HashSet<String>>>,
     pub config: Mutex<AppConfig>,
     login_qrs: Mutex<QrLoginSlots>,
     /// 登录二维码申请的代际号：防止并发 `login_qr_start`（用户快速切换渠道）时
@@ -1527,12 +1530,16 @@ fn prewarm_bili_account(app: &tauri::AppHandle) {
     });
 }
 
-/// 校验凭据并启动扫描线程（命令与「启动自动登录」共用）。
-/// 完全自动：只要任一渠道有激活账号即可开始，扫描时按码自动路由。
-fn try_start_scan(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
-    if state.scanning.swap(true, Ordering::SeqCst) {
-        return Err("扫描已在进行中".to_string());
-    }
+/// 校验凭据并启动**一路**扫描（目标 = `"screen"` 或 `"live:{会话id}"`）。
+///
+/// 支持并行：最多 5 路直播 + 1 路桌面；同一目标重复启动报错。
+/// 直播目标会**保活**该会话（非主画面也保持拉流/解码，停止时解除）。
+fn try_start_scan(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    target_key: String,
+) -> Result<(), String> {
+    let target = scan::ScanTarget::parse(&target_key)?;
 
     let cfg = state
         .config
@@ -1547,14 +1554,12 @@ fn try_start_scan(app: &tauri::AppHandle, state: &AppState) -> Result<(), String
     let current_channel = if cfg.current_game.is_hypergryph() {
         let ready = !hyper.phone.is_empty() && !hyper.token.is_empty();
         if !ready {
-            state.scanning.store(false, Ordering::SeqCst);
             return Err("请先在「账号」中添加鹰角账号（手机号验证码登录）".to_string());
         }
         // 鹰角游戏用 Official 占位（下游只对米哈游码生效，鹰角码走独立分支）。
         Channel::Official
     } else {
         let Some(ch) = cfg.game_channel.get(&game).copied().flatten() else {
-            state.scanning.store(false, Ordering::SeqCst);
             return Err("请先在「账号」中选择一个要使用的账号".to_string());
         };
         let ready = match ch {
@@ -1562,18 +1567,38 @@ fn try_start_scan(app: &tauri::AppHandle, state: &AppState) -> Result<(), String
             Channel::Official => !(official.stoken.is_empty() || official.mid.is_empty()),
         };
         if !ready {
-            state.scanning.store(false, Ordering::SeqCst);
             return Err("当前选中渠道的账号未登录，请重新登录".to_string());
         }
         ch
     };
 
-    state.stop.store(false, Ordering::SeqCst);
-    let stop = state.stop.clone();
-    let scanning = state.scanning.clone();
+    // 占位 + 上限检查（同一把锁内完成，防快速双击/并发调用的竞态）。
+    let stop = {
+        let mut scans = state
+            .scans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if scans.contains_key(&target_key) {
+            return Err("该目标已在扫描中".to_string());
+        }
+        let live_count = scans.keys().filter(|k| k.starts_with("live:")).count();
+        if matches!(target, scan::ScanTarget::Live(_)) && live_count >= 5 {
+            return Err("最多同时扫描 5 个直播间（桌面可另算一路）".to_string());
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        scans.insert(target_key.clone(), stop.clone());
+        stop
+    };
+    // 直播目标：保活该会话（多路并行时后台会话也保持拉流/解码）。
+    if let scan::ScanTarget::Live(id) = &target {
+        crate::live::set_scan_keepalive(id, true);
+    }
+
+    let tried = state.tried_tickets.clone();
     let app = app.clone();
     // device_id 会 move 进 ScanArgs，display_name 需在其之前取出。
     let display_name = cfg.effective_display_name();
+    let key_for_cleanup = target_key.clone();
 
     tauri::async_runtime::spawn(async move {
         let cleanup = app.clone();
@@ -1589,13 +1614,25 @@ fn try_start_scan(app: &tauri::AppHandle, state: &AppState) -> Result<(), String
                 auto_close: cfg.auto_close,
                 stop,
                 display_name,
+                target,
+                tried_tickets: tried,
             },
         )
         .await;
-        scanning.store(false, Ordering::SeqCst);
+        // 收尾：解除注册 + 解除保活（成功/停止/失败均经此处）。
+        let state = cleanup.state::<AppState>();
+        {
+            let mut scans = state
+                .scans
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scans.remove(&key_for_cleanup);
+        }
+        if let Some(id) = key_for_cleanup.strip_prefix("live:") {
+            crate::live::set_scan_keepalive(id, false);
+        }
         // 清理扫码关注区（扫描已结束，残留 ROI 会让脏矩形过滤过于保守）。
         let region = {
-            let state = cleanup.state::<AppState>();
             let g = state
                 .region
                 .lock()
@@ -1613,13 +1650,21 @@ fn try_start_scan(app: &tauri::AppHandle, state: &AppState) -> Result<(), String
 async fn start_scan(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    target: String,
 ) -> Result<(), String> {
-    try_start_scan(&app, &state)
+    try_start_scan(&app, &state, target)
 }
 
+/// 停止一路扫描（目标 = `"screen"` / `"live:{id}"`；未在运行则静默忽略）。
 #[tauri::command]
-fn stop_scan(state: tauri::State<'_, AppState>) {
-    state.stop.store(true, Ordering::SeqCst);
+fn stop_scan(state: tauri::State<'_, AppState>, target: String) {
+    let scans = state
+        .scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(stop) = scans.get(&target) {
+        stop.store(true, Ordering::SeqCst);
+    }
 }
 
 // ---------- 独立人机验证窗口 ----------
@@ -1742,8 +1787,8 @@ pub fn run() {
     let win_pos = (cfg.win_x, cfg.win_y);
 
     let state = AppState {
-        stop: Arc::new(AtomicBool::new(false)),
-        scanning: Arc::new(AtomicBool::new(false)),
+        scans: Mutex::new(std::collections::HashMap::new()),
+        tried_tickets: Arc::new(Mutex::new(std::collections::HashSet::new())),
         config: Mutex::new(cfg),
         login_qrs: Mutex::new(QrLoginSlots::default()),
         login_qr_seq: Mutex::new(0),
@@ -1894,7 +1939,7 @@ pub fn run() {
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                         let state = handle.state::<AppState>();
-                        match try_start_scan(&handle, &state) {
+                        match try_start_scan(&handle, &state, "screen".to_string()) {
                             Ok(()) => log::info!("启动自动登录已开启"),
                             Err(e) => log::warn!("启动自动登录未开始: {e}"),
                         }

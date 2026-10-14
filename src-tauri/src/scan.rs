@@ -39,20 +39,22 @@ const THUMB_STRIDE: u32 = 8;
 /// 「非登录码」诊断提示的最大次数。
 const UNKNOWN_QR_REPORTS: u32 = 3;
 
-/// 扫描状态事件载荷。
+/// 扫描状态事件载荷（`target` 标识事件属于哪一路扫码：`screen` / `live:{id}`）。
 #[derive(Debug, Clone, Serialize)]
 struct ScanEvent {
     #[serde(rename = "type")]
     kind: &'static str,
     message: String,
+    target: String,
 }
 
-fn emit(app: &tauri::AppHandle, kind: &'static str, message: impl Into<String>) {
+fn emit(app: &tauri::AppHandle, target: &str, kind: &'static str, message: impl Into<String>) {
     let _ = app.emit(
         "scan-status",
         ScanEvent {
             kind,
             message: message.into(),
+            target: target.to_string(),
         },
     );
 }
@@ -89,8 +91,10 @@ struct ScanContext {
     bili_broken: bool,
     /// 停止信号（用于即时取消挂起的网络确认）。
     stop: Arc<AtomicBool>,
-    /// 本会话已尝试确认过的票据（用于去重提示）。
-    tried_tickets: std::collections::HashSet<String>,
+    /// 已尝试确认过的票据（**跨目标共享**：同一码被多路同时发现时只确认一次）。
+    tried_tickets: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// 事件回传目标键（`"screen"` / `"live:{id}"`）。
+    target: String,
     /// 游戏内显示的账号名（B 服 confirm 的 asterisk_name）。
     display_name: String,
 }
@@ -117,9 +121,18 @@ impl ScanContext {
         if self.hypergryph.token.is_empty() || self.hypergryph.phone.is_empty() {
             return Handled::MissingAccount;
         }
-        let first_attempt = self.tried_tickets.insert(scan_id.to_string());
+        let first_attempt = self
+            .tried_tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(scan_id.to_string());
         if first_attempt {
-            emit(app, "info", "识别到鹰角游戏登录码，正在用鹰角账号确认…");
+            emit(
+                app,
+                &self.target,
+                "info",
+                "识别到鹰角游戏登录码，正在用鹰角账号确认…",
+            );
         }
         let token = self.hypergryph.token.clone();
         match hypergryph::confirm_scan(scan_id, &token).await {
@@ -142,7 +155,11 @@ impl ScanContext {
         let ch = self.current;
 
         // 同一票据只提示一次「正在确认」；重试时静默，避免日志刷屏。
-        let first_attempt = self.tried_tickets.insert(ticket.to_string());
+        let first_attempt = self
+            .tried_tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ticket.to_string());
 
         match self
             .confirm_with(app, ch, ticket, biz_key, first_attempt)
@@ -188,7 +205,7 @@ impl ScanContext {
                 }
                 if self.bh_info.is_none() {
                     if verbose {
-                        emit(app, "info", "正在校验 B 服账号…");
+                        emit(app, &self.target, "info", "正在校验 B 服账号…");
                     }
                     match mihoyo::verify_cached(&self.bili.uid, &self.bili.access_key).await {
                         Ok(info) => self.bh_info = Some(info),
@@ -210,6 +227,7 @@ impl ScanContext {
                 if verbose {
                     emit(
                         app,
+                        &self.target,
                         "info",
                         format!("识别到{}登录码，正在用 B 服账号确认…", self.game.label()),
                     );
@@ -227,6 +245,7 @@ impl ScanContext {
                 if verbose {
                     emit(
                         app,
+                        &self.target,
                         "info",
                         format!("识别到{}登录码，正在用官服账号确认…", self.game.label()),
                     );
@@ -261,8 +280,8 @@ struct LivePipe {
 }
 
 impl LivePipe {
-    /// 启动生产者线程（随 `stop` 停止；Drop 时 join）。
-    fn start(stop: Arc<AtomicBool>) -> Self {
+    /// 启动生产者线程（固定从 `id` 会话取帧；随 `stop` 停止；Drop 时 join）。
+    fn start(stop: Arc<AtomicBool>, id: String) -> Self {
         let slot: Arc<std::sync::Mutex<Option<crate::live::ScanFrame>>> =
             Arc::new(std::sync::Mutex::new(None));
         let slot_prod = Arc::clone(&slot);
@@ -277,17 +296,15 @@ impl LivePipe {
                     }
                     let need = slot_prod.lock().map(|g| g.is_none()).unwrap_or(false);
                     if need {
-                        if let Some(aid) = crate::live::active_id() {
-                            // 主档取半分辨率帧（`LIVE_SCAN_SCALE`）：解码成本 ∝ 像素数，
-                            // 720p 逐帧从 5.5ms 降到 2.45ms，检出率实测持平。
-                            if let Some(frame) =
-                                crate::live::take_scan_frame(&aid, crate::live::LIVE_SCAN_SCALE)
-                            {
-                                if last_key.as_ref() != Some(&frame.key) {
-                                    last_key = Some(frame.key);
-                                    if let Ok(mut g) = slot_prod.lock() {
-                                        *g = Some(frame);
-                                    }
+                        // 主档取半分辨率帧（`LIVE_SCAN_SCALE`）：解码成本 ∝ 像素数，
+                        // 720p 逐帧从 5.5ms 降到 2.45ms，检出率实测持平。
+                        if let Some(frame) =
+                            crate::live::take_scan_frame(&id, crate::live::LIVE_SCAN_SCALE)
+                        {
+                            if last_key.as_ref() != Some(&frame.key) {
+                                last_key = Some(frame.key);
+                                if let Ok(mut g) = slot_prod.lock() {
+                                    *g = Some(frame);
                                 }
                             }
                         }
@@ -687,16 +704,17 @@ fn friendly_error(raw: &str) -> String {
 /// 扫码命中后的收尾（三条命中路径共用）。
 /// 触发成功频率限制时：服务端已确认、游戏已登录，但不再执行「成功后动作」，
 /// 提示后直接停止扫描；正常路径执行清剪贴板 / 自动退出。两条路径都结束扫描。
-async fn finish_success(app: &tauri::AppHandle, st: &LoopState, auto_close: bool) {
+async fn finish_success(app: &tauri::AppHandle, target: &str, st: &LoopState, auto_close: bool) {
     if st.throttle_stop {
         emit(
             app,
+            target,
             "stopped",
             "已达扫码成功频率上限（2 分钟 10 次），已停止扫描",
         );
         return;
     }
-    emit(app, "success", "扫码成功");
+    emit(app, target, "success", "扫码成功");
     finalize_success(app, auto_close).await;
 }
 
@@ -708,9 +726,15 @@ async fn try_confirm(
     st: &mut LoopState,
 ) -> bool {
     st.trim();
-    // 会话内已尝试票据集合的软上限（长时间挂机防膨胀）。
-    if ctx.tried_tickets.len() > REPORTED_TICKETS_MAX {
-        ctx.tried_tickets.clear();
+    // 共享票据集合的软上限（长时间挂机防膨胀；跨目标共用，清空只影响去重提示）。
+    {
+        let mut tried = ctx
+            .tried_tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if tried.len() > REPORTED_TICKETS_MAX {
+            tried.clear();
+        }
     }
     // 同一票据失败达上限：跳过并提示一次，等新二维码。
     if st.failed_count.get(&qrc.ticket).copied().unwrap_or(0) >= MAX_FAILS_PER_TICKET {
@@ -720,6 +744,7 @@ async fn try_confirm(
         {
             emit(
                 app,
+                &ctx.target,
                 "error",
                 "该二维码多次确认失败（可能已失效或被限流），请刷新游戏登录界面或稍后再试",
             );
@@ -737,7 +762,7 @@ async fn try_confirm(
             // 失败 / 重试不占用配额（弱网下避免烧光成功额度）。
             if let Err(msg) = crate::check_scan_throttle(app) {
                 if st.reported_tickets.insert("__throttle__".to_string()) {
-                    emit(app, "error", msg);
+                    emit(app, &ctx.target, "error", msg);
                 }
                 // 服务端已确认成功（游戏已登录）：终止扫描防止对已消费票据重复提交，
                 // 但不执行「成功后动作」（清剪贴板 / 自动退出）。
@@ -750,6 +775,7 @@ async fn try_confirm(
             if st.reported_tickets.insert(qrc.ticket.clone()) {
                 emit(
                     app,
+                    &ctx.target,
                     "warn",
                     format!(
                         "识别到{}登录码，但尚未登录任何渠道账号，请先在「账号」中登录",
@@ -763,6 +789,7 @@ async fn try_confirm(
             if st.reported_tickets.insert(qrc.ticket.clone()) {
                 emit(
                     app,
+                    &ctx.target,
                     "warn",
                     "该二维码是米游社通行证码，无法用于游戏登录确认，已忽略",
                 );
@@ -777,12 +804,50 @@ async fn try_confirm(
             *st.failed_count.entry(qrc.ticket.clone()).or_insert(0) += 1;
             // 同一票据只报一次错，换新码才再次提示。
             if !same_as_failed {
-                emit(app, "error", format!("扫码失败: {}", friendly_error(&e)));
+                emit(
+                    app,
+                    &ctx.target,
+                    "error",
+                    format!("扫码失败: {}", friendly_error(&e)),
+                );
                 log::debug!("扫码失败 ticket={}: {e}", qrc.ticket);
             }
             st.last_failed_ticket = Some(qrc.ticket.clone());
             st.backoff_until = tokio::time::Instant::now() + FAILED_TICKET_BACKOFF;
             false
+        }
+    }
+}
+
+/// 扫码目标（多路并行）：桌面/屏幕，或某个直播会话。
+#[derive(Clone)]
+pub enum ScanTarget {
+    /// 桌面（全部显示器）。
+    Screen,
+    /// 指定直播会话（id = `{platform}:{room}`）。
+    Live(String),
+}
+
+impl ScanTarget {
+    /// 从前端字符串解析：`"screen"` 或 `"live:{id}"`。
+    pub fn parse(s: &str) -> Result<ScanTarget, String> {
+        if s == "screen" {
+            Ok(ScanTarget::Screen)
+        } else if let Some(id) = s.strip_prefix("live:") {
+            if id.is_empty() {
+                return Err("直播目标缺少会话 id".to_string());
+            }
+            Ok(ScanTarget::Live(id.to_string()))
+        } else {
+            Err(format!("未知扫码目标: {s}"))
+        }
+    }
+
+    /// 事件回传目标键（与前端约定一致）。
+    pub fn key(&self) -> String {
+        match self {
+            ScanTarget::Screen => "screen".to_string(),
+            ScanTarget::Live(id) => format!("live:{id}"),
         }
     }
 }
@@ -799,6 +864,10 @@ pub struct ScanArgs {
     pub stop: Arc<AtomicBool>,
     /// 游戏内显示的账号名（B 服 confirm 用）。
     pub display_name: String,
+    /// 扫码目标（多路并行；桌面与最多 5 个直播间各一个独立任务）。
+    pub target: ScanTarget,
+    /// 跨目标共享的「已尝试票据」集：同一码出现在多个房间时不重复确认。
+    pub tried_tickets: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// 扫码主流程。命中目标二维码并完成确认后返回；被停止返回「已停止」。
@@ -813,7 +882,10 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         auto_close,
         stop,
         display_name,
+        target,
+        tried_tickets,
     } = args;
+    let tkey = target.key();
     // 扫码循环固定 60Hz：扫码期间无论画面是否静止，检测频率不低于 60fps。
     // 静止屏幕由桌面复制「无新帧零成本跳过」+ 指纹去重，60Hz 轮询近零开销。
     let interval = Duration::from_millis(16);
@@ -824,6 +896,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
     };
     emit(
         &app,
+        tkey.as_str(),
         "started",
         format!("已开始扫描（使用{ch_desc}账号确认）"),
     );
@@ -838,22 +911,31 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         bh_info: None,
         bili_broken: false,
         stop: stop.clone(),
-        tried_tickets: std::collections::HashSet::new(),
+        tried_tickets,
+        target: tkey.clone(),
         display_name,
     };
     let mut st = LoopState::new();
-    // 直播取帧流水线（与解码并行；随 stop 停止，函数返回时自动 join）。
-    let live_pipe = LivePipe::start(stop.clone());
+    // 直播取帧流水线（仅直播目标；与解码并行，随 stop 停止，函数返回时自动 join）。
+    let live_pipe = match &target {
+        ScanTarget::Live(id) => Some(LivePipe::start(stop.clone(), id.clone())),
+        ScanTarget::Screen => None,
+    };
 
     // 1) 剪贴板优先（限时 500ms：剪贴板被其它进程长时间占用时直接跳过，
     //    否则表现为「点了开始扫码很久没反应」）。
-    emit(&app, "info", "读取剪贴板…");
+    emit(&app, tkey.as_str(), "info", "读取剪贴板…");
     let clipboard = {
         let read = tokio::task::spawn_blocking(qr::read_clipboard_gray);
         match tokio::time::timeout(Duration::from_millis(500), read).await {
             Ok(Ok(v)) => v,
             _ => {
-                emit(&app, "info", "剪贴板读取超时，跳过（直接全屏搜索）");
+                emit(
+                    &app,
+                    tkey.as_str(),
+                    "info",
+                    "剪贴板读取超时，跳过（直接全屏搜索）",
+                );
                 None
             }
         }
@@ -862,126 +944,119 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         if let Some(text) = qr::decode_gray_hit(&gray, w, h).map(|hit| hit.text) {
             if let Some(qrc) = qr::extract(&text) {
                 if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
-                    finish_success(&app, &st, auto_close).await;
+                    finish_success(&app, &tkey, &st, auto_close).await;
                     return;
                 }
                 if st.stopped {
-                    emit(&app, "stopped", "已停止扫描");
+                    emit(&app, tkey.as_str(), "stopped", "已停止扫描");
                     return;
                 }
             }
         }
     }
 
-    emit(&app, "info", "全屏搜索登录二维码中…");
+    emit(&app, tkey.as_str(), "info", "全屏搜索登录二维码中…");
 
-    // 2) 全屏/指定区域检测：
-    //    桌面复制「无新帧即零成本跳过」→ 指纹去重 → 整屏解码。
-    //    直播会话激活时改为扫直播帧（断流自动回退屏幕扫描）。
-    let mut live_seen = false;
+    // 2) 检测循环：
+    //    直播目标只扫**本会话**的帧（多路并行各扫各的，互不干扰）；
+    //    桌面目标只扫屏幕（桌面复制「无新帧即零成本跳过」→ 指纹去重 → 整屏解码）。
     loop {
         if stop.load(Ordering::SeqCst) {
-            emit(&app, "stopped", "已停止扫描");
+            emit(&app, tkey.as_str(), "stopped", "已停止扫描");
             return;
         }
 
-        // 直播源优先：只扫**当前前台（主画面）会话**——后台会话已暂停拉流，
-        // 且避免后台画面误触确认。切换主画面后扫码目标随之切换。
-        let active_live = crate::live::active_id();
-        if let Some(aid) = active_live {
-            // 切换前台会话（换房间）：重置去重键——不同会话的帧序号各自从 0 起，
-            // 直接沿用旧键会误判「同一帧」而跳过新会话的首帧解码。
-            if st.live_prev_id.as_deref() != Some(aid.as_str()) {
-                st.live_prev_id = Some(aid.clone());
-                st.live_last_key = None;
-            }
-            // 取帧走流水线（生产者已并行完成 YUV→灰度转换，本线程专注解码）。
-            if let Some(frame) = live_pipe.take() {
-                live_seen = true;
-                // 同一帧去重：无新帧（标识相同）时跳过解码——重复解码同一像素
-                // 不会更早发现二维码，只是白白烧 CPU。新帧必定解码一次，
-                // 检测时效不变。
-                if st.live_last_key == Some(frame.key) {
-                    let wait = interval;
-                    tokio::time::sleep(wait).await;
-                    continue;
+        match &target {
+            ScanTarget::Live(id) => {
+                // 会话键重置——不同会话帧序号各自从 0 起，沿用旧键会误判「同一帧」。
+                if st.live_prev_id.as_deref() != Some(id.as_str()) {
+                    st.live_prev_id = Some(id.clone());
+                    st.live_last_key = None;
                 }
-                st.live_last_key = Some(frame.key);
-                let (w, h) = (frame.w, frame.h);
-                // rxing 解码：快路径 + 周期性精确兜底（与屏幕路径同一策略）。
-                // 兜底档取全分辨率帧（主档是半分辨率），覆盖降质小码。
-                let decoded = decode_full_with_fallback(
-                    &mut st,
-                    &frame.gray,
-                    w,
-                    h,
-                    crate::live::LIVE_SCAN_SCALE,
-                    FullSource::Live(&aid),
-                )
-                .map(|h| h.text);
-                if let Some(text) = decoded {
-                    if let Some(qrc) = qr::extract(&text) {
-                        if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
-                            if st.stopped {
-                                emit(&app, "stopped", "已停止扫描");
-                            } else {
-                                finish_success(&app, &st, auto_close).await;
+                // 取帧走流水线（生产者已并行完成 YUV→灰度转换，本线程专注解码）。
+                if let Some(frame) = live_pipe.as_ref().and_then(|p| p.take()) {
+                    // 同一帧去重：无新帧（标识相同）时跳过解码——重复解码同一像素
+                    // 不会更早发现二维码，只是白白烧 CPU。新帧必定解码一次，
+                    // 检测时效不变。
+                    if st.live_last_key == Some(frame.key) {
+                        let wait = interval;
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                    st.live_last_key = Some(frame.key);
+                    let (w, h) = (frame.w, frame.h);
+                    // rxing 解码：快路径 + 周期性精确兜底（与屏幕路径同一策略）。
+                    // 兜底档取全分辨率帧（主档是半分辨率），覆盖降质小码。
+                    let decoded = decode_full_with_fallback(
+                        &mut st,
+                        &frame.gray,
+                        w,
+                        h,
+                        crate::live::LIVE_SCAN_SCALE,
+                        FullSource::Live(id.as_str()),
+                    )
+                    .map(|h| h.text);
+                    if let Some(text) = decoded {
+                        if let Some(qrc) = qr::extract(&text) {
+                            if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
+                                if st.stopped {
+                                    emit(&app, tkey.as_str(), "stopped", "已停止扫描");
+                                } else {
+                                    finish_success(&app, &tkey, &st, auto_close).await;
+                                }
+                                return;
                             }
-                            return;
-                        }
-                        if st.stopped {
-                            emit(&app, "stopped", "已停止扫描");
-                            return;
+                            if st.stopped {
+                                emit(&app, tkey.as_str(), "stopped", "已停止扫描");
+                                return;
+                            }
                         }
                     }
                 }
             }
-        } else {
-            if live_seen {
-                live_seen = false;
-                emit(&app, "info", "直播已断开，回退屏幕扫描");
-            }
-
-            // 用户指定了扫描区域（会话内有效，不持久化）时只扫该区域。
-            // Option<(i32,i32,i32,i32)> 实现了 Copy，直接解引用拷贝即可。
-            let region = *app
-                .state::<crate::AppState>()
-                .region
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match region {
-                Some(rect) => {
-                    if process_screen(&app, &mut ctx, &mut st, 0, rect, auto_close).await {
-                        if st.stopped {
-                            emit(&app, "stopped", "已停止扫描");
+            ScanTarget::Screen => {
+                // 用户指定了扫描区域（会话内有效，不持久化）时只扫该区域。
+                // Option<(i32,i32,i32,i32)> 实现了 Copy，直接解引用拷贝即可。
+                let region = *app
+                    .state::<crate::AppState>()
+                    .region
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match region {
+                    Some(rect) => {
+                        if process_screen(&app, &mut ctx, &mut st, 0, rect, auto_close).await {
+                            if st.stopped {
+                                emit(&app, tkey.as_str(), "stopped", "已停止扫描");
+                            } else {
+                                finish_success(&app, &tkey, &st, auto_close).await;
+                            }
+                            return;
+                        }
+                    }
+                    None => {
+                        let rects = crate::screenshot::screen_rects();
+                        if rects.is_empty() {
+                            if !st.screens_empty_reported {
+                                emit(&app, tkey.as_str(), "error", "屏幕捕获失败，请检查显示设置");
+                                st.screens_empty_reported = true;
+                            }
                         } else {
-                            finish_success(&app, &st, auto_close).await;
+                            st.screens_empty_reported = false;
                         }
-                        return;
-                    }
-                }
-                None => {
-                    let rects = crate::screenshot::screen_rects();
-                    if rects.is_empty() {
-                        if !st.screens_empty_reported {
-                            emit(&app, "error", "屏幕捕获失败，请检查显示设置");
-                            st.screens_empty_reported = true;
-                        }
-                    } else {
-                        st.screens_empty_reported = false;
-                    }
-                    for (idx, rect) in rects.iter().enumerate() {
-                        if stop.load(Ordering::SeqCst) {
-                            emit(&app, "stopped", "已停止扫描");
-                            return;
-                        }
-                        if process_screen(&app, &mut ctx, &mut st, idx, *rect, auto_close).await {
-                            if st.stopped {
-                                emit(&app, "stopped", "已停止扫描");
-                            } else {
-                                finish_success(&app, &st, auto_close).await;
+                        for (idx, rect) in rects.iter().enumerate() {
+                            if stop.load(Ordering::SeqCst) {
+                                emit(&app, tkey.as_str(), "stopped", "已停止扫描");
+                                return;
                             }
-                            return;
+                            if process_screen(&app, &mut ctx, &mut st, idx, *rect, auto_close).await
+                            {
+                                if st.stopped {
+                                    emit(&app, tkey.as_str(), "stopped", "已停止扫描");
+                                } else {
+                                    finish_success(&app, &tkey, &st, auto_close).await;
+                                }
+                                return;
+                            }
                         }
                     }
                 }
@@ -1023,7 +1098,7 @@ async fn process_screen(
             }
             None => {
                 if !st.screens_empty_reported {
-                    emit(app, "error", "屏幕捕获失败，请检查显示设置");
+                    emit(app, &ctx.target, "error", "屏幕捕获失败，请检查显示设置");
                     st.screens_empty_reported = true;
                 }
                 return false;
@@ -1071,6 +1146,7 @@ async fn process_screen(
             let preview: String = text.chars().take(60).collect();
             emit(
                 app,
+                &ctx.target,
                 "info",
                 format!("发现二维码但不是{}登录码：{preview}…", ctx.game.label()),
             );
@@ -1087,7 +1163,7 @@ async fn process_screen(
         st.roi_misses[idx] = 0;
     }
     if try_confirm(app, ctx, &qrc, st).await {
-        finish_success(app, st, auto_close).await;
+        finish_success(app, &ctx.target.clone(), st, auto_close).await;
         return true;
     }
     st.stopped

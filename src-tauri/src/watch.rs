@@ -408,10 +408,8 @@ type StatusReport = dyn Fn(&str, i64) + Send + Sync;
 /// 一次会话（直到断开/出错/被停止）。回调在**状态变化**与**每轮连接建立后**上报。
 fn run_session(room: &str, stop: &AtomicBool, report: &StatusReport) -> Result<(), String> {
     // ① get_info：真实 room_id + 初始状态（重连时顺带对账补报）。
-    let meta = crate::live::fetch_meta(crate::live::Platform::Bilibili, room);
-    if meta.room_id.is_empty() {
-        return Err("get_info 未返回 room_id".to_string());
-    }
+    //    严格版保留失败原因（DNS/风控等），便于日志区分「网络问题」与「逻辑问题」。
+    let meta = crate::live::fetch_meta_strict(crate::live::Platform::Bilibili, room)?;
     report(room, meta.live_status);
     // ② getDanmuInfo（wbi 签名）
     let di = fetch_danmu_info(&meta.room_id)?;
@@ -568,10 +566,10 @@ pub fn sync(rooms: Vec<(String, String)>, report: impl Fn(&str, i64) + Send + Sy
 ///
 /// 与正式会话共用全部原语（wbi/getDanmuInfo/握手/认证/解析），只是有固定截止时间。
 pub fn selftest(room: &str, seconds: u64) -> String {
-    let meta = crate::live::fetch_meta(crate::live::Platform::Bilibili, room);
-    if meta.room_id.is_empty() {
-        return format!("[{room}] get_info 失败");
-    }
+    let meta = match crate::live::fetch_meta_strict(crate::live::Platform::Bilibili, room) {
+        Ok(m) => m,
+        Err(e) => return format!("[{room}] {e}"),
+    };
     let di = match fetch_danmu_info(&meta.room_id) {
         Ok(d) => d,
         Err(e) => return format!("[{room}] {e}"),

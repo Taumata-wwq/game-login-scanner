@@ -705,6 +705,15 @@ struct LiveSession {
 /// 扫码只扫该会话（避免后台画面误触确认）。
 static ACTIVE_ID: Mutex<Option<String>> = Mutex::new(None);
 
+/// 扫码保活集合：这些会话即使不是主画面也**不暂停**（多房间并行扫码用）。
+/// 需要运行的会话 = 主画面 ∪ 本集合；其余暂停（TCP 背压 → 零带宽零解码）。
+static SCAN_KEEPALIVE: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn scan_keepalive() -> &'static Mutex<std::collections::HashSet<String>> {
+    SCAN_KEEPALIVE.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
 fn set_active_id(id: Option<String>) {
     *ACTIVE_ID.lock().unwrap_or_else(PoisonError::into_inner) = id;
 }
@@ -717,16 +726,20 @@ pub fn active_id() -> Option<String> {
         .clone()
 }
 
-/// 设置前台会话：恢复该会话拉流，暂停其余会话。id 为空则全部暂停。
-/// 恢复的会话清空显示队列（丢弃暂停期间积压的旧帧），切换即显示最新画面。
-pub fn set_active(id: &str) {
-    set_active_id(Some(id.to_string()));
+/// 按「主画面 ∪ 扫码保活」重算所有会话的暂停位。从暂停恢复的会话清空显示
+/// 队列与发送去重（丢弃暂停期间积压的旧帧，切换即显示最新画面）。
+fn refresh_paused() {
+    let active = active_id();
+    let keep: std::collections::HashSet<String> = scan_keepalive()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     let sessions = lock_sessions();
     if let Some(map) = sessions.as_ref() {
         for (k, s) in map {
-            let was_paused = s.paused.swap(k != id, Ordering::SeqCst);
-            // 从暂停恢复：清空显示队列与发送去重（避免旧帧快进）。
-            if was_paused && k == id {
+            let run = active.as_deref() == Some(k.as_str()) || keep.contains(k);
+            let was_paused = s.paused.swap(!run, Ordering::SeqCst);
+            if was_paused && run {
                 let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
                 f.queue.clear();
                 f.scan_cache = None;
@@ -735,15 +748,31 @@ pub fn set_active(id: &str) {
     }
 }
 
-/// 暂停全部会话（无前台时，如退出直播模式）。
-pub fn pause_all() {
-    set_active_id(None);
-    let sessions = lock_sessions();
-    if let Some(map) = sessions.as_ref() {
-        for s in map.values() {
-            s.paused.store(true, Ordering::SeqCst);
+/// 扫码保活开关（多房间并行扫码时由命令层调用；停止扫码后恢复普通暂停语义）。
+pub fn set_scan_keepalive(id: &str, on: bool) {
+    {
+        let mut keep = scan_keepalive()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if on {
+            keep.insert(id.to_string());
+        } else {
+            keep.remove(id);
         }
     }
+    refresh_paused();
+}
+
+/// 设置前台会话：恢复该会话拉流，暂停其余（扫码保活者除外）。id 为空则恢复桌面模式。
+pub fn set_active(id: &str) {
+    set_active_id(Some(id.to_string()));
+    refresh_paused();
+}
+
+/// 取消前台（如退出直播模式）：主画面为空；扫码保活会话继续运行。
+pub fn pause_all() {
+    set_active_id(None);
+    refresh_paused();
 }
 
 /// 前端房间列表用的会话摘要。
@@ -807,8 +836,23 @@ pub fn duration_text(live_start: i64) -> String {
     format_duration(live_start)
 }
 
+/// 拉取元数据（**严格版**）：保留失败原因（网络/DNS、风控、房间号无效等），
+/// 供监听器与诊断日志使用；普通调用走宽松版 `fetch_meta`。
+pub fn fetch_meta_strict(platform: Platform, room: &str) -> Result<RoomMeta, String> {
+    match platform {
+        Platform::Bilibili => fetch_bili_meta_strict(room),
+        // 抖音元数据链路自带签名与重试处理，宽松语义即可（失败返回默认）。
+        Platform::Douyin => Ok(fetch_meta(Platform::Douyin, room)),
+    }
+}
+
 /// 拉取 B站直播间元数据（get_info 接口，免登录）。失败返回默认（不阻塞连接）。
 fn fetch_bili_meta(room: &str) -> RoomMeta {
+    fetch_bili_meta_strict(room).unwrap_or_default()
+}
+
+/// get_info 严格实现：任一环节失败都带原因返回。
+fn fetch_bili_meta_strict(room: &str) -> Result<RoomMeta, String> {
     let url = format!("https://api.live.bilibili.com/room/v1/Room/get_info?room_id={room}");
     let headers = vec![
         ("User-Agent".to_string(), BROWSER_UA.to_string()),
@@ -817,14 +861,23 @@ fn fetch_bili_meta(room: &str) -> RoomMeta {
             format!("https://live.bilibili.com/{room}"),
         ),
     ];
-    let body = match crate::http::request_sync("GET", &url, &headers, None) {
-        Ok(r) => r.body,
-        Err(_) => return RoomMeta::default(),
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&body) else {
-        return RoomMeta::default();
-    };
+    let body = crate::http::request_sync("GET", &url, &headers, None)
+        .map_err(|e| format!("get_info 请求失败: {e}"))?
+        .body;
+    let v: Value =
+        serde_json::from_str(&body).map_err(|e| format!("get_info 响应解析失败: {e}"))?;
+    let code = v["code"].as_i64().unwrap_or(-1);
+    if code != 0 {
+        return Err(format!("get_info code={code}（房间号无效或触发风控）"));
+    }
     let d = &v["data"];
+    let room_id = d["room_id"]
+        .as_i64()
+        .map(|x| x.to_string())
+        .unwrap_or_default();
+    if room_id.is_empty() {
+        return Err("get_info 响应缺少 room_id".to_string());
+    }
     let live_status = d["live_status"].as_i64().unwrap_or(0);
     // user_cover 常为空 → 回退 keyframe（首帧缩略图）。
     let cover = {
@@ -835,22 +888,19 @@ fn fetch_bili_meta(room: &str) -> RoomMeta {
             d["keyframe"].as_str().unwrap_or("").to_string()
         }
     };
-    RoomMeta {
+    Ok(RoomMeta {
         title: d["title"].as_str().unwrap_or("").to_string(),
-        // get_info 无 uname → 另取主播信息（get_anchor_in_room）。
+        // get_info 无 uname → 另取主播信息（get_anchor_in_room，失败仅留空）。
         nickname: fetch_bili_anchor_name(room),
         cover,
-        room_id: d["room_id"]
-            .as_i64()
-            .map(|x| x.to_string())
-            .unwrap_or_default(),
+        room_id,
         live_status,
         live_start: if live_status == 1 {
             d["live_time"].as_i64().unwrap_or(0)
         } else {
             0
         },
-    }
+    })
 }
 
 /// 拉取 B站主播昵称（get_anchor_in_room 接口）。失败返回空。
