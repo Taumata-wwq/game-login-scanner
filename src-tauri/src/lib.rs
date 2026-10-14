@@ -126,6 +126,17 @@ fn save_config(
     Ok(())
 }
 
+/// 设置项增量更新补丁（None = 不修改该项；字段名与前端 patch 键一致）。
+#[derive(serde::Deserialize, Default)]
+struct OptionsPatch {
+    auto_login_last: Option<bool>,
+    always_on_top: Option<bool>,
+    auto_close: Option<bool>,
+    display_fps: Option<u32>,
+    display_name: Option<String>,
+    stop_others_on_scan_success: Option<bool>,
+}
+
 /// 字段级更新设置项（不触碰账号列表）。
 ///
 /// 前端设置项（自动登录/置顶/自动退出/显示帧率/登入名）此前走 save_config 整份回写，
@@ -135,12 +146,16 @@ fn save_config(
 fn set_options(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    auto_login_last: Option<bool>,
-    always_on_top: Option<bool>,
-    auto_close: Option<bool>,
-    display_fps: Option<u32>,
-    display_name: Option<String>,
+    patch: OptionsPatch,
 ) -> Result<(), String> {
+    let OptionsPatch {
+        auto_login_last,
+        always_on_top,
+        auto_close,
+        display_fps,
+        display_name,
+        stop_others_on_scan_success,
+    } = patch;
     let mut cfg = state
         .config
         .lock()
@@ -150,6 +165,9 @@ fn set_options(
     }
     if let Some(v) = auto_close {
         cfg.auto_close = v;
+    }
+    if let Some(v) = stop_others_on_scan_success {
+        cfg.stop_others_on_scan_success = v;
     }
     if let Some(v) = display_fps {
         cfg.display_fps = config::normalize_display_fps(v);
@@ -179,6 +197,36 @@ fn frontend_log(level: String, msg: String) {
     }
 }
 
+/// 记住「最后观看的直播间」（`{platform}:{room}`；空串 = 回到桌面）。
+/// 切换主画面 / 退出直播模式时调用；下次启动据此恢复。
+#[tauri::command]
+fn set_last_live(id: String, state: tauri::State<'_, AppState>) {
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cfg.last_live_id != id {
+        cfg.last_live_id = id;
+        let _ = cfg.save();
+    }
+}
+
+/// 记住界面列宽（侧栏 / 游戏列；拖动结束时调用）。
+#[tauri::command]
+fn set_ui_widths(sidebar: Option<u32>, game_col: Option<u32>, state: tauri::State<'_, AppState>) {
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(v) = sidebar {
+        cfg.sidebar_w = Some(v);
+    }
+    if let Some(v) = game_col {
+        cfg.game_col_w = Some(v);
+    }
+    let _ = cfg.save();
+}
+
 /// 应用窗口置顶设置。
 fn apply_always_on_top(app: &tauri::AppHandle, on_top: bool) {
     if let Some(w) = app.get_webview_window("main") {
@@ -186,14 +234,32 @@ fn apply_always_on_top(app: &tauri::AppHandle, on_top: bool) {
     }
 }
 
-/// 记住主窗口当前坐标（供关闭 / 自动退出两条退出路径共用）。
+/// 记住主窗口当前坐标与尺寸（关闭 / 移动 / 缩放后调用，供下次启动恢复）。
+///
+/// **最小化时跳过**：最小化会把窗口挪到 (-32000,-32000) 并缩到 160×28，
+/// 若照存，下次启动会恢复成屏幕外的迷你窗口（2026-10-14 实测踩中）。
 pub(crate) fn save_window_position(app: &tauri::AppHandle) {
     let Some(w) = app.get_webview_window("main") else {
         return;
     };
+    if w.is_minimized().unwrap_or(false) {
+        return;
+    }
     let Ok(pos) = w.outer_position() else {
         return;
     };
+    // 防御：仍遇到异常坐标（极小化竞态）时跳过位置保存。
+    if pos.x <= -30000 || pos.y <= -30000 {
+        return;
+    }
+    // 尺寸按**逻辑像素**存储（物理 ÷ scale），与恢复端 `LogicalSize` 对齐。
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let size = w.inner_size().ok().map(|s| {
+        (
+            (s.width as f64 / scale).round().max(1.0) as u32,
+            (s.height as f64 / scale).round().max(1.0) as u32,
+        )
+    });
     let state = app.state::<AppState>();
     let mut cfg = state
         .config
@@ -201,7 +267,50 @@ pub(crate) fn save_window_position(app: &tauri::AppHandle) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     cfg.win_x = Some(pos.x);
     cfg.win_y = Some(pos.y);
+    // 防御：异常小尺寸（<400 宽）不写入，避免恢复成迷你窗口。
+    if let Some((wq, hq)) = size {
+        if wq >= 400 && hq >= 300 {
+            cfg.win_w = Some(wq);
+            cfg.win_h = Some(hq);
+        }
+    }
     let _ = cfg.save();
+}
+
+/// 防抖版窗口几何保存：拖动/缩放事件密集，最多每 800ms 落盘一次；
+/// 事件停止后再**尾部补存**一次，避免「最后一次事件的值」丢失
+/// （2026-10-14 实测：无尾部补偿时拉伸后的最终尺寸只存到中途值）。
+fn save_window_geometry_throttled(app: &tauri::AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    static PENDING: AtomicBool = AtomicBool::new(false);
+    let now = std::time::Instant::now();
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let due = last
+        .map(|t| t.elapsed() >= std::time::Duration::from_millis(800))
+        .unwrap_or(true);
+    if due {
+        *last = Some(now);
+        drop(last);
+        save_window_position(app);
+        return;
+    }
+    drop(last);
+    // 尾部补偿：已有一个待补线程在跑则跳过（其保存时点也覆盖后续事件的值）。
+    if !PENDING.swap(true, Ordering::SeqCst) {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            PENDING.store(false, Ordering::SeqCst);
+            *LAST
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(std::time::Instant::now());
+            save_window_position(&app);
+        });
+    }
 }
 
 /// 回填官服账号昵称：对 uname 为空的官服账号逐个查询米游社并保存。
@@ -1785,6 +1894,7 @@ pub fn run() {
         let _ = cfg.save();
     }
     let win_pos = (cfg.win_x, cfg.win_y);
+    let win_size = (cfg.win_w, cfg.win_h);
 
     let state = AppState {
         scans: Mutex::new(std::collections::HashMap::new()),
@@ -1804,6 +1914,8 @@ pub fn run() {
             save_config,
             set_options,
             frontend_log,
+            set_last_live,
+            set_ui_widths,
             refresh_official_unames,
             select_account,
             delete_account,
@@ -1851,6 +1963,12 @@ pub fn run() {
                 log::info!("主窗口关闭，退出");
                 window.app_handle().exit(0);
             }
+            // 移动 / 缩放的几何持久化（防抖 800ms；关闭时另有完整保存）。
+            tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
+                if window.label() == "main" =>
+            {
+                save_window_geometry_throttled(window.app_handle());
+            }
             // WebView2 已知问题：最小化还原后首次点击可能被「激活点击」吞掉
             //（表现为标题栏按钮/拖拽一时失灵）。窗口获得焦点时主动回焦 webview。
             tauri::WindowEvent::Focused(true) if window.label() == "main" => {
@@ -1876,10 +1994,18 @@ pub fn run() {
             _ => {}
         })
         .setup(move |app| {
-            // 恢复主窗口位置。
-            if let (Some(x), Some(y)) = win_pos {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+            // 恢复主窗口尺寸（逻辑像素；越界值由 min/max 约束自动夹取）与位置。
+            // 防御：跳过异常历史值（屏幕外坐标 / 迷你尺寸），避免「看不见的窗口」。
+            if let Some(w) = app.get_webview_window("main") {
+                if let (Some(wq), Some(hq)) = win_size {
+                    if wq >= 400 && hq >= 300 {
+                        let _ = w.set_size(tauri::LogicalSize::new(wq as f64, hq as f64));
+                    }
+                }
+                if let (Some(x), Some(y)) = win_pos {
+                    if x > -30000 && y > -30000 {
+                        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+                    }
                 }
             }
             let handle = app.handle().clone();

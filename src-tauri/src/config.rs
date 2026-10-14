@@ -217,6 +217,24 @@ pub struct AppConfig {
     pub display_fps: u32,
     pub win_x: Option<i32>,
     pub win_y: Option<i32>,
+    /// 主窗口尺寸（逻辑像素；None = 用默认 760×520）。恢复时由 min/max 约束夹取。
+    #[serde(default)]
+    pub win_w: Option<u32>,
+    #[serde(default)]
+    pub win_h: Option<u32>,
+    /// 最后观看的直播间（`{platform}:{room}`；空 = 未观看/已回桌面）。
+    /// 下次启动自动恢复（离线显示封面，开播自动连接）。
+    #[serde(default)]
+    pub last_live_id: String,
+    /// 侧栏宽度（逻辑像素；None = 默认 208；拖动结束落盘）。
+    #[serde(default)]
+    pub sidebar_w: Option<u32>,
+    /// 游戏列宽度（None = 默认 110）。
+    #[serde(default)]
+    pub game_col_w: Option<u32>,
+    /// 扫码成功后自动停止其他直播间的扫码（默认开）。
+    #[serde(default = "default_true")]
+    pub stop_others_on_scan_success: bool,
     pub device_id: String,
     /// 真实设备指纹（米哈游登录风控必需；空则由 getFp 接口获取后写入）。
     #[serde(default)]
@@ -234,6 +252,11 @@ pub struct AppConfig {
 /// display_fps 的 serde 默认值（旧配置无此字段时用 60）。
 fn default_display_fps() -> u32 {
     60
+}
+
+/// bool 类设置项的 serde 默认值（缺省为开；旧配置无该字段时保持现行行为）。
+fn default_true() -> bool {
+    true
 }
 
 /// 显示帧率白名单（设置项仅 30/60/120；配置被手改时收敛到 60）。
@@ -262,6 +285,12 @@ impl Default for AppConfig {
             display_fps: default_display_fps(),
             win_x: None,
             win_y: None,
+            win_w: None,
+            win_h: None,
+            last_live_id: String::new(),
+            sidebar_w: None,
+            game_col_w: None,
+            stop_others_on_scan_success: true,
             device_id: String::new(),
             device_fp: String::new(),
             fp_seed_id: String::new(),

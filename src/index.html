@@ -771,6 +771,10 @@
           <label class="switch"><input type="checkbox" id="autoClose" /><span class="track"></span></label>
         </div>
         <div class="opt-row">
+          <span class="lbl">扫码成功后停止其他直播间扫码</span>
+          <label class="switch"><input type="checkbox" id="stopOthersOnSuccess" /><span class="track"></span></label>
+        </div>
+        <div class="opt-row">
           <span class="lbl">显示区域帧率</span>
           <div class="filter-seg" id="fpsSeg">
             <button data-fps="30">30</button>
@@ -780,7 +784,7 @@
         </div>
 
         <div id="buildTag" style="font-size:9.5px;color:var(--faint);letter-spacing:0.02em;">
-          版本 0.3.1 · 构建 2026-10-14.3（点击直播间即切并封面占位 / 多路并行扫码（最多5直播间+桌面） / 单实例守卫 / 诊断增强）
+          版本 0.3.1 · 构建 2026-10-14.4（持久化增强：窗口尺寸·最后直播间·列宽 / 新设置项：扫码成功后停止其他扫码）
         </div>
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
@@ -802,6 +806,8 @@
   // 并行扫码：每路目标（"screen" / "live:{id}"）独立启停；最多 5 路直播 + 1 路桌面。
   let scanningTargets = new Set();
   let stoppingTargets = new Set();
+  // 「扫码成功后自动停止其他直播间」（设置项；renderOptions 从配置同步）。
+  let stopOthersOnScanSuccess = true;
   let filter = 'official';            // 账号筛选：official | bilibili（默认官服）
   // 扫描区域（实时监视器）
   let preview = null;                 // {mon:{x,y,w,h}} 预览所在显示器信息
@@ -1193,16 +1199,17 @@
   }
 
   // 设置项更新：走字段级命令（不整份回写配置），避免与账号类命令并发互相覆盖。
-  // patch 的键名与 set_options 参数一致（蛇形→驼峰转换）。
+  // patch 的键名与 set_options 的补丁结构体字段一致（蛇形）。
   async function saveCfg(patch) {
     config = Object.assign({}, config, patch);
     const args = {};
-    if ('auto_login_last' in patch) args.autoLoginLast = patch.auto_login_last;
-    if ('always_on_top' in patch) args.alwaysOnTop = patch.always_on_top;
-    if ('auto_close' in patch) args.autoClose = patch.auto_close;
-    if ('display_fps' in patch) args.displayFps = patch.display_fps;
-    if ('display_name' in patch) args.displayName = patch.display_name;
-    await invoke('set_options', args);
+    if ('auto_login_last' in patch) args.auto_login_last = patch.auto_login_last;
+    if ('always_on_top' in patch) args.always_on_top = patch.always_on_top;
+    if ('auto_close' in patch) args.auto_close = patch.auto_close;
+    if ('stop_others_on_scan_success' in patch) args.stop_others_on_scan_success = patch.stop_others_on_scan_success;
+    if ('display_fps' in patch) args.display_fps = patch.display_fps;
+    if ('display_name' in patch) args.display_name = patch.display_name;
+    await invoke('set_options', { patch: args });
   }
 
   async function selectAccount(ch, uid) {
@@ -1645,12 +1652,14 @@
       dragging = false;
       sp.classList.remove('dragging');
       document.body.style.cursor = '';
+      // 拖动结束：列宽落盘（下次启动恢复）。
+      invoke('set_ui_widths', { sidebar: Math.round(side.getBoundingClientRect().width) }).catch(() => {});
     });
   })();
 
   // ---------- 账号列 / 游戏列 分界拖拽 ----------
   // 拖动调整右列（渠道切换 + 游戏列表）宽度，限幅 70~140px（默认 110px，见 CSS）。
-  // 宽度仅会话内有效（与侧栏拖拽一致，不落盘）。
+  // 宽度持久化：拖动结束落盘（`set_ui_widths`），下次启动恢复。
   const GAME_COL_MIN = 70, GAME_COL_MAX = 140;
   // 左列宽度低于该值时：渠道按钮文案降级为「官 / B」（两个中文字在窄列里放不下）。
   const CHAN_NARROW_AT = 76;
@@ -1682,6 +1691,8 @@
       dragging = false;
       sp.classList.remove('dragging');
       document.body.style.cursor = '';
+      // 拖动结束：列宽落盘（下次启动恢复）。
+      invoke('set_ui_widths', { gameCol: Math.round(wrap.getBoundingClientRect().width) }).catch(() => {});
     });
     updateChanLabels();
   })();
@@ -2273,6 +2284,7 @@
     if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
     closeTileMode(false);
     hideCover();
+    invoke('set_last_live', { id: '' }).catch(() => {});   // 回到桌面：清空「最后观看」
     renderLiveTabs();
     updateVpInfo();
     renderScan();   // 桌面视图：按钮反映"桌面扫码"路的状态
@@ -2366,6 +2378,7 @@
     renderLiveTabs();
     updateVpInfo();
     renderScan();   // 切换目标后按钮状态随目标重算
+    invoke('set_last_live', { id }).catch(() => {});   // 记住最后观看（下次启动恢复）
     refreshPreview().catch(() => {});
   }
 
@@ -2938,6 +2951,8 @@
     $('autoLoginLast').checked = !!config.auto_login_last;
     $('alwaysOnTop').checked = !!config.always_on_top;
     $('autoClose').checked = !!config.auto_close;
+    $('stopOthersOnSuccess').checked = config.stop_others_on_scan_success !== false;
+    stopOthersOnScanSuccess = config.stop_others_on_scan_success !== false;
     $('displayName').value = config.display_name || '';
     // 显示帧率页签（30/60/120）。
     const fps = config.display_fps || 60;
@@ -2961,6 +2976,10 @@
     $('autoLoginLast').addEventListener('change', (e) => saveCfg({ auto_login_last: e.target.checked }));
     $('alwaysOnTop').addEventListener('change', (e) => saveCfg({ always_on_top: e.target.checked }));
     $('autoClose').addEventListener('change', (e) => saveCfg({ auto_close: e.target.checked }));
+    $('stopOthersOnSuccess').addEventListener('change', (e) => {
+      stopOthersOnScanSuccess = e.target.checked;
+      saveCfg({ stop_others_on_scan_success: e.target.checked });
+    });
     document.querySelectorAll('#fpsSeg button').forEach((b) => {
       b.addEventListener('click', () => {
         fpsSetting = Number(b.dataset.fps) || 60;
@@ -2991,9 +3010,9 @@
           scanningTargets.delete(t);
           stoppingTargets.delete(t);
         }
-        // 扫码成功：其余各路一并停止（与单路时代语义一致；同一码由共享票据集
-        // 防重复确认，此处仅省资源）。
-        if (p.type === 'success') {
+        // 扫码成功：按设置决定是否一并停止其余各路（默认停止；同一码由共享
+        // 票据集防重复确认，此处仅省资源）。
+        if (p.type === 'success' && stopOthersOnScanSuccess) {
           for (const other of [...scanningTargets]) {
             if (other !== t) stopScanTarget(other);
           }
@@ -3021,6 +3040,17 @@
       if (g.hyper) filter = 'hypergryph';
       else if (saved) filter = saved;
     }
+    // 恢复界面列宽（侧栏 / 游戏列；拖动结束落盘，见 set_ui_widths）。
+    if (config && config.sidebar_w) {
+      const appRect = document.querySelector('.app').getBoundingClientRect();
+      const w = Math.min(Math.max(config.sidebar_w, 140), Math.min(240, (appRect.width || 760) - 320));
+      document.querySelector('.sidebar').style.width = w + 'px';
+    }
+    if (config && config.game_col_w) {
+      const w = Math.min(Math.max(config.game_col_w, 70), 140);
+      document.querySelector('.game-wrap').style.width = w + 'px';
+      updateChanLabels();
+    }
     renderAll();
     invoke('refresh_official_unames').catch(() => {});
     // 弹幕 WS 的实时开播/下播推送（先绑事件，再同步监测列表，避免漏首报）。
@@ -3029,6 +3059,13 @@
     await reloadLiveRooms();
     pollMetaRound();
     startMetaPoll();
+    // 恢复上次观看的直播间（离线显示封面、开播则自动连接；空表示上次在桌面）。
+    {
+      const lastLive = (config && config.last_live_id) || '';
+      if (lastLive && liveRooms.some((r) => (r.platform + ':' + r.room) === lastLive)) {
+        switchLive(lastLive);
+      }
+    }
     log('应用就绪。添加账号后点击「开始扫码」即可自动识别并登录', 'info');
     startPreview();
   }
