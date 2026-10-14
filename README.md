@@ -13,6 +13,8 @@ Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账
 
 同一米游社 / B 站账号可登录米哈游全系游戏。账号按游戏独立存储与选择。
 
+> **渠道测试状态**：B 服目前仅在 **崩坏3** 上实测通过；**原神 / 崩坏：星穹铁道 / 绝区零** 的 B 服渠道**尚未测试**（与崩坏3同源、预期可用，但不保证，欢迎反馈）。官服（米游社）渠道四款均已实测。
+
 ## 使用
 
 1. **选择游戏**：点击标题栏游戏名，按厂商分组选择目标游戏。
@@ -81,11 +83,29 @@ src-tauri/src/
 
 ## 参考
 
-- [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：B站 API 文档（直播流解析依据）
-- [mihoyo-api-collect](https://github.com/UIGF-org/mihoyo-api-collect)：米哈游 API 文档（登录协议依据）
+### 接口与协议
+
+- [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)：B站 API 文档（直播间信息 / 直播流解析 / wbi 签名 / 弹幕长连接 / 电视端扫码登录的依据）
+- [mihoyo-api-collect](https://github.com/UIGF-org/mihoyo-api-collect)：米哈游 API 文档（二维码 / 密码 / 短信验证码登录协议依据）
 - [MHY_Scanner](https://github.com/DSVVA/MHY_Scanner)：同类工具（协议与实现思路参考）
-- [rxing](https://github.com/rxing-core/rxing)：二维码/条码解码库（ZXing 的纯 Rust 移植，Apache-2.0）
-- [H.264 Video Decoder · Media Foundation](https://learn.microsoft.com/windows/win32/medfound/h-264-video-decoder)：系统硬件解码器文档（直播解码依据）
+- [BBH3ScanLaunch](https://github.com/LoveElysia1314/BBH3ScanLaunch)：社区项目（B 服游戏版本与 OA 分发串基线来源）
+- [hellocraft scanner](https://api-v2.scanner.hellocraft.xyz/v4/hi3_version)：社区维护的 B 服接口服务（版本查询 `v4/hi3_version` 与 OA 分发 `v3/query_dispatch`，运行时按当前游戏版本取分发串）
+- 抖音直播：站内接口，无公开文档（依据实测与站内结构解析）
+
+### 框架与系统能力
+
+- [Tauri](https://tauri.app/)：应用框架（Rust + 系统 WebView2，单文件发布）
+- [H.264 Video Decoder · Media Foundation](https://learn.microsoft.com/windows/win32/medfound/h-264-video-decoder)：系统硬件解码器（直播 DXVA 硬解依据）
+- [Desktop Duplication API](https://learn.microsoft.com/windows/win32/direct3ddxgi/desktop-dup-api)：屏幕取帧
+- [DPAPI · CryptProtectData](https://learn.microsoft.com/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)：令牌加密落盘（绑定当前 Windows 用户）
+- [RFC 8216 · HTTP Live Streaming](https://datatracker.ietf.org/doc/html/rfc8216)：HLS / LL-HLS 与 fMP4 分片解析依据
+- [极验 Geetest](https://docs.geetest.com/)：人机验证（触发时弹出的独立验证窗口）
+
+### 开源组件
+
+- [rxing](https://github.com/rxing-core/rxing)：二维码/条码解码（ZXing 的纯 Rust 移植，Apache-2.0）
+- [qrcodegen](https://github.com/nayuki/QR-Code-generator)：二维码生成（Nayuki，MIT）
+- [NSIS](https://nsis.sourceforge.io/)：安装包打包（由 Tauri bundler 生成）
 
 ## 许可证
 
