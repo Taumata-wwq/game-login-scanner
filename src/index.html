@@ -6,6 +6,12 @@
 <title>游戏扫码器</title>
 <!-- 极验 GT4：页面加载时即引入，以采集用户行为数据（登录时动态加载会导致初始化失败） -->
 <script src="https://static.geetest.com/v4/gt4.js" defer></script>
+<!-- 浏览器预览 mock：仅当不在 Tauri 环境时加载（生产构建不含此文件也无副作用）。 -->
+<script>
+  if (!window.__TAURI__ && !window.__TAURI_INTERNALS__) {
+    document.write('<script src="dev-preview.js"><\/script>');
+  }
+</script>
 <style>
   /* ===== 设计令牌：Adobe 风格专业黑白 ===== */
   :root {
@@ -643,11 +649,17 @@
   <script>
   // 平台检测：移动端（Android/iOS WebView）设 body.mobile，驱动响应式布局。
   // 尽早执行（body 开头），避免桌面布局闪现后再切换。
+  // 浏览器预览可用 URL 参数强制：?mobile / ?desktop。
   (function () {
+    var q = (location.search || "").toLowerCase();
     var ua = navigator.userAgent || "";
     var isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+    if (q.indexOf("mobile") >= 0) isMobile = true;
+    else if (q.indexOf("desktop") >= 0) isMobile = false;
     if (isMobile) { document.documentElement.classList.add("mobile"); }
     window.__MOBILE__ = isMobile;
+    // 浏览器预览标记：非 Tauri 环境（file:// 或本地 http 服务器）。
+    window.__PREVIEW__ = !(window.__TAURI__ || window.__TAURI_INTERNALS__);
   })();
   </script>
   <!-- 无边框窗口缩放热区：四边/四角（startResizeDragging 驱动）。 -->
