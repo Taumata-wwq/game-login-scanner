@@ -784,7 +784,7 @@
         </div>
 
         <div id="buildTag" style="font-size:9.5px;color:var(--faint);letter-spacing:0.02em;">
-          版本 0.3.1 · 构建 2026-10-14.4（持久化增强：窗口尺寸·最后直播间·列宽 / 新设置项：扫码成功后停止其他扫码）
+          版本 0.3.1 · 构建 2026-10-14.5（直播拖拽/缩放：mon 锚定平滑跟手，帧到达只更新覆盖区，不再整屏跳变）
         </div>
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
@@ -2280,6 +2280,8 @@
     view = { scale: 1, fx: 0.5, fy: 0.5 };
     viewT = { scale: 1, fx: 0.5, fy: 0.5 };
     srcCanvas = null;
+    liveAnchor = null;
+    liveAnchorPrev = null;
     baseMap = null; baseMapReady = false; baseMapActive = false;
     if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
     closeTileMode(false);
@@ -2374,6 +2376,8 @@
       view = saved ? { ...saved } : { scale: 1, fx: 0.5, fy: 0.5 };
       viewT = { ...view };
       srcCanvas = null;
+      liveAnchor = null;   // 换会话：旧锚定帧作废
+      liveAnchorPrev = null;
     }
     renderLiveTabs();
     updateVpInfo();
@@ -2415,6 +2419,8 @@
       preview = { mon };
       view = { scale: 1, fx: 0.5, fy: 0.5 };
       viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+      liveAnchor = null;   // 流规格变化（换流）：旧锚定帧作废
+      liveAnchorPrev = null;
     }
     if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
       srcCanvas = document.createElement('canvas');
@@ -2423,6 +2429,10 @@
     }
     const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
     srcCanvas.getContext('2d').putImageData(img, 0, 0);
+    // 记录本帧覆盖的 mon 矩形（= 请求时的视口）：拖拽/缩放期按此锚定绘制；
+    // 上一帧保留作垫底（运动补白）。
+    if (liveAnchor) liveAnchorPrev = liveAnchor;
+    liveAnchor = { rect: region };
     clearPendingRealtime();
     viewDirty = false;
     drawView();
@@ -2639,17 +2649,46 @@
     viewT.fy = Math.min(Math.max(viewT.fy, fh / 2), 1 - fh / 2);
   }
   let viewRaf = null;
-  function ensureViewAnim() {
+  // 视图运动窗口（拖拽 mousemove / 滚轮缩放后短暂延长）：窗口内 RAF 重绘循环续跑，
+  // 让「本地变换」逐帧生效（直播模式也走此路径，见 startLiveMotionRedraw）。
+  let liveMotionUntil = 0;
+  // 直播拖拽/缩放的「mon 锚定帧」：最近一帧实际覆盖的 mon 矩形（= 请求时的视口）。
+  // 绘制时按此矩形把帧映射回 mon 空间：已加载区域随视图**平滑滑动**（本地变换，
+  // 零延迟跟手），新帧到达只更新它覆盖的区域——不再整屏替换，消除快拖时的
+  // 离散跳变/落后。拖出未加载区域短暂露暗底，由预览循环按流节拍（~19-25Hz）
+  // 在 1~2 拍内补齐（= 地图类应用的瓦片手感）。
+  let liveAnchor = null;
+  // 上一锚定帧（垫底层：运动补白，见 drawLiveAnchored）。
+  let liveAnchorPrev = null;
+  function startLiveMotionRedraw() {
     if (viewRaf) return;
-    // 直播模式：画面是「后端按视口裁剪」的帧，平移/缩放必须重新拉取该区域的新帧
-    // —— 不能用 RAF 客户端平移（srcCanvas 只是旧区域，直接重绘会「画面不动」）。
-    // 故：直接同步 view=viewT（无平滑），由预览轮询拉新区域帧重绘。
+    const loop = () => {
+      drawView();
+      if (dragging || performance.now() < liveMotionUntil) {
+        viewRaf = requestAnimationFrame(loop);
+      } else {
+        viewRaf = null;
+      }
+    };
+    viewRaf = requestAnimationFrame(loop);
+  }
+  function ensureViewAnim() {
+    // 直播模式（**必须最先处理**）：每次视图变化都要同步 view=viewT（跟手）。
+    // 教训（2026-10-14 实机）：此前把该同步放在 `if (viewRaf) return` 之后 →
+    // 拖拽开始后 RAF 已在跑，后续 mousemove 全被早退挡掉，view 永远停在拖动
+    // 第一步的状态（画面"不动"、取帧也用旧视口 → 缩放露黑区）。
+    // ① 视图即时同步（跟手）；
+    // ② RAF 按最近一帧的 mon 锚定本地重绘（内容平滑滑动，零延迟）；
+    // ③ 取帧交由预览主循环按流节拍（~19-25Hz）持续补齐当前视口——
+    //    新帧只更新其覆盖区域，无整屏跳变。
     if (liveOn()) {
       view = { ...viewT };
       viewDirty = true;
-      refreshPreview().catch(() => {});
+      liveMotionUntil = performance.now() + 240;
+      startLiveMotionRedraw();
       return;
     }
+    if (viewRaf) return;
     // 屏幕模式：停止实时预览，启用瓦片底图 + RAF 平滑重绘（底图可客户端平移）。
     stopPreview();
     if (!paused && !baseMapActive) { startBaseMap(); }
@@ -2821,14 +2860,66 @@
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(sc, sx, sy, sw, sh, r.ox, r.oy, r.cw, r.ch);
+    } else if (liveOn()) {
+      // 直播：按「帧覆盖的 mon 矩形」锚定绘制（见 liveAnchor 注释）；
+      // 稳态（视图未动、帧即当前视口）下与整屏绘制等价。
+      drawLiveAnchored();
     } else if (srcCanvas) {
       ctx.imageSmoothingEnabled = r.cw <= srcCanvas.width + 0.5;
-      // 拖拽/缩放动画中、以及直播（视频）画面降质量：GPU 缩放成本更低，
-      // 帧率更稳；屏幕预览静止时仍用 high 保清晰度。
-      ctx.imageSmoothingQuality = (dragging || liveOn()) ? 'low' : 'high';
+      // 拖拽动画中降质量：GPU 缩放成本更低，帧率更稳；屏幕预览静止时仍用 high 保清晰度。
+      ctx.imageSmoothingQuality = dragging ? 'low' : 'high';
       ctx.drawImage(srcCanvas, r.ox, r.oy, r.cw, r.ch);
     }
     canvasBlank = false;
+  }
+
+  // 直播帧的 mon 锚定绘制：把帧内容映射回它实际覆盖的 mon 区域，绘制「当前视图
+  // ∩ 帧覆盖区」，其余留暗底（等下一拍取帧补齐）。**两层**：当前锚定帧在上，
+  // 上一锚定帧垫底——拖动/缩放时新露出的边缘先由上一帧（略旧但连续）补白，
+  // 避免黑区闪烁；新帧到达后自然覆盖。
+  function drawLiveAnchored() {
+    const ctx = canvasCtx;
+    const r = contentRect();
+    const v = viewportFrac();
+    const m = preview.mon;
+    const sc = srcCanvas;
+    if (!sc) return;
+    if (!liveAnchor || liveAnchor.rect.w <= 0 || m.w <= 0 || m.h <= 0) {
+      // 无锚信息（异常兜底）：退化为整屏绘制。
+      ctx.imageSmoothingEnabled = r.cw <= sc.width + 0.5;
+      ctx.imageSmoothingQuality = 'low';
+      ctx.drawImage(sc, r.ox, r.oy, r.cw, r.ch);
+      return;
+    }
+    // 垫底：上一锚定帧（与当前帧区域不同时才画）。
+    const pa = liveAnchorPrev;
+    if (pa && pa.rect.w > 0 && (pa.rect.x !== liveAnchor.rect.x || pa.rect.y !== liveAnchor.rect.y
+        || pa.rect.w !== liveAnchor.rect.w || pa.rect.h !== liveAnchor.rect.h)) {
+      drawLiveAnchorLayer(pa.rect, r, v, m);
+    }
+    drawLiveAnchorLayer(liveAnchor.rect, r, v, m);
+  }
+
+  // 按 mon 锚定绘制单层帧：帧内容(srcCanvas) ↔ 覆盖矩形(fr) ↔ 当前视图(v)。
+  function drawLiveAnchorLayer(fr, r, v, m) {
+    const ctx = canvasCtx;
+    const sc = srcCanvas;
+    const vx0 = m.x + v.x0 * m.w, vy0 = m.y + v.y0 * m.h;
+    const vw = v.fw * m.w, vh = v.fh * m.h;
+    const ix0 = Math.max(vx0, fr.x), iy0 = Math.max(vy0, fr.y);
+    const ix1 = Math.min(vx0 + vw, fr.x + fr.w), iy1 = Math.min(vy0 + vh, fr.y + fr.h);
+    if (ix1 - ix0 < 0.5 || iy1 - iy0 < 0.5) return;   // 无交集
+    const sx = ((ix0 - fr.x) / fr.w) * sc.width;
+    const sy = ((iy0 - fr.y) / fr.h) * sc.height;
+    const sw = ((ix1 - ix0) / fr.w) * sc.width;
+    const sh = ((iy1 - iy0) / fr.h) * sc.height;
+    const dx = r.ox + ((ix0 - vx0) / vw) * r.cw;
+    const dy = r.oy + ((iy0 - vy0) / vh) * r.ch;
+    const dw = ((ix1 - ix0) / vw) * r.cw;
+    const dh = ((iy1 - iy0) / vh) * r.ch;
+    ctx.imageSmoothingEnabled = dw <= sw + 1;
+    ctx.imageSmoothingQuality = 'low';
+    ctx.drawImage(sc, sx, sy, sw, sh, dx, dy, dw, dh);
   }
 
   function updateRegion() {
@@ -2900,6 +2991,7 @@
     viewDirty = true;
     clampViewT();
     ensureViewAnim();
+    refreshPreview().catch(() => {});   // 缩放：立即补一帧追赶（快于预览循环节拍一拍）
   }, { passive: false });
 
   $('btnRegionReset').addEventListener('click', () => {
