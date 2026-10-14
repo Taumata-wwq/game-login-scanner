@@ -63,6 +63,9 @@ rsa = { version = "0.9", features = ["sha2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8.4"
 schannel = "0.1.29"
+# 弹幕 WS（开播/下播即时监测，watch.rs）：B站下行批次可能为 zlib（protover=2）。
+# 纯 Rust 解压，无 C 依赖；同版本已在依赖树中（tauri-codegen → png → flate2）。
+miniz_oxide = "0.8"
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 

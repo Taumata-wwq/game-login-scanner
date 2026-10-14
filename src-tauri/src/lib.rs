@@ -15,6 +15,7 @@ pub mod qr;
 pub mod scan;
 pub mod screenshot;
 pub mod sdk;
+pub mod watch;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1303,6 +1304,32 @@ fn live_set_active(id: String) {
     }
 }
 
+/// 监测同步的入参（前端传已保存直播间列表）。
+#[derive(serde::Deserialize)]
+struct WatchRoom {
+    platform: String,
+    room: String,
+}
+
+/// 同步「开播/下播」即时监测列表（B站弹幕 WS，见 `watch.rs`；幂等）。
+///
+/// 弹幕 WS 在房间状态切换时实时推送 LIVE/PREPARING → `live-status` 事件，
+/// 感知延迟从轮询的「≤30s」降到「≈1s」。非 B站（抖音）由轮询兜底。
+#[tauri::command]
+fn live_watch_sync(rooms: Vec<WatchRoom>, app: tauri::AppHandle) {
+    let list: Vec<(String, String)> = rooms.into_iter().map(|r| (r.platform, r.room)).collect();
+    crate::watch::sync(list, move |room, live_status| {
+        let _ = app.emit(
+            "live-status",
+            serde_json::json!({
+                "platform": "bilibili",
+                "room": room,
+                "live_status": live_status,
+            }),
+        );
+    });
+}
+
 /// 记录直播间使用历史（前端在连接成功后调用；去重置顶并持久化）。
 #[tauri::command]
 fn live_history_push(
@@ -1767,6 +1794,7 @@ pub fn run() {
             live_history_reorder,
             live_history_set_note,
             live_refresh_meta,
+            live_watch_sync,
             set_tile_mode,
             set_scan_region,
             set_preview_active,
