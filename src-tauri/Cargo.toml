@@ -28,8 +28,8 @@ embed-resource = "3"
 indexmap = { version = "1.9", default-features = false, features = ["std"] }
 
 [dependencies]
-# 关闭默认特性：去掉 compression（内嵌资源 brotli）、common-controls-v6、dynamic-acl，
-# 本应用前端仅两个内嵌 HTML、静态 capabilities、不调用系统对话框。
+# 关闭默认特性：去掉 common-controls-v6、dynamic-acl；compression（内嵌资源 brotli）
+# 经 2026-10-14 A/B 实测**不加**（开=+62.5KB：解压器代码/数据大于资源压缩收益）。
 tauri = { version = "2", default-features = false, features = ["wry"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -46,6 +46,8 @@ base64 = "0.22"
 # vs 旧 zedbar 11.3ms/帧（-60%），检出矩阵（180/300/120/90px，含左右边缘位置）全过，
 # 70~200px 小码回归全过；且许可证由 LGPL-3.0 换为 Apache-2.0。
 qrcodegen = "1.8"
+# 注：encoding_rs 为 rxing 的编译期硬依赖（2026-10-14 实验：去掉后 rxing
+# 直接 10 处编译错误）——体积上无法通过裁剪该 feature 优化，保留。
 rxing = { version = "0.9", default-features = false, features = ["qrcode", "decoders", "encoding_rs"] }
 
 # 加密与编码
@@ -72,6 +74,8 @@ custom-protocol = ["tauri/custom-protocol"]
 # release：体积优先（opt-level="s"，4.2MB；=3 时 5.3MB）+ strip 符号 + abort 展开。
 # 热路径（预览降采样 / 解码）在 "s" 下实测仍满足 60fps 预览与扫码节流预算
 # （2560×1440 整屏解码 ~137ms，且受 400ms 节流 + ROI + 指纹去重约束）。
+# 2026-10-14 体积审计：全局 "s"→"z" A/B 实测仅 -3.5KB（噪声级，且部分段反增）
+# ——不做此变更；"s" 保持不变。
 # 注：曾试 thin LTO + codegen-units=1，体积仅减 ~0.3MB，但单次构建增至 ~12 分钟，不启用。
 [profile.release]
 opt-level = "s"
