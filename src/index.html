@@ -2298,6 +2298,9 @@
     const note = $('addLiveNote').value.trim();
     $('addLiveOverlay').hidden = true;
     await connectLive(addLivePlatform, room, note);
+    // 新增成功（已建立会话）：切到新房间（含封面占位语义）；未开播则不切、仅进列表。
+    const nid = addLivePlatform + ':' + room;
+    if (liveSessions.some((s) => s.id === nid)) switchLive(nid);
   });
   $('addLiveRoom').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btnAddLiveSave').click(); });
 
@@ -2337,9 +2340,9 @@
       log('直播间 ' + room + '：' + e, 'info');
     }
     await reloadLiveRooms();
-    if (liveSessions.some((s) => s.id === id)) {
-      switchLiveNow(id);
-    }
+    // 不在此强制切换视图：点击流程已在 switchLive 中**立即**切换（此后用户可能已
+    // 看向别处，连接完成再把画面拽回来会打断操作）；「新增直播间」的成功切换由
+    // 保存按钮的调用方负责。
   }
 
   // 仅切换主画面（不触发连接）——供 connectLive 成功后调用，避免递归。
