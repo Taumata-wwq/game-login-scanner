@@ -384,6 +384,20 @@
   .vp-stage { position: relative; background: #0c0c0c; overflow: hidden; }
   .vp-stage canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
   .vp-stage canvas.dragging { cursor: grabbing; }
+  /* 封面占位：切换直播间/进入未开播房间（暂无画面）时盖在画布上，首帧到达即揭除。 */
+  .vp-cover {
+    position: absolute; inset: 0; z-index: 4;
+    background: #0c0c0c; display: flex; align-items: center; justify-content: center;
+  }
+  .vp-cover img {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; opacity: 0.55;
+  }
+  .vp-cover-tip {
+    position: relative; max-width: 82%; text-align: center;
+    font-size: 10.5px; color: var(--text); line-height: 1.7;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  }
   /* 画面上浮控件：fps 左上、重置右上。 */
   .vp-stage .fps {
     position: absolute; left: 6px; top: 6px; z-index: 5;
@@ -540,6 +554,10 @@
         <div class="vp-fit" id="vpFit">
           <div class="vp-stage" id="vpStage">
             <canvas id="previewCanvas" width="384" height="216"></canvas>
+            <div class="vp-cover" id="vpCover" hidden>
+              <img id="vpCoverImg" alt="" referrerpolicy="no-referrer">
+              <div class="vp-cover-tip" id="vpCoverTip"></div>
+            </div>
             <span class="fps" id="fpsMeter" title="预览帧率（点击暂停/继续）。直播模式跟随直播流帧率，上限为设置中的「显示区域帧率」">--</span>
             <button class="region-reset" id="btnRegionReset" title="重置视图">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/><path d="M3 12h18"/></svg>
@@ -758,7 +776,7 @@
         </div>
 
         <div id="buildTag" style="font-size:9.5px;color:var(--faint);letter-spacing:0.02em;">
-          版本 0.3.1 · 构建 2026-10-14.2（直播间列表滚动修复 / 状态徽标统一底色提高对比 / 游戏列移至账号右侧 / 窗口上限 900×600 / 开播与下播即时监测）
+          版本 0.3.1 · 构建 2026-10-14.3（点击直播间即切并封面占位 / 多路并行扫码（最多5直播间+桌面） / 单实例守卫 / 诊断增强）
         </div>
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
@@ -777,7 +795,9 @@
   const appWindow = T && T.window ? T.window.getCurrentWindow() : null;
 
   let config = null;
-  let scanning = false;
+  // 并行扫码：每路目标（"screen" / "live:{id}"）独立启停；最多 5 路直播 + 1 路桌面。
+  let scanningTargets = new Set();
+  let stoppingTargets = new Set();
   let filter = 'official';            // 账号筛选：official | bilibili（默认官服）
   // 扫描区域（实时监视器）
   let preview = null;                 // {mon:{x,y,w,h}} 预览所在显示器信息
@@ -1663,15 +1683,31 @@
   })();
 
   // ---------- 扫描 ----------
-  let stopping = false;
+  // 当前视图对应的扫码目标："桌面" → "screen"；直播会话 → "live:{id}"；
+  // 选中的未开播房间（无会话，无可扫画面）→ null。
+  function activeScanTarget() {
+    if (!activeLiveId) return 'screen';
+    return activeSession() ? ('live:' + activeLiveId) : null;
+  }
+  // 请求停止一路扫码（按钮与自动停止共用；幂等）。
+  function stopScanTarget(t) {
+    if (!scanningTargets.has(t) || stoppingTargets.has(t)) return;
+    stoppingTargets.add(t);
+    renderScan();
+    invoke('stop_scan', { target: t }).catch(() => {});
+  }
   $('btnStart').addEventListener('click', () => {
-    if (scanning) {
-      if (stopping) return;
-      stopping = true;
-      renderScan();
-      invoke('stop_scan').then(() => log('已请求停止…', 'info')).catch((e) => log(e, 'error'));
+    const t = activeScanTarget();
+    if (!t) {
+      log('该直播间未开播：开播后会自动连接，随后即可扫码', 'warn');
+      return;
+    }
+    if (scanningTargets.has(t)) {
+      if (stoppingTargets.has(t)) return;
+      stopScanTarget(t);
+      log('已请求停止…', 'info');
     } else {
-      invoke('start_scan').catch((e) => log(e, 'error'));
+      invoke('start_scan', { target: t }).catch((e) => log(String(e), 'error'));
     }
   });
 
@@ -1936,9 +1972,7 @@
       card.append(thumb, meta, x);
       card.addEventListener('mousedown', (ev) => {
         if (ev.target === x) return;
-        // 未开播且无会话：不切换（保持在当前直播间）；否则切换。
-        const isLive = (s.live_status === 1) || liveSessions.some((x2) => x2.id === id);
-        if (!isLive) return;
+        // 立即切换：有会话直接切画面；未连接/未开播先显示封面占位（首帧到达自动揭除）。
         switchLive(id);
       });
       // 双击编辑备注。
@@ -1994,14 +2028,59 @@
   // 拖拽排序源会话 id。
   let dragSrcId = null;
 
-  // 切换主画面到指定会话（保存旧视图、恢复该会话视图、切换后端前台）。
-  // 未连接的房间：先按需连接。
+  // ---------- 封面占位（切换直播间/未开播时先显示封面，首帧到达后揭除） ----------
+  let coverShown = false;
+  function showCover(roomId) {
+    const el = $('vpCover');
+    if (!el) return;
+    const img = $('vpCoverImg'), tip = $('vpCoverTip');
+    const room = liveRooms.find((r) => (r.platform + ':' + r.room) === roomId);
+    const src = room ? (room.cover || frameThumbs.get(roomId) || '') : '';
+    if (src) {
+      img.src = src;
+      img.style.display = '';
+    } else {
+      img.removeAttribute('src');
+      img.style.display = 'none';
+    }
+    if (room) {
+      const name = room.note ? (room.note + '（' + (room.title || room.room) + '）') : (room.title || room.room);
+      const stat = room.live_status === 1 ? '直播中，等待画面…' : '未开播（开播后自动连接）';
+      tip.textContent = name + ' · ' + stat;
+    } else {
+      tip.textContent = '';
+    }
+    el.hidden = false;
+    coverShown = true;
+  }
+  function hideCover() {
+    const el = $('vpCover');
+    if (el) el.hidden = true;
+    coverShown = false;
+  }
+
+  // 切换直播间：**立即**选中（未连接的先上封面占位），连线/取帧在后台完成。
+  // 未开播房间同样可切换（显示封面；开播时自动连接并揭除封面）。
   async function switchLive(id) {
     if (activeLiveId === id) return;
     const sep = id.indexOf(':');
     const platform = id.slice(0, sep);
     const room = id.slice(sep + 1);
-    // 点击时刷新一次元数据（标题/封面按需更新）。
+    // 保存当前会话视图 + 末帧缩略图（切换前）。
+    if (activeLiveId) {
+      liveViews.set(activeLiveId, { ...view });
+      const oldRoom = liveRooms.find((r) => (r.platform + ':' + r.room) === activeLiveId);
+      if (oldRoom && !oldRoom.cover) {
+        const t = captureThumb();
+        if (t) frameThumbs.set(activeLiveId, t);
+      }
+    }
+    // ① 立即切换 UI（高亮 / 信息栏 / 预览目标）。
+    const hasSession = liveSessions.some((s) => s.id === id);
+    switchLiveNow(id);
+    // ② 无会话：先上封面占位（连线成功、首帧到达后自动揭除）。
+    if (hasSession) hideCover(); else showCover(id);
+    // ③ 后台刷新一次元数据（标题/封面按需更新）。
     invoke('live_refresh_meta', { platform, room }).then((m) => {
       const local = liveRooms.find((x) => (x.platform + ':' + x.room) === id);
       if (local && m) {
@@ -2011,40 +2090,17 @@
         local.room_id = m.room_id || local.room_id;
         local.live_status = m.live_status;
         renderLiveTabs();
-        if (activeLiveId === id) updateVpInfo();
+        if (activeLiveId === id) {
+          updateVpInfo();
+          if (coverShown) showCover(id);   // 仍在占位态：同步刷新封面/状态文案
+        }
       }
     }).catch(() => {});
-    // 未连接 → 连接（可能未开播，报错后仅高亮不切画面）。
-    if (!liveSessions.some((s) => s.id === id)) {
-      try {
-        await connectLive(platform, room, '');
-      } catch (e) { /* connectLive 内部已日志 */ return; }
+    // ④ 未连接：后台连接（成功 → 首帧到达揭除封面；失败 → 保持封面）。
+    if (!hasSession) {
+      await connectLive(platform, room, '');
+      if (activeLiveId === id && coverShown) showCover(id);
     }
-    // 保存当前会话视图 + 末帧缩略图。
-    if (activeLiveId) {
-      liveViews.set(activeLiveId, { ...view });
-      const oldRoom = liveRooms.find((r) => (r.platform + ':' + r.room) === activeLiveId);
-      if (oldRoom && !oldRoom.cover) {
-        const t = captureThumb();
-        if (t) frameThumbs.set(activeLiveId, t);
-      }
-    }
-    activeLiveId = id;
-    // 通知后端切换前台（恢复该路拉流、暂停其余，后台零带宽零解码）。
-    invoke('live_set_active', { id }).catch(() => {});
-    const s = activeSession();
-    if (s && s.w > 0 && s.h > 0) {
-      preview = { mon: { x: 0, y: 0, w: s.w, h: s.h } };
-      // 恢复记忆的视图（首次切到该会话则重置居中）。
-      const saved = liveViews.get(id);
-      view = saved ? { ...saved } : { scale: 1, fx: 0.5, fy: 0.5 };
-      viewT = { ...view };
-      srcCanvas = null;
-    }
-    renderLiveTabs();
-    updateVpInfo();
-    // 立即拉新会话的帧（不等下一轮 previewLoop，切换更跟手）。
-    refreshPreview().catch(() => {});
   }
 
   // 元数据轮询（兜底对账）：每 30s 一轮——开播/下播已由弹幕 WS 即时推送
@@ -2114,6 +2170,11 @@
       renderLiveTabs();
       if ((p.platform + ':' + p.room) === activeLiveId) updateVpInfo();
       if (went_live) {
+        // 正选中该房间（处于未开播封面态）：自动连接，首帧到达后自动揭除封面。
+        const rid = p.platform + ':' + p.room;
+        if (rid === activeLiveId && !liveSessions.some((s) => s.id === rid)) {
+          connectLive(p.platform, p.room, '');
+        }
         // 开播后拉一次权威元数据（标题/封面/主播名随开播更新）。
         invoke('live_refresh_meta', { platform: p.platform, room: p.room }).then((m) => {
           if (!m) return;
@@ -2122,7 +2183,10 @@
           local.cover = m.cover || local.cover;
           local.room_id = m.room_id || local.room_id;
           renderLiveTabs();
-          if ((p.platform + ':' + p.room) === activeLiveId) updateVpInfo();
+          if (rid === activeLiveId) {
+            updateVpInfo();
+            if (coverShown) showCover(rid);   // 封面/状态文案同步刷新
+          }
         }).catch(() => {});
       }
     });
@@ -2171,6 +2235,8 @@
   function closeLive(id) {
     const s = liveSessions.find((x) => x.id === id);
     if (s) invoke('live_stop', { platform: s.platform, room: s.room }).catch(() => {});
+    // 会话结束：其扫码路一并停止（避免无帧空转的任务残留）。
+    stopScanTarget('live:' + id);
     liveSessions = liveSessions.filter((x) => x.id !== id);
     liveViews.delete(id);
     if (activeLiveId === id) {
@@ -2202,8 +2268,10 @@
     baseMap = null; baseMapReady = false; baseMapActive = false;
     if (baseMapTimer) { clearTimeout(baseMapTimer); baseMapTimer = null; }
     closeTileMode(false);
+    hideCover();
     renderLiveTabs();
     updateVpInfo();
+    renderScan();   // 桌面视图：按钮反映"桌面扫码"路的状态
   }
 
   // 添加直播间弹窗：平台 + 房间号 + 备注。
@@ -2290,6 +2358,7 @@
     }
     renderLiveTabs();
     updateVpInfo();
+    renderScan();   // 切换目标后按钮状态随目标重算
     refreshPreview().catch(() => {});
   }
 
@@ -2299,7 +2368,9 @@
   // 24 字节 = 缓冲欠载或帧未变 → 沿用上一帧（流帧率低于 30fps 属正常现象）。
   async function refreshLiveFrame() {
     const s = activeSession();
-    if (!s) { if (!liveSessions.length) exitLiveMode(); return false; }
+    // 无会话（选中的未开播房间 / 连线中）：保持封面占位，不在此退出
+    // （退出由 closeLive、桌面卡片等显式路径处理）。
+    if (!s) return false;
     const region = viewportMonRect() || { x: 0, y: 0, w: 0, h: 0 };
     // 预览转换上限（避免按显示分辨率逐像素转 YUV→RGBA 的高开销；
     // 画布放大由 GPU drawImage 完成，质量足够）。
@@ -2335,6 +2406,7 @@
     clearPendingRealtime();
     viewDirty = false;
     drawView();
+    if (coverShown) hideCover();   // 首帧到达：揭除封面占位
     previewErrShown = false;
     // 无封面房间：首次进入记录首帧缩略图。
     const room = liveRooms.find((r) => (r.platform + ':' + r.room) === s.id);
@@ -2845,8 +2917,11 @@
   // ---------- 渲染 ----------
   function renderScan() {
     const btn = $('btnStart');
-    btn.classList.toggle('running', scanning);
-    btn.innerHTML = scanning
+    const t = activeScanTarget();
+    const running = !!t && scanningTargets.has(t);
+    const stopping = !!t && stoppingTargets.has(t);
+    btn.classList.toggle('running', running);
+    btn.innerHTML = running
       ? '<span>' + (stopping ? '停止中…' : '停止扫描') + '</span>'
       : '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg><span>开始扫码</span>';
   }
@@ -2900,18 +2975,35 @@
       });
       await listen('scan-status', (ev) => {
         const p = ev.payload || {};
-        if (p.type === 'started') { scanning = true; stopping = false; renderScan(); }
-        else if (p.type === 'stopped' || p.type === 'success') { scanning = false; stopping = false; renderScan(); }
-        // 更新前台会话状态徽标（识别中 / 已确认）。
-        const s = activeSession();
-        if (s) {
-          if (p.type === 'started') s.status = 'scan';
-          else if (p.type === 'success') s.status = 'done';
-          else if (p.type === 'stopped') s.status = 'live';
-          renderLiveTabs();
-          updateVpInfo();
+        const t = p.target || 'screen';
+        const quiet = stoppingTargets.has(t);   // 主动停止：不重复播报
+        if (p.type === 'started') {
+          scanningTargets.add(t);
+          stoppingTargets.delete(t);
+        } else if (p.type === 'stopped' || p.type === 'success') {
+          scanningTargets.delete(t);
+          stoppingTargets.delete(t);
         }
-        log(p.message || '', p.type === 'started' ? 'info' : (p.type || 'info'));
+        // 扫码成功：其余各路一并停止（与单路时代语义一致；同一码由共享票据集
+        // 防重复确认，此处仅省资源）。
+        if (p.type === 'success') {
+          for (const other of [...scanningTargets]) {
+            if (other !== t) stopScanTarget(other);
+          }
+        }
+        renderScan();
+        // 更新对应会话的状态徽标（识别中 / 已确认）；桌面目标无会话徽标。
+        if (t.startsWith('live:')) {
+          const s = liveSessions.find((x) => x.id === t.slice(5));
+          if (s) {
+            if (p.type === 'started') s.status = 'scan';
+            else if (p.type === 'success') s.status = 'done';
+            else if (p.type === 'stopped') s.status = 'live';
+            renderLiveTabs();
+            if (activeLiveId === s.id) updateVpInfo();
+          }
+        }
+        if (!quiet) log(p.message || '', p.type === 'started' ? 'info' : (p.type || 'info'));
       });
     }
     try { config = await invoke('get_config'); } catch (e) { config = null; log('加载配置失败: ' + e, 'error'); }
