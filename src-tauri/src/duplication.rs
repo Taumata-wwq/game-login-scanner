@@ -96,8 +96,12 @@ struct MonitorDup {
     h: u32,
     /// 最近采集到的新帧序号（总线线程递增，staging 内容与之对应）。
     frame_id: u64,
-    /// 扫码消费者已见序号。
-    scan_seen: u64,
+    /// 扫码消费者已见序号，**按降采样倍率分桶**（下标 = scale）。
+    ///
+    /// 为什么必须分桶：主档（1/2 步长）与兜底档（全分辨率）是对同一帧的两次不同
+    /// 尺寸消费；若共用一个计数器，主档先消费即把该帧标为「已见」，随后兜底档
+    /// 会误判并取不到全分辨率帧（静默失效）。
+    scan_seen: [u64; 3],
     /// 预览消费者已见序号与请求（宽度 + 区域，缓存命中判定）。
     prev_seen: u64,
     prev_tw: u32,
@@ -158,6 +162,47 @@ fn union_roi(a: Option<MonitorKey>, b: Option<MonitorKey>) -> Option<MonitorKey>
             Some((x0, y0, x1 - x0, y1 - y0))
         }
     }
+}
+
+/// BGRA（行跨距 `pitch` 字节）→ **步长采样灰度**：从 `(cx, cy)` 起取 `(cw, ch)`
+/// 区域，每 `scale` 个像素取首点，输出尺寸 `(cw/scale, ch/scale)`。
+///
+/// 与「先对 `(cw, ch)` 求全分辨率灰度、再按 `scale` 步长降采样」**逐位一致**
+/// （同一个源像素的同一个亮度值），因此识别行为不变；但把两趟并成一趟后，
+/// 主档（`scale=2`）的转换量降到 1/4 —— 实测 2569x1445 由 15.1ms 降到 3.6ms、
+/// 1282x747 由 5.8ms 降到 1.8ms（`tests/bench_qr_screen.rs`
+/// `bench_screen_capture_convert_cost`）。
+///
+/// 灰度权重与 `qr` 侧 `(77R+151G+28B)>>8` 完全一致。
+///
+/// 调用方须保证 `(cx+cw, cy+ch)` 落在 `bgra` 覆盖的行内（越界会 panic）。
+pub fn bgra_gray_stride(
+    bgra: &[u8],
+    pitch: usize,
+    cx: usize,
+    cy: usize,
+    cw: u32,
+    ch: u32,
+    scale: usize,
+) -> (Vec<u8>, u32, u32) {
+    let scale = scale.clamp(1, 2);
+    let ow = (cw as usize / scale).max(1);
+    let oh = (ch as usize / scale).max(1);
+    let mut out = vec![0u8; ow * oh];
+    let mut oi = 0usize;
+    for oy in 0..oh {
+        let row = &bgra[(cy + oy * scale) * pitch + cx * 4..];
+        for ox in 0..ow {
+            // 按「输出列数」迭代并自乘步长（`(0..cw).step_by(scale)` 在宽度非整除时
+            // 迭代次数会比 `cw/scale` 多 1，越界写会 panic 或踩内存）。
+            let i = ox * scale * 4;
+            // BGRA：i+2=R, i+1=G, i=B。
+            out[oi] = ((row[i + 2] as u32 * 77 + row[i + 1] as u32 * 151 + row[i] as u32 * 28) >> 8)
+                as u8;
+            oi += 1;
+        }
+    }
+    (out, ow as u32, oh as u32)
 }
 
 /// FNV-1a 64 位哈希（对降采样后的 RGBA 缓冲，做快速内容指纹）。
@@ -477,48 +522,44 @@ impl MonitorDup {
         Ok(f(m.ptr, m.pitch))
     }
 
-    /// 扫码取帧：仅当出现新帧时转换，返回裁剪后的灰度（1 字节/像素）。
+    /// 扫码取帧：仅当出现新帧时转换，返回**按 scale 步长采样**的灰度（1 字节/像素）。
     ///
-    /// 扫码只依赖亮度：直接产出灰度省去「RGB 三通道写入 + 二次 RGB→灰度遍历」
-    /// （1080p 整屏每帧少写约 2/3 字节、少一次全图转换）。权重与 `qr` 侧
-    /// `(77R+151G+28B)>>8` 完全一致，识别行为不变。
-    fn scan_frame(&mut self, key: MonitorKey) -> Result<Option<crate::screenshot::GrayFrame>, ()> {
+    /// 扫码只依赖亮度：直接产出灰度省去「RGB 三通道写入 + 二次 RGB→灰度遍历」；
+    /// 而把降采样**合并进转换这一趟**（每 scale 个源像素取首点）再省掉
+    /// 「全分辨率灰度 + 第二趟步长降采样」——输出与「先全分辨率灰度再步长降采样」
+    /// **逐位一致**（同一个源像素的同一个亮度值），识别行为不变，但主档（scale=2）
+    /// 的转换量降到 1/4，且不再申请全分辨率灰度缓冲。
+    ///
+    /// 权重与 `qr` 侧 `(77R+151G+28B)>>8` 完全一致。
+    ///
+    /// `scale`：降采样倍率（1 = 原分辨率；2 = 1/2 步长，即生产主档）。
+    fn scan_frame(
+        &mut self,
+        key: MonitorKey,
+        scale: u32,
+    ) -> Result<Option<crate::screenshot::GrayFrame>, ()> {
+        let scale = scale.clamp(1, 2);
         if self.scan_roi != Some(key) {
             self.scan_roi = Some(key);
             self.roi_dirty = true;
         }
-        if self.scan_seen == self.frame_id {
+        if self.scan_seen[scale as usize] == self.frame_id {
             return Ok(None);
         }
         // 请求区域未被本帧 staging 覆盖（ROI 刚变）时跳过，下一帧补上。
         let Some((cx, cy, cw, ch)) = self.staged_crop(key) else {
             return Ok(None);
         };
+        let (fh, fcy) = (self.h as usize, cy as usize);
         let frame = self.with_mapped(|ptr, pitch| {
-            let n = cw as usize * ch as usize;
-            let mut out = vec![0u8; n];
-            let mut oi = 0usize;
-            for y in 0..ch as usize {
-                let row = unsafe {
-                    std::slice::from_raw_parts(
-                        ptr.add((cy as usize + y) * pitch + cx as usize * 4),
-                        cw as usize * 4,
-                    )
-                };
-                for px in row.as_chunks::<4>().0 {
-                    // BGRA：px[2]=R, px[1]=G, px[0]=B。
-                    out[oi] =
-                        ((px[2] as u32 * 77 + px[1] as u32 * 151 + px[0] as u32 * 28) >> 8) as u8;
-                    oi += 1;
-                }
-            }
-            crate::screenshot::GrayFrame {
-                gray: out,
-                w: cw,
-                h: ch,
-            }
+            // 整块 staging（`fh` 行 × `pitch` 字节）当作切片：把热循环抽成纯函数，
+            // 既省掉每行的临时切片构造，也让「与旧实现逐位一致」可被单元测试锁定。
+            let bgra = unsafe { std::slice::from_raw_parts(ptr, pitch * fh) };
+            let (gray, w, h) =
+                bgra_gray_stride(bgra, pitch, cx as usize, fcy, cw, ch, scale as usize);
+            crate::screenshot::GrayFrame { gray, w, h }
         })?;
-        self.scan_seen = self.frame_id;
+        self.scan_seen[scale as usize] = self.frame_id;
         Ok(Some(frame))
     }
 
@@ -998,7 +1039,7 @@ fn create_monitor(key: MonitorKey) -> Result<MonitorDup, ()> {
             w,
             h,
             frame_id: 0,
-            scan_seen: 0,
+            scan_seen: [0; 3],
             prev_seen: 0,
             prev_tw: 0,
             prev_region: None,
@@ -1051,6 +1092,15 @@ pub fn preview_frame(region: MonitorKey, tw: u32) -> Result<PreviewOut, Unavaila
     let mkey = monitor_key_for(region).ok_or(Unavailable)?;
     let entry = get_or_create(mkey)?;
     let mut m: MutexGuard<MonitorDup> = entry.dup.lock().unwrap_or_else(PoisonError::into_inner);
+    // 常规预览请求到达 ⇒ 前端已回到普通预览（瓦片底图只在拖拽/缩放进行中使用）。
+    // 若此处仍残留 tile_mode，帧总线只拷贝「脏瓦片包围盒」而不覆盖完整请求区域，
+    // staged_crop 因此恒为 None → 前端收到「未变化」→ 画面长期冻结（实测：滚轮缩放
+    // 到极限后残留瓦片模式，预览停更，需再次点击/拖拽才恢复）。此处兜底关闭：
+    // 下一次 capture_tiles 会自行重新开启（tile_frame 的兜底分支），不影响拖拽。
+    if m.tile_mode {
+        m.tile_mode = false;
+        m.roi_dirty = true;
+    }
     match m.preview_frame(region, tw).map_err(|_| Unavailable)? {
         Some((rgba, w, h)) => Ok(PreviewOut::Frame(rgba, w, h)),
         None => Ok(PreviewOut::Unchanged),
@@ -1132,10 +1182,14 @@ pub fn clear_scan_roi(region: MonitorKey) {
 }
 
 /// 扫码取帧：区域画面自上次调用以来有变化时返回灰度帧；无变化返回 None。
+/// `scale` 为步长降采样倍率（1 = 原分辨率，2 = 1/2；转换与降采样合并为一趟）。
 /// Err = 桌面复制不可用（调用方走 GDI 兜底）。
-pub fn scan_frame(region: MonitorKey) -> Result<Option<crate::screenshot::GrayFrame>, Unavailable> {
+pub fn scan_frame(
+    region: MonitorKey,
+    scale: u32,
+) -> Result<Option<crate::screenshot::GrayFrame>, Unavailable> {
     let mkey = monitor_key_for(region).ok_or(Unavailable)?;
     let entry = get_or_create(mkey)?;
     let mut m: MutexGuard<MonitorDup> = entry.dup.lock().unwrap_or_else(PoisonError::into_inner);
-    m.scan_frame(region).map_err(|_| Unavailable)
+    m.scan_frame(region, scale).map_err(|_| Unavailable)
 }

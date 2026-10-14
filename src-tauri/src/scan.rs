@@ -8,7 +8,7 @@
 //! 对同一张已失败的二维码做退避与日志去重，避免向服务器高频轰炸同一失效码。
 //!
 //! 性能策略：
-//! - 解码用 zedbar（唯一解码器），整屏单次解码（真实 2K 截图 ~160ms）；
+//! - 解码用 rxing（ZXing 纯 Rust 移植，QR-only + HybridBinarizer），主档跑 1/2 步长降采样帧；
 //! - 画面内容未变化的屏幕（抽样指纹一致）整帧跳过解码；
 //! - 桌面复制「无新帧零成本跳过」。
 //!
@@ -24,6 +24,7 @@ use tauri::Emitter;
 use tauri::Manager;
 
 use crate::config::{BiliToken, Channel, Game, OfficialToken};
+use crate::duplication::MonitorKey;
 use crate::qr::{self, QrCode, QrKind};
 use crate::sdk::{hypergryph, mihoyo, official};
 
@@ -31,8 +32,10 @@ use crate::sdk::{hypergryph, mihoyo, official};
 const FAILED_TICKET_BACKOFF: Duration = Duration::from_millis(1500);
 /// 「用户请求停止」标记：confirm 经 select! 被取消时返回，上层据此终止扫描。
 const STOP_MARKER: &str = "__stopped__";
-/// 缩略图抽样步长（像素）。
-const THUMB_STRIDE: u32 = 16;
+/// 缩略图抽样步长（像素）。指纹现在抽在**降采样帧**（1/2）上，故步长取 8：
+/// 与原实现（全分辨率帧 × 步长 16）的**抽样密度等价**（每 16 个源像素取一个样点），
+/// 既保持「二维码出现必定触发解码」的灵敏度，又因帧更小而不增加成本。
+const THUMB_STRIDE: u32 = 8;
 /// 「非登录码」诊断提示的最大次数。
 const UNKNOWN_QR_REPORTS: u32 = 3;
 
@@ -342,8 +345,9 @@ struct LoopState {
     /// 每个票据的失败次数（超过上限后跳过，避免无限重试同一失效码）。
     failed_count: std::collections::HashMap<String, u32>,
     /// 上次「全幅精确解码」（快路径失败后的兜底）时刻；None = 尚未跑过（视为可跑）。
-    /// 快路径（scan_density）对常见大码足够，但小码存在漏检可能——按节流间隔
-    /// 周期性跑一次保真解码，把识别率下限锚在历史行为（见 decode_full_with_fallback）。
+    /// 快路径（rxing 常规模式）对常见大码足够，但小码存在漏检可能——按节流间隔
+    /// 周期性跑一次保真解码（TRY_HARDER），把识别率下限锚在历史行为
+    /// （见 decode_full_with_fallback）。
     last_exact_scan: Option<tokio::time::Instant>,
     /// 直播扫码：上次已解码帧的内容标识 (帧序号, 裁剪区)。60Hz 轮询下同一帧
     /// 会被取到多次，重复解码纯属浪费（流 30fps 时约占一半）——标识相同即
@@ -409,10 +413,10 @@ const ROI_MIN_SIDE: u32 = 32;
 
 /// 「快扫失败 → 精确兜底」的节流间隔。
 ///
-/// 背景（2026-10-11 实测，tests/bench_qr.rs）：快路径（scan_density(2,2)）
-/// 无码帧耗时 2K ~73ms；保真扫描 ~128ms。若每帧都兜底，挂机 CPU 反而高于
-/// 优化前；按此间隔周期性兜底，既把小码识别率下限锚在历史行为，又把挂机
-/// 均值压在快路径水平（约每 10 轮多付一次精确扫描）。
+/// 背景：快路径（rxing 常规模式）对常见大码足够，但小码/模糊目标存在漏检
+/// 可能；若每帧都兜底，挂机 CPU 反而高于优化前。按此间隔周期性兜底，既把
+/// 小码识别率下限锚在历史行为，又把挂机均值压在快路径水平（约每 10 轮多付
+/// 一次精确扫描）。
 const EXACT_FALLBACK_INTERVAL: Duration = Duration::from_millis(800);
 
 /// 屏幕（桌面复制）扫码主档的降采样倍率（1/2）。
@@ -455,8 +459,9 @@ pub enum FullSource<'a> {
     None,
     /// 直播：兜底时按会话 id 现取一帧全分辨率（800ms 一次，串行成本可接受）。
     Live(&'a str),
-    /// 屏幕：本轮已抓到全分辨率灰度，直接复用。
-    Screen(&'a [u8], u32, u32),
+    /// 屏幕：主档已在 `duplication::scan_frame` 内完成步长降采样（转换与降采样
+    /// 合并为一趟），全分辨率帧只能在兜底触发时**现取**（800ms 节流一次）。
+    Screen(MonitorKey),
 }
 
 /// 把全分辨率坐标系的包围盒换算到主档（降采样）坐标系。
@@ -479,9 +484,9 @@ fn scale_bounds(mut hit: qr::QrHit, scale: u32) -> qr::QrHit {
 
 /// 全幅解码（非 ROI 路径）：快路径优先，失败后按节流间隔用保真解码兜底。
 ///
-/// 快路径 `scan_density(2,2)` 对模块尺寸较大的游戏登录码无识别损失（两张
-/// 真机验证截图均命中，提速 ~43%）；小码/低对比目标存在漏检可能，故保留
-/// 周期性精确兜底。兜底只在快路径**失败**后触发，命中路径零额外开销。
+/// 快路径（rxing 常规模式）对模块尺寸较大的游戏登录码无识别损失（真机验证
+/// 截图均命中）；小码/低对比目标存在漏检可能，故保留周期性精确兜底
+/// （TRY_HARDER）。兜底只在快路径**失败**后触发，命中路径零额外开销。
 ///
 /// `scale`：主档帧的降采样倍率（兜底命中后需把 bounds 换算回该坐标系）。
 /// `full`：兜底档的全分辨率帧来源（见 `FullSource`）。
@@ -512,9 +517,19 @@ fn decode_full_with_fallback(
                 }
             }
         }
-        FullSource::Screen(g, fw, fh) => {
-            if let Some(hit) = qr::decode_gray_hit(g, fw, fh) {
-                return Some(scale_bounds(hit, scale));
+        FullSource::Screen(rect) => {
+            // 主档是降采样帧，兜底必须回到全分辨率（降采样丢掉的细节，保真档也救不回）。
+            // 主档取帧时已顺带完成步长降采样，全分辨率帧只能在兜底触发时现取——
+            // 由 EXACT_FALLBACK_INTERVAL 节流（快路径命中时完全不触发）。
+            let full = match crate::duplication::scan_frame(rect, 1) {
+                Ok(Some(f)) => Some(f),
+                Ok(None) => None,
+                Err(_) => crate::screenshot::capture_region_gray(rect.0, rect.1, rect.2, rect.3),
+            };
+            if let Some(f) = full {
+                if let Some(hit) = qr::decode_gray_hit(&f.gray, f.w, f.h) {
+                    return Some(scale_bounds(hit, scale));
+                }
             }
         }
         FullSource::None => {}
@@ -621,7 +636,7 @@ fn decode_with_roi(
         // ROI 内未解出：累计失败，达上限则弃用该 ROI（下次全屏重新定位）。
         mark_roi_miss(st, idx);
     }
-    // 2) 回退全屏：快路径（scan_density）优先，失败后周期性精确兜底；
+    // 2) 回退全屏：快路径（rxing 常规模式）优先，失败后周期性精确兜底；
     //    是否锁定 ROI 由调用方决定。
     let hit = decode_full_with_fallback(st, gray, w, h, scale, full)?;
     Some((hit, false))
@@ -834,7 +849,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
     //    否则表现为「点了开始扫码很久没反应」）。
     emit(&app, "info", "读取剪贴板…");
     let clipboard = {
-        let read = tokio::task::spawn_blocking(qr::read_clipboard_image);
+        let read = tokio::task::spawn_blocking(qr::read_clipboard_gray);
         match tokio::time::timeout(Duration::from_millis(500), read).await {
             Ok(Ok(v)) => v,
             _ => {
@@ -843,8 +858,8 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
             }
         }
     };
-    if let Some((rgb, w, h)) = clipboard {
-        if let Some(text) = qr::decode_rgb(&rgb, w, h) {
+    if let Some((gray, w, h)) = clipboard {
+        if let Some(text) = qr::decode_gray_hit(&gray, w, h).map(|hit| hit.text) {
             if let Some(qrc) = qr::extract(&text) {
                 if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
                     finish_success(&app, &st, auto_close).await;
@@ -861,7 +876,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
     emit(&app, "info", "全屏搜索登录二维码中…");
 
     // 2) 全屏/指定区域检测：
-    //    桌面复制「无新帧即零成本跳过」→ 指纹去重 → zedbar 整屏解码。
+    //    桌面复制「无新帧即零成本跳过」→ 指纹去重 → 整屏解码。
     //    直播会话激活时改为扫直播帧（断流自动回退屏幕扫描）。
     let mut live_seen = false;
     loop {
@@ -893,8 +908,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                 }
                 st.live_last_key = Some(frame.key);
                 let (w, h) = (frame.w, frame.h);
-                // zedbar 解码（唯一解码器）：快路径 + 周期性精确兜底
-                // （与屏幕路径同一策略，快路径对直播 720p 帧提速 ~40%）。
+                // rxing 解码：快路径 + 周期性精确兜底（与屏幕路径同一策略）。
                 // 兜底档取全分辨率帧（主档是半分辨率），覆盖降质小码。
                 let decoded = decode_full_with_fallback(
                     &mut st,
@@ -985,7 +999,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
 }
 
 /// 处理一块屏幕/区域：取帧（桌面复制优先，画面无新帧直接跳过；不可用走 GDI）
-/// → 指纹去重 → zedbar 整屏解码。返回 true 表示扫描应结束。
+/// → 指纹去重 → 整屏解码。返回 true 表示扫描应结束。
 async fn process_screen(
     app: &tauri::AppHandle,
     ctx: &mut ScanContext,
@@ -995,11 +1009,18 @@ async fn process_screen(
     auto_close: bool,
 ) -> bool {
     // 0) 取帧：桌面复制只在画面变化时给出帧，静止屏幕在此近零成本跳过。
-    let frame = match crate::duplication::scan_frame(rect) {
-        Ok(Some(f)) => f,
+    //    主档（`SCREEN_SCAN_SCALE`）的灰度转换与步长降采样已**合并为一趟**
+    //    （输出与「全分辨率灰度 + 第二趟步长降采样」逐位一致，见
+    //    `duplication::MonitorDup::scan_frame`），转换量降到 1/4。
+    let (gray, gw, gh) = match crate::duplication::scan_frame(rect, SCREEN_SCAN_SCALE) {
+        Ok(Some(f)) => (f.gray, f.w, f.h),
         Ok(None) => return false,
         Err(_) => match crate::screenshot::capture_region_gray(rect.0, rect.1, rect.2, rect.3) {
-            Some(f) => f,
+            Some(f) => {
+                // GDI 兜底路径未合并转换：在此补一次步长降采样（等价输出）。
+                let (g, w2, h2) = stride_downsample(&f.gray, f.w, f.h, SCREEN_SCAN_SCALE);
+                (g, w2, h2)
+            }
             None => {
                 if !st.screens_empty_reported {
                     emit(app, "error", "屏幕捕获失败，请检查显示设置");
@@ -1012,7 +1033,8 @@ async fn process_screen(
     st.screens_empty_reported = false;
 
     // 1) 指纹去重：微小变化（如光标闪烁）不触发解码。
-    let thumb = thumbnail(&frame.gray, frame.w, frame.h);
+    //    指纹抽在**降采样帧**上（成本更低）；步长按倍率折半，抽样密度与原实现一致。
+    let thumb = thumbnail(&gray, gw, gh);
     if st.last_thumbs.get(idx).and_then(|t| t.as_ref()) == Some(&thumb) {
         return false;
     }
@@ -1022,17 +1044,16 @@ async fn process_screen(
     st.last_thumbs[idx] = Some(thumb);
 
     // 2) 解码：优先上次命中的 ROI，未命中回退全屏。
-    //    主档跑在 1/2 步长降采样帧上（真机截图实测命中、-70% 耗时），
-    //    全分辨率帧保留给周期性兜底（覆盖降采样会漏掉的小码）。
-    let (sgray, sw, sh) = stride_downsample(&frame.gray, frame.w, frame.h, SCREEN_SCAN_SCALE);
+    //    `gray` 已是 1/2 步长降采样帧（真机截图实测命中、-70% 耗时）；
+    //    全分辨率帧由兜底档在触发时现取（覆盖降采样会漏掉的小码）。
     let Some((hit, from_roi)) = decode_with_roi(
         st,
         idx,
-        &sgray,
-        sw,
-        sh,
+        &gray,
+        gw,
+        gh,
         SCREEN_SCAN_SCALE,
-        FullSource::Screen(&frame.gray, frame.w, frame.h),
+        FullSource::Screen(rect),
     ) else {
         return false;
     };
