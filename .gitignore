@@ -21,7 +21,11 @@ node_modules/
 # src-tauri/tests/（单元测试/探针/基准/批量测试）、.workbuddy/（工作记忆）。
 # 注：.github/workflows 不在排除之列（CI 门禁可继续入库）。
 /docs/
-/scripts/
+# scripts/ 忽略“内容”而非整个目录，以便白名单固化构建脚本（否则 git 不进入被忽略目录）。
+/scripts/*
+# 例外：Android 构建必需的补丁脚本（gen/android 不入库，需脚本固化本地化修改）。
+!/scripts/android/
+!/scripts/android/patch-gen.ps1
 /src-tauri/tests/
 /.workbuddy/
 
