@@ -92,21 +92,13 @@ fn extract_param(url: &str, key: &str) -> Option<String> {
     None
 }
 
-/// RGBA 字节转 RGB。
-pub fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
-    rgba.as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|p| [p[0], p[1], p[2]])
-        .collect()
-}
-
-/// RGB 字节转灰度（BT.601 加权整数实现，`(77R+151G+28B)>>8`）。
-/// 扫码热路径已直接产出灰度（见 `decode_gray_hit`），本函数供一次性路径
-/// （剪贴板图片、测试）与仍持有 RGB 缓冲的调用方使用；结果与历史实现逐位一致。
-pub fn rgb_to_gray(rgb: &[u8], width: u32, height: u32) -> Vec<u8> {
+/// RGBA 字节转灰度（BT.601 加权整数实现，`(77R+151G+28B)>>8`）。
+///
+/// 扫码热路径本就直出灰度（见 `decode_gray_hit`），本函数只服务**一次性路径**
+/// （剪贴板图片）；权重与桌面复制 / 直播取帧侧完全一致。
+pub fn rgba_to_gray(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     let n = width as usize * height as usize;
-    rgb.as_chunks::<3>()
+    rgba.as_chunks::<4>()
         .0
         .iter()
         .take(n)
@@ -116,7 +108,7 @@ pub fn rgb_to_gray(rgb: &[u8], width: u32, height: u32) -> Vec<u8> {
 
 /// 解码结果：文本 + 二维码在图像中的轴对齐包围盒（像素坐标，用于 ROI 加速）。
 ///
-/// bounds 为 None 表示 zedbar 未记录位置（对 QR 码通常都有）。
+/// bounds 为 None 表示解码器未记录位置（对 QR 码通常都有）。
 #[derive(Debug, Clone)]
 pub struct QrHit {
     pub text: String,
@@ -124,7 +116,7 @@ pub struct QrHit {
     pub bounds: Option<(i32, i32, u32, u32)>,
 }
 
-/// zedbar（ZBar 算法纯 Rust 移植）解码灰度图，返回文本与位置。
+/// 解码灰度图（rxing：ZXing 纯 Rust 移植），返回文本与位置。
 ///
 /// **扫码热路径入口**：QR 识别只需亮度信息，扫描链路（桌面复制 / 直播 YUV）
 /// 直接产出灰度缓冲，避免「RGB 三通道写入 + 二次 RGB→灰度遍历」的重复开销
@@ -142,22 +134,6 @@ pub fn decode_gray_hit(gray: &[u8], width: u32, height: u32) -> Option<QrHit> {
 /// 调用方的周期性兜底覆盖（见 scan.rs `decode_full_with_fallback` 与 `decode_gray_hit`）。
 pub fn decode_gray_hit_fast(gray: &[u8], width: u32, height: u32) -> Option<QrHit> {
     decode_impl(gray, width, height, true)
-}
-
-/// RGB 便捷入口（内部转灰度）：剪贴板等一次性路径用，勿在热路径调用。
-pub fn decode_rgb_hit(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    decode_impl(&rgb_to_gray(rgb, width, height), width, height, false)
-}
-
-/// 同 `decode_rgb_hit`，快配置。
-pub fn decode_rgb_hit_fast(rgb: &[u8], width: u32, height: u32) -> Option<QrHit> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    decode_impl(&rgb_to_gray(rgb, width, height), width, height, true)
 }
 
 /// 解码实现：rxing（ZXing 纯 Rust 移植，Apache-2.0）。
@@ -225,16 +201,10 @@ fn result_bounds(res: &rxing::RXingResult) -> Option<(i32, i32, u32, u32)> {
     Some((x0.max(0.0) as i32, y0.max(0.0) as i32, w, h))
 }
 
-/// 兼容旧签名：只返回文本（保真配置；剪贴板等一次性路径用）。
-pub fn decode_rgb(rgb: &[u8], width: u32, height: u32) -> Option<String> {
-    decode_rgb_hit(rgb, width, height).map(|h| h.text)
-}
-
-/// 读取剪贴板图片（转为 RGB），空/非图返回 None。
-pub fn read_clipboard_image() -> Option<(Vec<u8>, u32, u32)> {
+/// 读取剪贴板图片并转为灰度（空/非图返回 None）。
+pub fn read_clipboard_gray() -> Option<(Vec<u8>, u32, u32)> {
     let (rgba, w, h) = crate::clipboard::read_image_rgba()?;
-    let rgb = rgba_to_rgb(&rgba);
-    Some((rgb, w, h))
+    Some((rgba_to_gray(&rgba, w, h), w, h))
 }
 
 // ---------- 二维码生成 ----------

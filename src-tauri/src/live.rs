@@ -455,213 +455,6 @@ pub fn avcc_config_to_annexb(data: &[u8]) -> Vec<u8> {
     out
 }
 
-// ---------- SPS VUI 清除（历史兼容保险） ----------
-
-/// 从 offset 起查找 Annex-B 起始码（00 00 01 / 00 00 00 01），返回首个 0 的位置。
-fn find_start_code(buf: &[u8], from: usize) -> Option<usize> {
-    let mut i = from;
-    while i + 3 <= buf.len() {
-        if buf[i] == 0 && buf[i + 1] == 0 {
-            if buf[i + 2] == 1 {
-                return Some(i);
-            }
-            if i + 4 <= buf.len() && buf[i + 2] == 0 && buf[i + 3] == 1 {
-                return Some(i);
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// EBSP（含 emulation prevention 0x03）→ RBSP。
-fn ebsp_to_rbsp(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len());
-    let mut zeros = 0u32;
-    for &b in data {
-        if zeros >= 2 && b == 3 {
-            zeros = 0;
-            continue;
-        }
-        out.push(b);
-        zeros = if b == 0 { zeros + 1 } else { 0 };
-    }
-    out
-}
-
-/// RBSP → EBSP（插入 emulation prevention 0x03）。
-fn rbsp_to_ebsp(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + 8);
-    let mut zeros = 0u32;
-    for &b in data {
-        if zeros >= 2 && b <= 3 {
-            out.push(3);
-            zeros = 0;
-        }
-        out.push(b);
-        zeros = if b == 0 { zeros + 1 } else { 0 };
-    }
-    out
-}
-
-/// 极简 RBSP 比特读取器（仅 SPS 定位用）。
-struct BitReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-    fn bit(&mut self) -> Option<u32> {
-        if self.pos >= self.data.len() * 8 {
-            return None;
-        }
-        let v = (self.data[self.pos / 8] >> (7 - (self.pos % 8))) & 1;
-        self.pos += 1;
-        Some(v as u32)
-    }
-    fn bits(&mut self, n: usize) -> Option<u32> {
-        let mut v = 0u32;
-        for _ in 0..n {
-            v = (v << 1) | self.bit()?;
-        }
-        Some(v)
-    }
-    fn ue(&mut self) -> Option<u32> {
-        let mut z = 0u32;
-        while self.bit()? == 0 {
-            z += 1;
-            if z > 31 {
-                return None;
-            }
-        }
-        Some((1u32 << z) - 1 + self.bits(z as usize).unwrap_or(0))
-    }
-    fn se(&mut self) -> Option<i32> {
-        let v = self.ue()?;
-        let mag = v.div_ceil(2) as i32;
-        Some(if v % 2 == 1 { mag } else { -mag })
-    }
-}
-
-/// 解析 SPS RBSP，返回 vui_parameters_present_flag 的比特位置。
-fn find_sps_vui_flag_pos(rbsp: &[u8]) -> Option<usize> {
-    let mut r = BitReader::new(rbsp);
-    let profile = r.bits(8)?;
-    r.bits(8)?; // constraint_set_flags + reserved_zero_2bits
-    r.bits(8)?; // level_idc
-    r.ue()?; // seq_parameter_set_id
-    const HIGH_PROFILES: [u32; 13] = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135];
-    if HIGH_PROFILES.contains(&profile) {
-        let chroma = r.ue()?;
-        if chroma == 3 {
-            r.bit()?; // separate_colour_plane_flag
-        }
-        r.ue()?; // bit_depth_luma_minus8
-        r.ue()?; // bit_depth_chroma_minus8
-        r.bit()?; // qpprime_y_zero_transform_bypass_flag
-        if r.bit()? == 1 {
-            let cnt = if chroma != 3 { 8 } else { 12 };
-            for i in 0..cnt {
-                if r.bit()? == 1 {
-                    let size = if i < 6 { 16 } else { 64 };
-                    let mut last = 8i32;
-                    let mut next = 8i32;
-                    for _ in 0..size {
-                        if next != 0 {
-                            let d = r.se()?;
-                            next = (last + d + 256) % 256;
-                        }
-                        last = if next != 0 { next } else { last };
-                    }
-                }
-            }
-        }
-    }
-    r.ue()?; // log2_max_frame_num_minus4
-    match r.ue()? {
-        0 => {
-            r.ue()?; // log2_max_pic_order_cnt_lsb_minus4
-        }
-        1 => {
-            r.bit()?; // delta_pic_order_always_zero_flag
-            r.se()?; // offset_for_non_ref_pic
-            r.se()?; // offset_for_top_to_bottom_field
-            let n = r.ue()?;
-            for _ in 0..n {
-                r.se()?;
-            }
-        }
-        2 => {}
-        _ => return None,
-    }
-    r.ue()?; // max_num_ref_frames
-    r.bit()?; // gaps_in_frame_num_value_allowed_flag
-    r.ue()?; // pic_width_in_mbs_minus1
-    r.ue()?; // pic_height_in_map_units_minus1
-    if r.bit()? == 0 {
-        r.bit()?; // mb_adaptive_frame_field_flag
-    }
-    r.bit()?; // direct_8x8_inference_flag
-    if r.bit()? == 1 {
-        for _ in 0..4 {
-            r.ue()?; // frame_crop_*_offset
-        }
-    }
-    Some(r.pos)
-}
-
-/// 清除 Annex-B 中**所有** SPS NAL 的 vui_parameters_present_flag。
-///
-/// 历史背景：原 openh264 软解对某些带 VUI（尤其 HRD 参数）的合法 SPS 解析失败
-/// （dsNoParamSets，实测房间 11762420）；而 VUI 对解码/扫码无用。MF 硬解路径
-/// 不需要此处理，但保留作为无害保险（仅翻转 flag 位、无数据重排；VUI 信息对
-/// 本工具的消费端无价值），且 300 间直播间批量测试即在此行为下验证通过。
-///
-/// 必须遍历全部 NAL：sequence header 里的 SPS 之外，IDR 帧常内嵌一份重复 SPS，
-/// 若只清参数集里的，IDR 内嵌那份仍可能触发解码侧解析问题。
-/// 返回 (处理后的数据, 是否有 NAL 被修改)。
-pub fn strip_sps_vui(annexb: &[u8]) -> (Vec<u8>, bool) {
-    let mut out = Vec::with_capacity(annexb.len());
-    let mut changed = false;
-    let mut i = 0usize;
-    while i < annexb.len() {
-        let Some(sc) = find_start_code(annexb, i) else {
-            out.extend_from_slice(&annexb[i..]);
-            break;
-        };
-        out.extend_from_slice(&annexb[i..sc]);
-        let sc_len = if annexb[sc + 2] == 1 { 3 } else { 4 };
-        let nal_start = sc + sc_len;
-        let next = find_start_code(annexb, nal_start).unwrap_or(annexb.len());
-        let nal = &annexb[nal_start..next];
-        let mut handled = false;
-        if nal.first() == Some(&0x67) {
-            if let Some(rbsp) = nal.get(1..) {
-                if let Some(pos) = find_sps_vui_flag_pos(&ebsp_to_rbsp(rbsp)) {
-                    let mut rbsp = ebsp_to_rbsp(rbsp);
-                    let (byte, bit) = (pos / 8, 7 - (pos % 8));
-                    if byte < rbsp.len() && rbsp[byte] & (1 << bit) != 0 {
-                        rbsp[byte] &= !(1 << bit);
-                        out.extend_from_slice(&annexb[sc..nal_start]);
-                        out.push(0x67);
-                        out.extend_from_slice(&rbsp_to_ebsp(&rbsp));
-                        changed = true;
-                        handled = true;
-                    }
-                }
-            }
-        }
-        if !handled {
-            out.extend_from_slice(&annexb[sc..next]);
-        }
-        i = next;
-    }
-    (out, changed)
-}
-
 /// 紧凑 YUV420 裁剪区 → 灰度（1 字节/像素），面积平均降采样到 tw×th（扫码用）。
 ///
 /// **扫码只需亮度**：直接取 Y（编码 luma）输出灰度，跳过「YUV→RGB→灰度」两步
@@ -1829,9 +1622,8 @@ fn decode_hls_session(
     // 3) 解码器：Media Foundation H.264 硬解（系统组件，见 decode.rs）。
     let mut decoder = new_decoder().map_err(|e| format!("解码器初始化失败: {e}"))?;
     log::info!("HLS 解码器：{}", decoder.name());
-    // 喂 SPS/PPS（清 VUI 兼容旧软解路径；对 MF 无害）。
-    let (params, _) = strip_sps_vui(&init_info.params);
-    if let Err(e) = decoder.decode(&params, 0) {
+    // 喂 SPS/PPS（Media Foundation 直接接受标准 Annex-B 参数集）。
+    if let Err(e) = decoder.decode(&init_info.params, 0) {
         log::warn!("HLS 参数集解码失败: {e}");
     }
 
@@ -2399,19 +2191,8 @@ fn decode_session(
                         "参数集前 16 字节: {:02x?}",
                         &param_sets[..param_sets.len().min(16)]
                     );
-                    // 清除带 VUI 的 SPS（历史兼容保险，见 strip_sps_vui 文档；
-                    // VUI 对解码/扫码无用，仅翻转比特）。
-                    let (stripped, did_strip) = strip_sps_vui(&param_sets);
-                    let to_decode = if did_strip {
-                        log::info!("已清除 SPS VUI（历史兼容保险）");
-                        &stripped
-                    } else {
-                        &param_sets
-                    };
-                    if let Err(e) = decoder.decode(to_decode, media_ts) {
+                    if let Err(e) = decoder.decode(&param_sets, media_ts) {
                         log::warn!("参数集解码失败: {e}");
-                    } else if did_strip {
-                        param_sets = stripped;
                     }
                 }
             }
@@ -2422,18 +2203,6 @@ fn decode_session(
                 if annexb.is_empty() {
                     continue;
                 }
-                // IDR 帧常内嵌一份带 VUI 的重复 SPS（历史兼容保险，见 strip_sps_vui），
-                // 解码前清除。非 IDR 帧不含 SPS，跳过以免无谓遍历。
-                let annexb = if frame_type == 1 {
-                    let (s, changed) = strip_sps_vui(&annexb);
-                    if changed {
-                        s
-                    } else {
-                        annexb
-                    }
-                } else {
-                    annexb
-                };
                 // 组合时间（body[2..5]）忽略——显示延迟可接受。
                 // 解码错误不静默：持续失败（编码不兼容等）由上层降级清晰度。
                 let decode_t = std::time::Instant::now();

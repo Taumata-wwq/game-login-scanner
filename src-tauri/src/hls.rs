@@ -1,7 +1,7 @@
 //! LL-HLS（低延迟 HLS）拉流：m3u8 + fMP4/CMAF 解析。
 //!
 //! B站部分直播间只提供 HLS 流（http_hls/fmp4），无 FLV。本模块用纯手写解析
-//! （零新依赖）把 HLS 还原为「H.264 Annex-B 帧序列」，复用既有 openh264 解码管线。
+//! （零新依赖）把 HLS 还原为「H.264 Annex-B 帧序列」，复用既有解码管线。
 //!
 //! 结构：LL-HLS 用 1 秒分片、fMP4（CMAF）格式：
 //! - init 段（EXT-X-MAP）：ftyp+moov，含 avcC（SPS/PPS）与 mdhd（timescale）；

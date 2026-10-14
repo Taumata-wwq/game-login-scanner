@@ -1,7 +1,7 @@
 //! Windows Media Foundation H.264 解码（硬解 MFT）封装。
 //!
 //! 背景与选型（2026-10-11 调研结论，详见 docs/性能优化调研报告-2026-10-11.md）：
-//! - 现用 openh264 为**单线程软解**（Windows 上 num_threads 必崩，无法多线程），
+//! - 旧实现为 openh264 **单线程软解**（Windows 上 num_threads 必崩，无法多线程），
 //!   1080p60 单线程 19~24ms/帧跟不上流帧间隔，导致追帧/降清晰度常态化；
 //! - 系统自带的 H.264 解码 MFT（CLSID_CMSH264DecoderMFT）承载解码（微软签名组件）。
 //!   **关键修正（2026-10-13）**：该 MFT 在未提供 D3D 设备管理器时是**纯软解**
@@ -30,7 +30,7 @@ use windows::Win32::Media::MediaFoundation::{
     CMSH264DecoderMFT, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFDXGIBuffer, IMFDXGIDeviceManager,
     IMFMediaType, IMFSample, IMFTransform, MFCreateDXGIDeviceManager, MFCreateMediaType,
     MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFStartup, MFVideoFormat_H264,
-    MFVideoFormat_NV12, MFSTARTUP_LITE, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+    MFVideoFormat_NV12, MFSTARTUP_LITE, MFT_MESSAGE_COMMAND_FLUSH,
     MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
@@ -393,7 +393,7 @@ impl MfDecoder {
 
     /// 送一个 Annex-B 访问单元（可含 SPS/PPS 等多个 NAL），返回产出的帧。
     ///
-    /// 与 openh264 路径的语义对齐：0..n 帧（低延迟模式下通常 0 或 1 帧）。
+    /// 与 `VideoDecoder` 接口语义一致：0..n 帧（低延迟模式下通常 0 或 1 帧）。
     pub fn decode(&mut self, annexb: &[u8], ts_ms: u32) -> Result<Vec<DecodedFrame>, String> {
         if annexb.is_empty() {
             return Ok(Vec::new());
@@ -431,17 +431,6 @@ impl MfDecoder {
             hr.map_err(|e| format!("ProcessInput: {e}"))?;
             log::debug!("MF ProcessInput 接受 {} 字节", annexb.len());
 
-            self.drain_output()
-        }
-    }
-
-    /// 排空：通知解码器「无更多输入」并取回全部剩余帧。
-    /// 一次性解码（测试/文件）用；直播流无结束，不应调用。
-    pub fn drain(&mut self) -> Result<Vec<DecodedFrame>, String> {
-        unsafe {
-            self.transform
-                .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
-                .map_err(|e| format!("DRAIN: {e}"))?;
             self.drain_output()
         }
     }
