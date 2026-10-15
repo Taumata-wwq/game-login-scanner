@@ -521,7 +521,7 @@
   .plat-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
 
   /* ===================== 移动端（html.mobile 生效；桌面完全不受影响） ===================== */
-  .m-topbar, .m-bottombar, .m-gamerow, .m-scrim { display: none; }
+  .m-topbar, .m-bottombar, .m-gamerow { display: none; }
 
   /* -------------------------------------------------------------------------
      移动端设计 tokens（2026-10-15 统一化）
@@ -552,6 +552,11 @@
     --m-layer-1: rgba(255, 255, 255, 0.055);
     --m-layer-2: rgba(255, 255, 255, 0.1);
   }
+  /* 组件尺寸规范（移动端统一语言）：
+     列表卡片 54px 高 / 间距 8px / 圆角 14px（账号 · 房间 · 弹层项同一规格）；
+     主按钮 50px 胶囊；方形按钮 48px / 圆角 14px；工具小按钮 32px / 圆角 6px；
+     输入框 40~42px / 圆角 10px；抽屉与弹层标题行 52px / 17px 居中；
+     抽屉宽度 80vw（左右一致）、直角无阴影（拼接模型）。 */
 
   html.mobile body {
     display: flex; flex-direction: column; height: 100vh;
@@ -606,7 +611,7 @@
   html.mobile .acct-item:active { background: var(--m-layer-1); transform: scale(0.985); }
   html.mobile .acct-list { gap: 8px; }
   /* 添加账号按钮：移动端放大到触摸友好高度。 */
-  html.mobile .acct-add { height: 52px; font-size: var(--m-fs-lg); border-radius: var(--m-r-md); }
+  html.mobile .acct-add { height: 54px; font-size: var(--m-fs-lg); border-radius: var(--m-r-md); }
   /* 账号行内文字放大（桌面端为紧凑的 11px）。 */
   html.mobile .acct-item .nm { font-size: var(--m-fs-lg); }
   html.mobile .acct-item .chip { font-size: 12px; }
@@ -620,10 +625,10 @@
   html.mobile .acct-item .ibtn svg { width: 15px; height: 15px; }
 
   /* 游戏/区服选择行（48px 高；双按钮均分同规格） */
-  html.mobile .m-gamerow { display: flex; gap: 10px; flex: none; margin-bottom: 10px; }
+  html.mobile .m-gamerow { display: flex; gap: 8px; flex: none; margin-bottom: 8px; }
   .m-game {
     flex: 1 1 0; min-width: 0; height: 48px; padding: 0 16px;
-    display: inline-flex; align-items: center;
+    display: inline-flex; align-items: center; justify-content: center;
     background: var(--panel-2); color: var(--text-strong);
     font-family: inherit; font-size: var(--m-fs-lg); font-weight: 600; line-height: 1;
     border: 1px solid var(--border); border-radius: var(--m-r-md); cursor: pointer;
@@ -672,12 +677,12 @@
     width: 80vw; max-width: none; z-index: 200;
     background: var(--panel); border-right: 1px solid var(--line);
     transform: translateX(-80vw);
-    padding-top: calc(52px + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
   /* 房间卡：62px 行高、统一圆角；移动端无 hover——删除按钮常驻（32px 触控目标）。 */
-  html.mobile .room-card { height: 62px; border-radius: var(--m-r-md); }
-  html.mobile .room-card .thumb { width: 64px; height: 40px; border-radius: var(--m-r-xs); }
+  html.mobile .room-card { height: 54px; border-radius: var(--m-r-md); }
+  html.mobile .room-card .thumb { width: 58px; height: 36px; border-radius: var(--m-r-xs); }
   html.mobile .room-card .rname { font-size: var(--m-fs-md); }
   html.mobile .room-card .rsub { font-size: var(--m-fs-xs); color: var(--muted); }
   html.mobile .room-card .st { font-size: var(--m-fs-xs); padding: 2px 8px; border-radius: 999px; }
@@ -687,7 +692,8 @@
     transform: none; opacity: 1; font-size: var(--m-fs-sm);
   }
   html.mobile .room-card .x:active { background: rgba(207, 74, 74, 0.18); color: #ff8f8f; }
-  html.mobile .room-add { height: 44px; font-size: var(--m-fs-md); border-radius: var(--m-r-md); }
+  html.mobile .room-list { gap: 8px; padding: 10px; }
+  html.mobile .room-add { height: 54px; font-size: var(--m-fs-md); border-radius: var(--m-r-md); }
 
   /* 右抽屉：设置（同一拼接模型；位移 = 自身宽 + --m-swipe；容器穿透仅 dialog 可交互） */
   html.mobile #toolsOverlay {
@@ -703,6 +709,7 @@
     padding-bottom: env(safe-area-inset-bottom, 0px);
     animation: none; /* 抽屉由 transform 过渡驱动，不套弹层入场动画 */
     pointer-events: auto;
+    border-radius: 0; /* 拼接模型：直角与主界面接壤 */
     box-shadow: none;
   }
   html.mobile #toolsOverlay .dbody { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
@@ -711,10 +718,6 @@
     position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; display: block;
   }
   html.mobile .m-idle-art[hidden] { display: none; }
-
-  /* 遮罩 */
-  html.mobile .m-scrim { position: fixed; inset: 0; z-index: 150; background: rgba(0,0,0,0.55); display: block; }
-  html.mobile .m-scrim[hidden] { display: none; }
 
   /* 移动端弹层：更高铺满度 + 统一大圆角 + 入场动效（淡入 + 轻微上浮，重开时自动重播） */
   html.mobile .overlay { padding: 12px; }
@@ -747,7 +750,6 @@
      2) 弹层标题栏与主界面顶栏同规格：52px 高、17px、居中，× 绝对定位右侧；
      3) 登录模式分段：移动端规格 + [hidden] 兜底。
      --------------------------------------------------------------- */
-  .m-game { justify-content: center; }
   html.mobile .dialog .dhead {
     position: relative; height: 52px; justify-content: center;
     padding: 0 52px; font-size: var(--m-fs-xl); letter-spacing: 0;
@@ -824,8 +826,9 @@
   html.mobile .sidebar header .mb-only { display: inline; }
   .proj-info .pi-head .spacer { flex: 1 1 auto; }
   html.mobile #toolsOverlay .btn.tiny { height: 32px; }
-  html.mobile #toolsOverlay [data-fps] { height: 32px; min-width: 46px; font-size: var(--m-fs-sm); }
   html.mobile .acct-area { padding: 12px; }
+  /* 列表本体：浏览器层面禁横向手势（防御任何"左右滑动趋势"） */
+  html.mobile .room-list, html.mobile .acct-list { touch-action: pan-y; }
   html.mobile .dialog .dbody { padding-left: 14px; padding-right: 14px; }
   /* 长按编辑防御：卡片不选中文本 / 不弹系统长按菜单 */
   html.mobile .room-card, html.mobile .acct-item {
@@ -993,9 +996,6 @@
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
     </button>
   </footer>
-
-  <!-- ===== 移动端抽屉遮罩 ===== -->
-  <div class="m-scrim" id="mScrim" hidden></div>
 
   <!-- ===== 移动端游戏选择弹窗 ===== -->
   <div class="overlay" id="mGameOverlay" hidden>
@@ -3929,7 +3929,7 @@
       for (const g of GAMES) {
         const it = document.createElement("div");
         it.className = "gitem" + (g.id === cur ? " on" : "");
-        it.style.height = "52px";
+        it.style.height = "54px";
         it.style.display = "flex";
         it.style.alignItems = "center";
         it.style.padding = "0 12px";
@@ -3954,7 +3954,7 @@
       for (const [f, label] of opts) {
         const it = document.createElement("div");
         it.className = "gitem" + (f === filter ? " on" : "");
-        it.style.height = "52px";
+        it.style.height = "54px";
         it.style.display = "flex";
         it.style.alignItems = "center";
         it.style.padding = "0 12px";
