@@ -6,6 +6,7 @@
 //! - 与 Windows 对应模块（duplication / screenshot / mf_decode / clipboard / crypto::dpapi）
 //!   一一对位，通过 cfg 分叉或 trait 实现切换。
 
+pub mod camera;
 pub mod capture;
 pub mod clipboard;
 pub mod duplication;

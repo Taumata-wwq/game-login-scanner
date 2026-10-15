@@ -1,5 +1,6 @@
 //! 游戏扫码器库入口：模块声明 + Tauri 命令 + 运行时装配。
 
+pub mod camera_plugin;
 pub mod config;
 pub mod constants;
 pub mod crypto;
@@ -1799,6 +1800,23 @@ async fn capture_live_frame(
     .map_err(|e| format!("直播取帧任务失败: {e}"))?
 }
 
+/// 相机预览帧（Android）：24 字节头（w,h,0,0,w=相机宽,h=相机高）+ RGBA。
+/// 无新帧返回 24 字节零头（前端沿用上一帧）；相机未运行返回空。
+#[tauri::command]
+async fn capture_camera_frame(max_width: Option<u32>) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mw = max_width.unwrap_or(480).clamp(80, 4096);
+        match crate::camera_plugin::camera_preview(mw) {
+            Some((rgba, tw, th)) => Ok(tauri::ipc::Response::new(preview_payload(
+                tw, th, 0, 0, tw as i32, th as i32, rgba,
+            ))),
+            None => Ok(tauri::ipc::Response::new(vec![0u8; 24])),
+        }
+    })
+    .await
+    .map_err(|e| format!("相机取帧任务失败: {e}"))?
+}
+
 /// 设置扫描区域（虚拟桌面绝对坐标，物理像素）；w/h 非正表示恢复全屏。
 #[tauri::command]
 fn set_scan_region(
@@ -1847,9 +1865,9 @@ fn prewarm_bili_account(app: &tauri::AppHandle) {
     });
 }
 
-/// 校验凭据并启动**一路**扫描（目标 = `"screen"` 或 `"live:{会话id}"`）。
+/// 校验凭据并启动**一路**扫描（目标 = `"screen"` / `"camera"` / `"live:{会话id}"`）。
 ///
-/// 支持并行：最多 5 路直播 + 1 路桌面；同一目标重复启动报错。
+/// 支持并行：最多 5 路直播 + 1 路桌面 + 1 路摄像头；同一目标重复启动报错。
 /// 直播目标会**保活**该会话（非主画面也保持拉流/解码，停止时解除）。
 fn try_start_scan(
     app: &tauri::AppHandle,
@@ -2142,6 +2160,8 @@ pub fn run() {
     tauri::Builder::default()
         // 屏幕捕获移动插件（Android 真实现；其他平台空装配，见模块文档）。
         .plugin(crate::screen_capture_plugin::init())
+        // 摄像头扫码移动插件（Android 真实现；其他平台空装配）。
+        .plugin(crate::camera_plugin::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -2195,6 +2215,11 @@ pub fn run() {
             request_screen_capture,
             stop_screen_capture,
             screen_capture_state,
+            crate::camera_plugin::request_camera_permission,
+            crate::camera_plugin::start_camera_capture,
+            crate::camera_plugin::stop_camera_capture,
+            crate::camera_plugin::camera_capture_state,
+            capture_camera_frame,
         ])
         .on_window_event(|window, event| match event {
             // 关闭主窗口 = 退出程序。退出前记住主窗口位置。

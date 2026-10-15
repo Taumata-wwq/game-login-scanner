@@ -163,6 +163,19 @@ if ($c -notmatch "FOREGROUND_SERVICE_MEDIA_PROJECTION") {
     Write-Host "  = 权限已存在"
 }
 
+# 相机权限（摄像头扫码）：独立幂等检查，插在 INTERNET 行之前。
+if ($c -notmatch "android.permission.CAMERA") {
+    $camPerm = '    <uses-permission android:name="android.permission.CAMERA" />' + $nl
+    $c = $c.Replace(
+        '    <uses-permission android:name="android.permission.INTERNET" />',
+        $camPerm + '    <uses-permission android:name="android.permission.INTERNET" />'
+    )
+    $changed = $true
+    Write-Host "  + CAMERA 权限（摄像头扫码）"
+} else {
+    Write-Host "  = CAMERA 权限已存在"
+}
+
 if ($c -notmatch "ScreenCaptureService") {
     $svc = @(
         '        <service',

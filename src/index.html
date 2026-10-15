@@ -630,6 +630,9 @@
     background: #0c0c0c; pointer-events: none;
   }
   .m-camera-view[hidden] { display: none; }
+  .mc-canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+  }
   .mc-frame {
     position: relative; width: 58%; max-width: 250px; aspect-ratio: 1 / 1;
     border: 1.5px solid rgba(150, 180, 210, 0.4); border-radius: var(--m-r-md);
@@ -1014,10 +1017,11 @@
             </button>
             <!-- 摄像头取景层（移动端「摄像头扫码」模式：中间区域扩展覆盖账号/区服区） -->
             <div class="m-camera-view" id="mCameraView" hidden>
+              <canvas id="mcCanvas" class="mc-canvas" width="480" height="270"></canvas>
               <div class="mc-frame"><span class="mc-scan"></span></div>
               <div class="mc-tip">
                 将游戏登录二维码对准取景框
-                <span id="mcCamTip">摄像头取帧将在后续版本接入</span>
+                <span id="mcCamTip"></span>
               </div>
             </div>
           </div>
@@ -1330,6 +1334,9 @@
   // 纯 UI 模式——进入/退出都不触碰任何扫描会话（直播 / 屏幕各路照常运行）。
   let cameraMode = false;
   let cameraSavedH = 0;   // 进入前 .acct-area 的高度（退出时按此值平滑还原）
+  // 摄像头预览循环句柄（取景模式下持续拉取 capture_camera_frame 绘到 #mcCanvas）。
+  let cameraPreviewTimer = null;
+  let cameraPreviewBusy = false;
   let filter = 'official';            // 账号筛选：official | bilibili（默认官服）
   // 扫描区域（实时监视器）
   let preview = null;                 // {mon:{x,y,w,h}} 预览所在显示器信息
@@ -4108,12 +4115,12 @@
       if (camBtn) camBtn.classList.add("on");
       updateVpInfo();
       renderScan();
-      log("已进入摄像头取景（取帧能力将在后续版本接入）", "info");
-      invoke("frontend_log", { level: "info", msg: "移动端：进入摄像头扫码取景模式" }).catch(() => {});
+      startCamera();
     }
     window.exitCameraMode = function exitCameraMode() {
       if (!cameraMode) return;
       cameraMode = false;
+      stopCamera();
       if (camView) camView.setAttribute("hidden", "");
       if (camBtn) camBtn.classList.remove("on");
       renderScan();
@@ -4133,6 +4140,60 @@
       if (cameraMode) window.exitCameraMode();
       else enterCameraMode();
     });
+
+    // --- 摄像头捕获 + 预览 + 扫码 ---
+    const mcCanvas = $("mcCanvas");
+    const mcTip = $("mcCamTip");
+    async function startCamera() {
+      if (mcTip) mcTip.textContent = "正在启动摄像头…";
+      try {
+        await invoke("request_camera_permission");
+      } catch (e) {
+        if (mcTip) mcTip.textContent = "相机权限被拒绝";
+        log("相机权限被拒绝：" + String(e), "error");
+        return;
+      }
+      try {
+        await invoke("start_camera_capture");
+      } catch (e) {
+        if (mcTip) mcTip.textContent = "启动相机失败";
+        log("启动相机失败：" + String(e), "error");
+        return;
+      }
+      if (mcTip) mcTip.textContent = "";
+      // 启动摄像头扫码目标（不依赖 activeScanTarget）。
+      invoke("start_scan", { target: "camera" }).catch((e) => log(String(e), "error"));
+      scheduleCameraFrame();
+    }
+    function stopCamera() {
+      if (cameraPreviewTimer) { clearTimeout(cameraPreviewTimer); cameraPreviewTimer = null; }
+      invoke("stop_scan", { target: "camera" }).catch(() => {});
+      invoke("stop_camera_capture").catch(() => {});
+    }
+    function scheduleCameraFrame() {
+      if (!cameraMode) return;
+      cameraPreviewTimer = setTimeout(pullCameraFrame, 66);
+    }
+    async function pullCameraFrame() {
+      if (!cameraMode || cameraPreviewBusy) { scheduleCameraFrame(); return; }
+      cameraPreviewBusy = true;
+      try {
+        const buf = await invoke("capture_camera_frame", { maxWidth: 480 });
+        if (buf instanceof ArrayBuffer && buf.byteLength > 24) {
+          const dv = new DataView(buf);
+          const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
+          if (pw && ph && 24 + pw * ph * 4 <= buf.byteLength) {
+            if (mcCanvas.width !== pw || mcCanvas.height !== ph) {
+              mcCanvas.width = pw; mcCanvas.height = ph;
+            }
+            const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
+            mcCanvas.getContext("2d").putImageData(img, 0, 0);
+          }
+        }
+      } catch (_) {}
+      cameraPreviewBusy = false;
+      scheduleCameraFrame();
+    }
 
 
 

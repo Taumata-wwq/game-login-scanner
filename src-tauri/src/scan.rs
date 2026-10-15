@@ -448,6 +448,11 @@ const EXACT_FALLBACK_INTERVAL: Duration = Duration::from_millis(800);
 /// 识别率下限由全分辨率兜底（`FullSource::Screen`）锚定。
 const SCREEN_SCAN_SCALE: u32 = 2;
 
+/// 摄像头扫码帧的步长降采样倍率。相机帧固定 1280x720（Y 平面即灰度），
+/// 分辨率本就不高、扫码时码通常占据较大区域，**不做降采样**（1）以最大化识别率；
+/// 每帧解码成本可接受（相机帧率远低于直播，且用户主动持机对准）。
+const CAMERA_SCAN_SCALE: u32 = 1;
+
 /// 步长（最近邻）降采样：每 k×k 窗口取首点。
 ///
 /// **必须用步长而非面积平均**：箱平均抹平模块边缘对比度，而 rxing 的
@@ -479,6 +484,8 @@ pub enum FullSource<'a> {
     /// 屏幕：主档已在 `duplication::scan_frame` 内完成步长降采样（转换与降采样
     /// 合并为一趟），全分辨率帧只能在兜底触发时**现取**（800ms 节流一次）。
     Screen(MonitorKey),
+    /// 摄像头：兜底时现取一帧全分辨率（相机帧在 Y 平面即灰度，无降采样成本负担）。
+    Camera,
 }
 
 /// 把全分辨率坐标系的包围盒换算到主档（降采样）坐标系。
@@ -544,6 +551,13 @@ fn decode_full_with_fallback(
                 Err(_) => crate::screenshot::capture_region_gray(rect.0, rect.1, rect.2, rect.3),
             };
             if let Some(f) = full {
+                if let Some(hit) = qr::decode_gray_hit(&f.gray, f.w, f.h) {
+                    return Some(scale_bounds(hit, scale));
+                }
+            }
+        }
+        FullSource::Camera => {
+            if let Some(f) = crate::camera_plugin::camera_scan_frame(1) {
                 if let Some(hit) = qr::decode_gray_hit(&f.gray, f.w, f.h) {
                     return Some(scale_bounds(hit, scale));
                 }
@@ -826,13 +840,17 @@ pub enum ScanTarget {
     Screen,
     /// 指定直播会话（id = `{platform}:{room}`）。
     Live(String),
+    /// 摄像头（Android 摄像头扫码）。
+    Camera,
 }
 
 impl ScanTarget {
-    /// 从前端字符串解析：`"screen"` 或 `"live:{id}"`。
+    /// 从前端字符串解析：`"screen"` / `"live:{id}"` / `"camera"`。
     pub fn parse(s: &str) -> Result<ScanTarget, String> {
         if s == "screen" {
             Ok(ScanTarget::Screen)
+        } else if s == "camera" {
+            Ok(ScanTarget::Camera)
         } else if let Some(id) = s.strip_prefix("live:") {
             if id.is_empty() {
                 return Err("直播目标缺少会话 id".to_string());
@@ -848,6 +866,7 @@ impl ScanTarget {
         match self {
             ScanTarget::Screen => "screen".to_string(),
             ScanTarget::Live(id) => format!("live:{id}"),
+            ScanTarget::Camera => "camera".to_string(),
         }
     }
 }
@@ -919,7 +938,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
     // 直播取帧流水线（仅直播目标；与解码并行，随 stop 停止，函数返回时自动 join）。
     let live_pipe = match &target {
         ScanTarget::Live(id) => Some(LivePipe::start(stop.clone(), id.clone())),
-        ScanTarget::Screen => None,
+        ScanTarget::Screen | ScanTarget::Camera => None,
     };
 
     // 1) 剪贴板优先（限时 500ms：剪贴板被其它进程长时间占用时直接跳过，
@@ -994,6 +1013,39 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                         h,
                         crate::live::LIVE_SCAN_SCALE,
                         FullSource::Live(id.as_str()),
+                    )
+                    .map(|h| h.text);
+                    if let Some(text) = decoded {
+                        if let Some(qrc) = qr::extract(&text) {
+                            if try_confirm(&app, &mut ctx, &qrc, &mut st).await {
+                                if st.stopped {
+                                    emit(&app, tkey.as_str(), "stopped", "已停止扫描");
+                                } else {
+                                    finish_success(&app, &tkey, &st, auto_close).await;
+                                }
+                                return;
+                            }
+                            if st.stopped {
+                                emit(&app, tkey.as_str(), "stopped", "已停止扫描");
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            ScanTarget::Camera => {
+                // 摄像头扫码：取相机 Y 平面灰度帧，无新帧直接跳过。
+                if let Some(frame) = crate::camera_plugin::camera_scan_frame(CAMERA_SCAN_SCALE) {
+                    let (w, h) = (frame.w, frame.h);
+                    // 相机帧无「会话键」概念，用帧序号去重（camera_plugin 内已按序号过滤，
+                    // 此处拿到即新帧）。
+                    let decoded = decode_full_with_fallback(
+                        &mut st,
+                        &frame.gray,
+                        w,
+                        h,
+                        CAMERA_SCAN_SCALE,
+                        FullSource::Camera,
                     )
                     .map(|h| h.text);
                     if let Some(text) = decoded {
