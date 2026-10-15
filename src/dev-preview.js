@@ -60,6 +60,9 @@
           case "check_update": return Promise.resolve();
           case "start_scan": emit("scan-status", { type: "started", target: args && args.target, message: "开始扫码（预览）" }); return Promise.resolve();
           case "stop_scan": emit("scan-status", { type: "stopped", target: args && args.target, message: "已停止（预览）" }); return Promise.resolve();
+          case "screen_capture_state": return Promise.resolve(false);
+          case "request_screen_capture": return Promise.resolve();
+          case "stop_screen_capture": return Promise.resolve();
           case "live_start": return Promise.resolve({ session_id: "preview", w: 1280, h: 720 });
           case "live_stop": return Promise.resolve();
           case "live_refresh_meta": return Promise.resolve(null);

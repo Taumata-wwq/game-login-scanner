@@ -10,6 +10,7 @@ pub mod http;
 pub mod live;
 pub mod qr;
 pub mod scan;
+pub mod screen_capture_plugin;
 pub mod sdk;
 pub mod watch;
 
@@ -35,6 +36,7 @@ pub use android::{clipboard, duplication, screenshot};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use screen_capture_plugin::{request_screen_capture, screen_capture_state, stop_screen_capture};
 use tauri::{Emitter, Manager};
 /// 生成 UUID-v4 形态的随机串（seed_id 用）。
 ///
@@ -2120,6 +2122,8 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        // 屏幕捕获移动插件（Android 真实现；其他平台空装配，见模块文档）。
+        .plugin(crate::screen_capture_plugin::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -2170,6 +2174,9 @@ pub fn run() {
             set_tile_mode,
             set_scan_region,
             set_preview_active,
+            request_screen_capture,
+            stop_screen_capture,
+            screen_capture_state,
         ])
         .on_window_event(|window, event| match event {
             // 关闭主窗口 = 退出程序。退出前记住主窗口位置。

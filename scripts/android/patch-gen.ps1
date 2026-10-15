@@ -107,4 +107,63 @@ open class BuildTask : DefaultTask() {
 Set-Content -Path $buildTask -Value $kt -Encoding UTF8
 Write-Host "  BuildTask.kt 已重写"
 
+Write-Host "== 5. Kotlin 插件源码同步（src-tauri/android-plugin -> gen/android）=="
+$pluginSrc = Join-Path $root "src-tauri/android-plugin"
+# 插件独立包名（不含下划线，避免 JNI 符号 _1 转义）：
+# com.taumata.scanner.plugins
+$pluginDst = Join-Path $gen "app/src/main/java/com/taumata/scanner/plugins"
+if (-not (Test-Path $pluginSrc)) {
+    Write-Host "  ! 未找到 $pluginSrc（跳过）"
+} else {
+    New-Item -ItemType Directory -Force -Path $pluginDst | Out-Null
+    Get-ChildItem -Path $pluginSrc -Filter *.kt | ForEach-Object {
+        # 二进制复制：不改动编码（Kotlin 源含中文注释，须保持 UTF-8）。
+        Copy-Item $_.FullName -Destination $pluginDst -Force
+        Write-Host "  -> $($_.Name)"
+    }
+}
+
+Write-Host "== 6. AndroidManifest：屏幕捕获权限与前台服务声明 =="
+$manifest = Join-Path $gen "app/src/main/AndroidManifest.xml"
+$c = Get-Content $manifest -Raw
+$nl = if ($c.Contains("`r`n")) { "`r`n" } else { "`n" }
+$changed = $false
+
+if ($c -notmatch "FOREGROUND_SERVICE_MEDIA_PROJECTION") {
+    $permLines = @(
+        '    <uses-permission android:name="android.permission.INTERNET" />',
+        '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />',
+        '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />',
+        '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />'
+    ) -join $nl
+    $c = $c.Replace(
+        '    <uses-permission android:name="android.permission.INTERNET" />',
+        $permLines
+    )
+    $changed = $true
+    Write-Host "  + 4 条权限（INTERNET/FOREGROUND_SERVICE/FOREGROUND_SERVICE_MEDIA_PROJECTION/POST_NOTIFICATIONS）"
+} else {
+    Write-Host "  = 权限已存在"
+}
+
+if ($c -notmatch "ScreenCaptureService") {
+    $svc = @(
+        '        <service',
+        '            android:name=".plugins.ScreenCaptureService"',
+        '            android:exported="false"',
+        '            android:foregroundServiceType="mediaProjection" />',
+        '    </application>'
+    ) -join $nl
+    $c = $c.Replace('    </application>', $svc)
+    $changed = $true
+    Write-Host "  + service 声明（.plugins.ScreenCaptureService, mediaProjection）"
+} else {
+    Write-Host "  = service 声明已存在"
+}
+
+if ($changed) {
+    [System.IO.File]::WriteAllText($manifest, $c, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  Manifest 已更新"
+}
+
 Write-Host "全部补丁完成。"

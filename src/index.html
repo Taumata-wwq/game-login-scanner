@@ -1981,6 +1981,26 @@
   })();
 
   // ---------- 扫描 ----------
+  // Android：确保屏幕捕获已授权（已捕获时后端直接返回，不重复弹框；
+  // 命令不可用的环境——桌面/浏览器预览——直接放行，不拦截原有流程）。
+  async function ensureScreenCapture() {
+    if (!window.__MOBILE__) return true;
+    let capturing = false;
+    try {
+      capturing = await invoke('screen_capture_state');
+    } catch (_) {
+      return true;
+    }
+    if (capturing) return true;
+    try {
+      await invoke('request_screen_capture');
+      log('屏幕捕获已就绪', 'info');
+      return true;
+    } catch (e) {
+      log('屏幕捕获授权失败或已取消：' + String(e), 'error');
+      return false;
+    }
+  }
   // 当前视图对应的扫码目标："桌面" → "screen"；直播会话 → "live:{id}"；
   // 选中的未开播房间（无会话，无可扫画面）→ null。
   function activeScanTarget() {
@@ -3611,9 +3631,13 @@
     mChanBtn.addEventListener("click", () => { renderMChanList(); $("mChanOverlay").hidden = false; });
 
     // --- 底部栏 ---
-    $("mBtnScan").addEventListener("click", () => { $("btnStart").click(); });
-    $("mBtnScreenScan").addEventListener("click", () => {
-      // 屏幕扫码：切到桌面目标（无直播会话时）并开始扫码。
+    $("mBtnScan").addEventListener("click", async () => {
+      if (!(await ensureScreenCapture())) return;
+      $("btnStart").click();
+    });
+    $("mBtnScreenScan").addEventListener("click", async () => {
+      // 屏幕扫码：先确保捕获授权，再切到桌面目标（无直播会话时）并开始扫码。
+      if (!(await ensureScreenCapture())) return;
       exitLiveMode();
       renderScan();
       setTimeout(() => $("btnStart").click(), 50);
