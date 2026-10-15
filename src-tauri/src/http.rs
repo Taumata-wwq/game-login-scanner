@@ -121,8 +121,24 @@ fn tls_config() -> std::sync::Arc<rustls::ClientConfig> {
     TLS_CONFIG
         .get_or_init(|| {
             let mut store = rustls::RootCertStore::empty();
+            // 根证书来源按平台分流：
+            // - 桌面（Win/macOS/Linux）：系统证书库（可含企业/自签根，兼容代理环境）。
+            // - Android：`rustls-native-certs` **不支持** Android 系统库（返回空集），
+            //   而 http.rs 的 schannel 回退是 Windows 独有 → 空库会让每一次握手都
+            //   `UnknownIssuer` 失败（2026-10-16 真机实测：B站元数据/开播监测/登录全废）。
+            //   改为内置 Mozilla 根证书集（webpki-roots）。代价是不支持用户自装根证书
+            //   （抓包代理场景），对本应用可接受。
+            #[cfg(not(target_os = "android"))]
             for cert in rustls_native_certs::load_native_certs().certs {
                 let _ = store.add(cert);
+            }
+            #[cfg(target_os = "android")]
+            {
+                store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                log::info!(
+                    "TLS：Android 使用内置 Mozilla 根证书集（{} 条）",
+                    store.len()
+                );
             }
             let mut config = rustls::ClientConfig::builder()
                 .with_root_certificates(store)

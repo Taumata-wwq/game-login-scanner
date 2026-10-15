@@ -1456,6 +1456,15 @@ fn set_fail(fail: &FailFlag, reason: &str) {
     *fail.lock().unwrap_or_else(PoisonError::into_inner) = Some(reason.to_string());
 }
 
+/// 该错误是否属「本平台/本构建不具备解码能力」——重连毫无意义的那一类。
+///
+/// 判定依据是**能力性**措辞，而非任何临时故障（网络、节点劣化、流结束、追帧）
+/// 都仍走原有重连路径。当前唯一来源是 Android 的 MediaCodec 骨架
+/// （`android/mediacodec_decode.rs` 返回「尚未实现」，阶段 4 落地后此分支自然失效）。
+fn is_fatal_decode_error(e: &str) -> bool {
+    e.contains("尚未实现") || e.contains("不支持该平台") || e.contains("解码器不可用")
+}
+
 fn decode_loop(
     platform: Platform,
     room: String,
@@ -1582,6 +1591,16 @@ fn decode_loop(
                 candidates.clear();
                 log::info!("解码吞吐不足，清晰度降级到 qn={} 重试", qn_chain[qn_idx]);
                 continue;
+            }
+            // 平台解码能力缺失（如 Android 阶段 4 未落地）：**不可恢复**。
+            // 每次重连都会在同一个点失败，重试只会制造「连上→立即失败→重连」
+            // 风暴（真机实测：每会话 8 次重连 × 多个会话，反复解析拉流、刷爆
+            // 日志、白耗流量与电量）。直接上报明确原因并结束会话。
+            Err(e) if is_fatal_decode_error(&e) => {
+                log::error!("解码能力不可用，终止会话（不重连）: {e}");
+                set_fail(&fail, &format!("{}直播间 {room}：{e}", platform.label()));
+                remove_session_if(&frames);
+                return;
             }
             Err(e) => {
                 log::warn!("直播流断开: {e}");

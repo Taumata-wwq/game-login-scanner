@@ -171,6 +171,12 @@ windows = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]
+# Android 根证书集（Mozilla，内置）。
+# 必需：`rustls-native-certs` 在 Android 上**没有系统根证书来源**（返回空集），
+# 而 schannel 回退是 Windows 独有 → 空根证书库会让**每一次** HTTPS 握手都
+# `UnknownIssuer` 失败（2026-10-16 真机实测：开播监测/B站元数据/登录全不可用）。
+# 桌面端继续用系统证书库（可含企业/自签根），故仅 Android 引入本 crate。
+webpki-roots = "1"
 # MediaCodec 硬件解码绑定（直播解码后端；替代桌面端 mf_decode.rs）。
 # 0.1.11，含 MediaCodec/MediaExtractor/MediaMuxer 的安全 buffer 抽象。
 anodecs = "0.1"
