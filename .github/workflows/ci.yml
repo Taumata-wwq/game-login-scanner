@@ -12,8 +12,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        # 固定 1.98.1：embed-resource 3.0.11 发出的 cargo:rustc-link-arg-tests
-        # 指令在 rustc 1.99.0 上被拒绝（invalid instruction），1.98.1 正常。
+        # 固定 1.98.1（稳定性偏好，保留）。
+        # 2026-10-15 更正：此前 CI 失败（invalid instruction `cargo:rustc-link-arg-tests`）
+        # 的真因是 build.rs 在无 tests/ 目录（不入库，CI 上不存在）时发出该指令，
+        # 被 cargo 以 "does not have a test target" 拒绝；已修复于 build.rs。
+        # 与 rustc 1.98/1.99 版本无关。
         uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Cache cargo

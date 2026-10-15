@@ -1,7 +1,8 @@
 [toolchain]
-# 跟随 stable。注意：rustc 1.99.0 起 embed-resource 3.0.11 发出的
-# cargo:rustc-link-arg-tests 指令被 cargo 拒绝（CI 实测 invalid instruction），
-# 故 CI 固定 1.98.1（见 .github/workflows/ci.yml）。待 embed-resource 上游修复
-# 或改用其他 manifest 嵌入方式后再跟随最新 stable。
+# 跟随 stable。
+# 历史备注（2026-10-15 更正）：曾将 CI 失败归因于「rustc 1.99.0 拒绝 embed-resource 指令」，
+# 实为 build.rs 在无 tests/ 目录（不入库，CI 上不存在）时发出 cargo:rustc-link-arg-tests，
+# 被 cargo 以 "does not have a test target" 拒绝；已修复（build.rs 先判断 tests/ 存在性）。
+# CI 仍固定 1.98.1（见 .github/workflows/ci.yml），作为稳定性偏好保留。
 channel = "stable"
 components = ["rustfmt", "clippy"]
