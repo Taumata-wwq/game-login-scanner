@@ -7,7 +7,13 @@
 param(
     [string]$JavaHomeAscii = "G:/Java21",
     [string]$CargoBin = "C:/Users/$env:USERNAME/.cargo/bin/cargo.exe",
-    [string]$GradleMirror = "https://mirrors.cloud.tencent.com/gradle/gradle-8.14.3-bin.zip"
+    [string]$GradleMirror = "https://mirrors.cloud.tencent.com/gradle/gradle-8.14.3-bin.zip",
+    # 打包的 ABI 列表（决定 APK 体积）：默认只打真机架构，剔除 x86/x86_64（仅供模拟器）。
+    # 实测 release .so：arm64 13.8MB / armv7 约 12MB；debug .so 每个 176~185MB（4 个 ABI ≈ 700MB）。
+    # 若要极限压缩（仅 64 位真机）：-AbiList "arm64-v8a" -ArchList "arm64" -TargetList "aarch64"
+    [string]$AbiList = "arm64-v8a,armeabi-v7a",
+    [string]$ArchList = "arm64,arm",
+    [string]$TargetList = "aarch64,armv7"
 )
 
 $ErrorActionPreference = "Stop"
@@ -165,5 +171,13 @@ if ($changed) {
     [System.IO.File]::WriteAllText($manifest, $c, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "  Manifest 已更新"
 }
+
+Write-Host "== 7. gradle.properties：ABI 裁剪（APK 体积） =="
+# tauri 生成的 RustPlugin.kt 读取 abiList / archList / targetList 三个 project 属性；
+# 缺省为 4 个 ABI（含 x86/x86_64 模拟器架构），debug 下 .so 合计 ~700MB。
+# 这里收窄为真实机型架构，使发布 APK 落在几十 MB 量级。
+Add-Prop "abiList"    "abiList=$AbiList"
+Add-Prop "archList"   "archList=$ArchList"
+Add-Prop "targetList" "targetList=$TargetList"
 
 Write-Host "全部补丁完成。"

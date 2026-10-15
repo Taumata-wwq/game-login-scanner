@@ -759,6 +759,8 @@
     position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
     width: 36px; height: 36px;
   }
+  /* 右抽屉（工具面板）移动端移除右上角关闭按钮：用滑动 / 点残部 / 顶栏按钮收回 */
+  html.mobile #toolsOverlay .dhead .ibtn { display: none; }
   html.mobile .dialog .dhead .ibtn svg { width: 16px; height: 16px; }
   html.mobile #loginModeSeg { border-radius: var(--m-r-sm); padding: 3px; }
   html.mobile #loginModeSeg[hidden] { display: none; }
@@ -782,7 +784,7 @@
   html.mobile .vp-info { display: none; }
   html.mobile .sidebar header { height: 52px; padding: 0 10px 0 14px; gap: 9px; }
   html.mobile .sidebar header .logo { width: 18px; height: 18px; }
-  html.mobile .sidebar header h1 { font-size: var(--m-fs-xl); letter-spacing: 0.01em; }
+  html.mobile .sidebar header h1 { font-size: var(--m-fs-xl); letter-spacing: 0.01em; text-align: center; }
   html.mobile .overlay { z-index: 300; }
   html.mobile .m-game, html.mobile .m-chan { font-weight: 600; }
   html.mobile #fpsSeg { border-radius: var(--m-r-sm); padding: 3px; }
@@ -3841,8 +3843,9 @@
       if (anyModalOpen()) return;
       const W = window.innerWidth;
       if (e.clientX < SWIPE_EDGE || e.clientX > W - SWIPE_EDGE) return; // 边缘预留
-      // 全区域跟手：不做区域排除（列表 / 预览 / 侧栏内容均可滑；纵向滚动由
-      // 方向判定与各容器 touch-action 层让行；canvas 触摸拖拽对横向主导让位）。
+      // 预览区（canvas）归其自身拖拽/缩放交互（触摸与鼠标均可平移画面），
+      // 全屏抽屉手势在此让位；其余区域保持全区域跟手。
+      if (e.target.closest(".vp-stage")) return;
       dragState = {
         x: e.clientX, y: e.clientY, base: swipeCurrent,
         lastX: e.clientX, lastT: performance.now(), vx: 0, active: false,
@@ -4023,12 +4026,11 @@
         lastTap = now;
       }, { passive: true });
       // 单指平移 / 双指捏合缩放
-      let t0 = null, t1 = null, pinchDist0 = 0, scale0 = 1, dragStart = null;
+      let t0 = null, t1 = null, pinchDist0 = 0, scale0 = 1;
       cv.addEventListener("touchstart", (e) => {
         if (!preview) return;
         if (e.touches.length === 1) {
           t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-          dragStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
           if (preview) enterDrag();
         } else if (e.touches.length === 2) {
           t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -4039,12 +4041,6 @@
       }, { passive: true });
       cv.addEventListener("touchmove", (e) => {
         if (!preview) return;
-        // 横向主导的单指滑动让位给抽屉手势（不拖拽预览画面）。
-        if (e.touches.length === 1 && !t1 && dragStart) {
-          const adx = Math.abs(e.touches[0].clientX - dragStart.x);
-          const ady = Math.abs(e.touches[0].clientY - dragStart.y);
-          if (adx > 12 && adx > ady * 1.2) return;
-        }
         e.preventDefault();
         if (e.touches.length === 1 && t0 && !t1) {
           const dx = e.touches[0].clientX - t0.x;
@@ -4069,7 +4065,7 @@
         }
       }, { passive: false });
       cv.addEventListener("touchend", (e) => {
-        if (e.touches.length === 0) { t0 = null; t1 = null; dragStart = null; dragging = false; ensureViewAnim(); }
+        if (e.touches.length === 0) { t0 = null; t1 = null; dragging = false; ensureViewAnim(); }
         else if (e.touches.length === 1) { t1 = null; t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
       }, { passive: true });
     })();
