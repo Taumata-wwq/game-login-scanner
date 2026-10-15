@@ -28,13 +28,24 @@ if (-not (Test-Path $gen)) {
 Write-Host "== 1. gradle.properties 补丁 =="
 $props = Join-Path $gen "gradle.properties"
 function Add-Prop($key, $line) {
-    $content = Get-Content $props -Raw
-    if ($content -notmatch ("(?m)^" + [regex]::Escape($key) + "=")) {
-        Add-Content $props $line
-        Write-Host "  + $line"
-    } else {
+    # 注意：必须按“整行完全匹配”判断是否已存在。曾用 `^key=` 的前缀匹配 +
+    # Add-Content：当文件末行没有换行符时，新属性会被**拼接**到最后一行上
+    # （实测产出 `android.nonFinalResIds=falseabiList=arm64-v8a,...`，
+    #   Gradle 报 "Cannot parse project property ... as boolean" 直接构建失败）。
+    $lines = Get-Content $props
+    $hit = $false
+    foreach ($l in $lines) { if ($l -match ("^\s*" + [regex]::Escape($key) + "\s*=")) { $hit = $true; break } }
+    if ($hit) {
         Write-Host "  = $key 已存在"
+        return
     }
+    # 读全文 → 补齐末尾换行 → 追加 → 整体写回（UTF-8 无 BOM，不可用 Add-Content：
+    # 它在末行无换行的文件上会拼接）。
+    $raw = [System.IO.File]::ReadAllText($props)
+    if ($raw.Length -gt 0 -and -not $raw.EndsWith("`n")) { $raw += "`r`n" }
+    $raw += $line + "`r`n"
+    [System.IO.File]::WriteAllText($props, $raw, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  + $line"
 }
 Add-Prop "org.gradle.daemon" "org.gradle.daemon=false"
 Add-Prop "org.gradle.java.home" "org.gradle.java.home=$JavaHomeAscii"
@@ -184,8 +195,19 @@ Write-Host "== 8. release 签名配置（真机安装 / 分发用） =="
 # tauri 默认只给 debug 包签名（debug keystore）；release 包不加签名配置会产出
 # 无法安装的 unsigned APK。这里生成一个本地 release keystore（不入库，位于 gen/ 下）
 # 并把签名配置写进 app/build.gradle.kts（幂等：已存在则跳过，不覆盖已有 keystore）。
-$ksPath = Join-Path $gen "game-scanner-release.jks"
-$ksProps = Join-Path $gen "keystore.properties"
+# 必须放在 app/ 下：app/build.gradle.kts 里的 file("keystore.properties")
+# 以 app 模块目录为基准解析（放在 gen/android 根目录会解析不到 → 产出 -unsigned.apk）。
+$appDir = Join-Path $gen "app"
+$ksPath = Join-Path $appDir "game-scanner-release.jks"
+$ksProps = Join-Path $appDir "keystore.properties"
+# 迁移：早期版本把这两个文件放在 gen/android 根目录。
+$oldKs = Join-Path $gen "game-scanner-release.jks"
+$oldProps = Join-Path $gen "keystore.properties"
+if ((Test-Path $oldKs) -and -not (Test-Path $ksPath)) { Move-Item $oldKs $ksPath -Force; Write-Host "  → 迁移 keystore 到 app/" }
+if ((Test-Path $oldProps) -and -not (Test-Path $ksProps)) {
+    # storeFile 是相对路径，迁移后仍指向同目录的 jks，内容无需改动。
+    Move-Item $oldProps $ksProps -Force; Write-Host "  → 迁移 keystore.properties 到 app/"
+}
 $keytool = Join-Path (Split-Path $JavaHomeAscii -Parent) "Java21/bin/keytool.exe"
 if (-not (Test-Path $keytool)) { $keytool = "G:/Java21/bin/keytool.exe" }
 
