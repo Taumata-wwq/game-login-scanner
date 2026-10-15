@@ -665,14 +665,15 @@
   .m-scanbtn:active { transform: scale(0.975); }
   .m-scanbtn.running { background: var(--panel-2); color: #ff9090; box-shadow: inset 0 0 0 1.5px rgba(207, 74, 74, 0.6); }
 
-  /* 左抽屉：侧栏（拼接模型：位于 .app 内——.app 位移后自身恒定 -80vw 即贴主界面左侧） */
+  /* 左抽屉：侧栏（拼接模型；全视口高——定位基准为 .app 顶部（顶栏下 52px），故上移 52px 消除顶/底黑缝） */
   html.mobile .sidebar {
-    position: fixed; top: 0; bottom: 0; left: 0;
+    position: fixed; top: -52px; left: 0;
+    height: 100vh;
     width: 80vw; max-width: none; z-index: 200;
     background: var(--panel); border-right: 1px solid var(--line);
-    border-radius: 0 var(--m-r-xl) var(--m-r-xl) 0;
     transform: translateX(-80vw);
-    padding-top: env(safe-area-inset-top, 0px);
+    padding-top: calc(52px + env(safe-area-inset-top, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
   /* 房间卡：62px 行高、统一圆角；移动端无 hover——删除按钮常驻（32px 触控目标）。 */
   html.mobile .room-card { height: 62px; border-radius: var(--m-r-md); }
@@ -696,13 +697,13 @@
   }
   html.mobile #toolsOverlay .dialog {
     width: 80vw; max-width: none; height: 100%; max-height: none;
-    border-radius: var(--m-r-xl) 0 0 var(--m-r-xl);
     transform: translateX(calc(80vw + var(--m-swipe)));
     transition: transform var(--m-dur-3) var(--m-ease);
     padding-top: env(safe-area-inset-top, 0px);
     padding-bottom: env(safe-area-inset-bottom, 0px);
     animation: none; /* 抽屉由 transform 过渡驱动，不套弹层入场动画 */
     pointer-events: auto;
+    box-shadow: none;
   }
   html.mobile #toolsOverlay .dbody { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 
@@ -808,6 +809,30 @@
   html.mobile.m-swiping .m-topbar, html.mobile.m-swiping .app, html.mobile.m-swiping .m-bottombar,
   html.mobile.m-swiping #toolsOverlay .dialog { transition: none; }
 
+  /* ---------------------------------------------------------------
+     第三批调整（2026-10-16 凌晨）
+     1) 标题行：取消图标、居中、移动端文案「直播间选择」；
+     2) 检查更新右对齐（pi-head spacer 撑开）；
+     3) 工具按钮高度统一 32px（帧率分段与清空/检查更新一致）；
+     4) 页边距微调（账号区 12、弹层内容水平 14）。
+     --------------------------------------------------------------- */
+  .mb-only { display: none; }
+  html.mobile .sidebar header { justify-content: center; padding: 0 14px; }
+  html.mobile .sidebar header .logo { display: none; }
+  html.mobile .sidebar header .spacer { display: none; }
+  html.mobile .sidebar header .dt-only { display: none; }
+  html.mobile .sidebar header .mb-only { display: inline; }
+  .proj-info .pi-head .spacer { flex: 1 1 auto; }
+  html.mobile #toolsOverlay .btn.tiny { height: 32px; }
+  html.mobile #toolsOverlay [data-fps] { height: 32px; min-width: 46px; font-size: var(--m-fs-sm); }
+  html.mobile .acct-area { padding: 12px; }
+  html.mobile .dialog .dbody { padding-left: 14px; padding-right: 14px; }
+  /* 长按编辑防御：卡片不选中文本 / 不弹系统长按菜单 */
+  html.mobile .room-card, html.mobile .acct-item {
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
+
   /* 设置面板（移动端）：内部控件与文字提升到移动规格（桌面为紧凑小号） */
   html.mobile #toolsOverlay .lbl { font-size: var(--m-fs-md); }
   html.mobile #toolsOverlay .lbl small { font-size: var(--m-fs-xs); }
@@ -820,7 +845,7 @@
   html.mobile #toolsOverlay .proj-info { font-size: var(--m-fs-xs); }
   html.mobile #toolsOverlay .pi-head > span:first-child { font-size: var(--m-fs-md); }
   html.mobile #toolsOverlay .btn { font-size: var(--m-fs-sm); }
-  html.mobile #toolsOverlay [data-fps] { height: 34px; min-width: 46px; font-size: var(--m-fs-sm); }
+  html.mobile #toolsOverlay [data-fps] { height: 32px; min-width: 46px; font-size: var(--m-fs-sm); }
 
 </style>
 </head>
@@ -874,7 +899,7 @@
             <path d="M8 8h3v3H8zM13 8h3v3h-3zM8 13h3v3H8z"/>
           </svg>
         </div>
-        <h1>游戏扫码器</h1>
+        <h1><span class="dt-only">游戏扫码器</span><span class="mb-only">直播间选择</span></h1>
         <span class="spacer"></span>
         <div class="hbtns">
           <button class="ibtn" id="btnTools" title="设置与日志">
@@ -1390,6 +1415,31 @@
     }
   });
 
+  // 长按手势（移动端）：静止按住 500ms 触发；移动 >10px 或抬起取消；触发后吞掉随后的 click。
+  // 用 touch 事件实现（移动端环境；避免 pointer 合成在部分 WebView/模拟环境的差异）。
+  function bindLongPress(el, fn) {
+    let timer = null, sx = 0, sy = 0, target = null, fired = false;
+    el.addEventListener("touchstart", (e) => {
+      const t = e.touches[0];
+      if (!t) return;
+      sx = t.clientX; sy = t.clientY; target = e.target; fired = false;
+      timer = setTimeout(() => { timer = null; fired = true; fn(target); }, 500);
+    }, { passive: true });
+    el.addEventListener("touchmove", (e) => {
+      if (!timer) return;
+      const t = e.touches[0];
+      if (t && (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10)) {
+        clearTimeout(timer); timer = null;
+      }
+    }, { passive: true });
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    el.addEventListener("touchend", cancel);
+    el.addEventListener("touchcancel", cancel);
+    el.addEventListener("click", (e) => {
+      if (fired) { fired = false; e.stopPropagation(); e.preventDefault(); }
+    }, true);
+  }
+
   // ---------- 账号渲染 ----------
   // 当前游戏 id（账号按游戏独立存储；旧数据 game 为空时归入崩坏3）。
   function curGameId() { return config ? (config.current_game || 'bh3') : 'bh3'; }
@@ -1547,11 +1597,17 @@
       del.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
       del.addEventListener('click', (e) => { e.stopPropagation(); deleteAccount(ch, key); });
       row.append(radio, chip, nm, remark, del);
-      // 双击行（非按钮/选中点）→ 编辑备注（内部弹窗）。
+      // 双击行（非按钮/选中点）→ 编辑备注（内部弹窗）；移动端触摸无双击：长按触发。
       row.addEventListener('dblclick', (e) => {
         if (e.target.closest('.radio') || e.target.closest('.ibtn')) return;
         openRemarkDialog(ch, key);
       });
+      if (window.__MOBILE__) {
+        bindLongPress(row, (tgt) => {
+          if (tgt && (tgt.closest('.radio') || tgt.closest('.ibtn'))) return;
+          openRemarkDialog(ch, key);
+        });
+      }
       // 拖拽排序。
       row.addEventListener('dragstart', (e) => {
         dragUid = key;
@@ -2478,11 +2534,17 @@
         // 立即切换：有会话直接切画面；未连接/未开播先显示封面占位（首帧到达自动揭除）。
         switchLive(id);
       });
-      // 双击编辑备注。
+      // 双击编辑备注；移动端触摸无双击：长按触发。
       card.addEventListener('dblclick', (ev) => {
         if (ev.target === x) return;
         openLiveNoteDialog(s);
       });
+      if (window.__MOBILE__) {
+        bindLongPress(card, (tgt) => {
+          if (tgt && tgt === x) return;
+          openLiveNoteDialog(s);
+        });
+      }
       // 拖拽排序（持久化到 config 顺序）。
       card.addEventListener('dragstart', (ev) => {
         dragSrcId = id;
@@ -3736,12 +3798,14 @@
     const drawerW = () => Math.round(window.innerWidth * 0.8);
     const SWIPE_EDGE = 26; // 屏幕边缘预留（系统返回手势区）
     let swipeTarget = 0; // 当前吸附目标（px）
+    let swipeCurrent = 0; // 当前实际位移（逻辑值，由 applySwipe 维护）
     let dragState = null;
 
     function curSwipe() {
       return parseFloat(getComputedStyle(mobileRoot).getPropertyValue("--m-swipe")) || 0;
     }
     function applySwipe(tx) {
+      swipeCurrent = tx;
       mobileRoot.style.setProperty("--m-swipe", tx + "px");
     }
     function settleSwipe(tx) {
@@ -3778,8 +3842,11 @@
       const W = window.innerWidth;
       if (e.clientX < SWIPE_EDGE || e.clientX > W - SWIPE_EDGE) return; // 边缘预留
       if (e.target.closest(".vp-stage")) return; // 预览区交互优先
+      // 列表本体 / 设置面板内容不参与全屏滑动（取消列表上的"横向移动"判定）；
+      // 其余主界面区域（顶栏/底栏/游戏行/账号区空白）均可滑。
+      if (e.target.closest(".room-list, .acct-list, #log, .proj-info, .dbody")) return;
       dragState = {
-        x: e.clientX, y: e.clientY, base: curSwipe(),
+        x: e.clientX, y: e.clientY, base: swipeCurrent,
         lastX: e.clientX, lastT: performance.now(), vx: 0, active: false,
       };
     }, { passive: true });
@@ -3807,7 +3874,7 @@
       dragState = null;
       if (!s.active) return; // 点按：由下方 click 逻辑处理
       const DW = drawerW();
-      const cur = curSwipe();
+      const cur = swipeCurrent;
       // 三档吸附（-DW / 0 / +DW）：以「手势起点档位」为基准，一次手势最多跨一档——
       // 从某侧抽屉滑回时吸回中心，而非被速度方向误判到对侧。
       const slots = [-DW, 0, DW];
@@ -3824,11 +3891,12 @@
     document.addEventListener("pointercancel", endDrag, { passive: true });
 
     // 抽屉打开时点击主界面 → 收回（吞掉该次点击，避免误触主界面按钮）。
-    // 注：弹层打开时不做拦截（弹层交互优先，且弹层打开可能使 click 目标变为 body）。
+    // 注：弹层打开时不做拦截（弹层交互优先）；顶栏按钮不拦截（其自身 toggle 逻辑
+    // 负责开/关，允许"左开时点右按钮直接切到右侧"）。
     document.addEventListener("click", (e) => {
       if (!drawerOpen()) return;
       if (anyModalOpen()) return;
-      if (e.target.closest("#toolsOverlay .dialog") || e.target.closest(".sidebar")) return;
+      if (e.target.closest("#toolsOverlay .dialog") || e.target.closest(".sidebar") || e.target.closest(".m-topbar")) return;
       settleSwipe(0);
       e.stopPropagation();
       e.preventDefault();
