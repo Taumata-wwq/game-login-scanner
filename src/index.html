@@ -636,7 +636,7 @@
   html.mobile .room-card { height: 56px; }
 
   /* 右抽屉：设置（复用 toolsOverlay） */
-  html.mobile #toolsOverlay { justify-content: flex-end; align-items: stretch; padding: 0; }
+  html.mobile #toolsOverlay { justify-content: flex-end; align-items: stretch; padding: 0; z-index: 200; }
   html.mobile #toolsOverlay .dialog {
     width: 90vw; max-width: 420px; height: 100%; max-height: none; border-radius: 0;
     transform: translateX(100%); transition: transform 0.25s ease;
@@ -3159,6 +3159,13 @@
 
   function drawView() {
     if (!preview) return;
+    // 移动端：一旦有画面实际绘制，即停用「空闲态测试图」——否则直播/屏幕预览的
+    // 首帧揭除封面（vpCover）后，测试图会重新盖上画面（浏览器实测确认的遮挡）。
+    if (window.__MOBILE__ && !window.__hadFrame) {
+      window.__hadFrame = true;
+      const ia = document.getElementById("mIdleArt");
+      if (ia) ia.setAttribute("hidden", "");
+    }
     // 拖拽/缩放刚启动、新底图刷新中：冻结当前画面，不重绘。
     // 旧底图已作废（可能还停留在上一轮会话的内容），此时若强行取帧会闪现
     // 上一轮拖拽/缩放的最后一帧；冻结 1~2 帧后全量瓦片帧到达即恢复。
@@ -3555,11 +3562,12 @@
     function closeLeft() { sidebar.classList.remove("open"); maybeHideScrim(); }
     function openRight() {
       if (tools) { tools.hidden = false; tools.classList.add("open"); }
-      scrim.hidden = false;
       $("btnTools") && $("btnTools").classList.add("open");
     }
     function closeRight() {
-      if (tools) { tools.classList.remove("open"); }
+      // 注：只 remove("open") 会让 overlay 的 hidden 残留 → 透明遮罩拦截全屏点击
+      // （移动端点遮罩关闭设置后界面"点不动"）。此处一并复位 hidden。
+      if (tools) { tools.classList.remove("open"); tools.hidden = true; }
       $("btnTools") && $("btnTools").classList.remove("open");
       maybeHideScrim();
     }
@@ -3571,6 +3579,14 @@
     $("mBtnLeft").addEventListener("click", openLeft);
     $("mBtnRight").addEventListener("click", openRight);
     scrim.addEventListener("click", () => { closeLeft(); closeRight(); });
+    // 移动端 toolsOverlay 为全屏遮罩容器（z-index 200，高于 mScrim）：点击其空白区
+    // 由通用 .overlay mousedown 处理复位 hidden，此处同步清理 open 类与抽屉状态——
+    // 保证「点面板外」一次点击完成全部关闭（此前需点两次，第一次会被残留层吞掉）。
+    if (tools) {
+      tools.addEventListener("mousedown", (e) => {
+        if (e.target === tools) closeRight();
+      });
+    }
     // 桌面端 setToolsOpen 与移动端 openRight 统一：toolsOverlay 关闭时同步清 open 类。
     document.querySelectorAll('[data-close="toolsOverlay"]').forEach((b) => {
       b.addEventListener("click", () => { closeRight(); });
@@ -3656,7 +3672,8 @@
       const cover = $("vpCover");
       // 注意：SVG 元素不是 HTMLElement，无 .hidden 属性，必须用 setAttribute/removeAttribute。
       const upd = () => {
-        const show = cover ? cover.hasAttribute("hidden") : true;
+        // 有实际画面后（window.__hadFrame 由 drawView 首帧绘制置位）不再显示测试图。
+        const show = (cover ? cover.hasAttribute("hidden") : true) && !window.__hadFrame;
         if (show) art.removeAttribute("hidden");
         else art.setAttribute("hidden", "");
       };

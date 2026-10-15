@@ -43,6 +43,32 @@
   var listeners = {};
   function emit(name, payload) { (listeners[name] || []).forEach(function (fn) { try { fn({ payload: payload }); } catch (e) {} }); }
 
+  // 模拟预览帧（32x… 320x180 棋盘格 + 缓慢移动亮块，供预览区渲染验证）。
+  var frameTick = 0;
+  function previewFrame() {
+    var w = 320, h = 180;
+    var buf = new ArrayBuffer(24 + w * h * 4);
+    var dv = new DataView(buf);
+    dv.setUint32(0, w, true);
+    dv.setUint32(4, h, true);
+    dv.setInt32(8, 0, true);
+    dv.setInt32(12, 0, true);
+    dv.setInt32(16, 1920, true);
+    dv.setInt32(20, 1080, true);
+    var px = new Uint8ClampedArray(buf, 24);
+    frameTick++;
+    var blockX = (frameTick * 3) % (w + 24) - 12;
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var i = (y * w + x) * 4;
+        var v = (((x >> 4) + (y >> 4)) & 1) ? 70 : 24;
+        if (x >= blockX && x < blockX + 24 && y > 76 && y < 104) v = 180;
+        px[i] = v; px[i + 1] = v; px[i + 2] = v + 10; px[i + 3] = 255;
+      }
+    }
+    return buf;
+  }
+
   window.__TAURI__ = {
     core: {
       invoke: function (cmd, args) {
@@ -63,6 +89,9 @@
           case "screen_capture_state": return Promise.resolve(false);
           case "request_screen_capture": return Promise.resolve();
           case "stop_screen_capture": return Promise.resolve();
+          case "capture_preview": return Promise.resolve(previewFrame());
+          case "login_qr_start": return Promise.resolve(["preview", '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29" shape-rendering="crispEdges" style="width:100%;height:100%"><rect width="29" height="29" fill="#fff"/><rect x="0" y="0" width="7" height="7" fill="#000"/><rect x="22" y="0" width="7" height="7" fill="#000"/><rect x="0" y="22" width="7" height="7" fill="#000"/><rect x="2" y="2" width="3" height="3" fill="#fff"/><rect x="24" y="2" width="3" height="3" fill="#fff"/><rect x="2" y="24" width="3" height="3" fill="#fff"/><rect x="10" y="4" width="2" height="2" fill="#000"/><rect x="14" y="8" width="2" height="2" fill="#000"/><rect x="18" y="4" width="2" height="2" fill="#000"/><rect x="10" y="12" width="2" height="2" fill="#000"/><rect x="16" y="14" width="2" height="2" fill="#000"/><rect x="12" y="18" width="2" height="2" fill="#000"/><rect x="18" y="18" width="2" height="2" fill="#000"/><rect x="4" y="10" width="2" height="2" fill="#000"/><rect x="4" y="14" width="2" height="2" fill="#000"/><rect x="24" y="10" width="2" height="2" fill="#000"/><rect x="24" y="16" width="2" height="2" fill="#000"/><rect x="10" y="24" width="2" height="2" fill="#000"/><rect x="16" y="24" width="2" height="2" fill="#000"/></svg>']);
+          case "login_qr_poll": return Promise.resolve(["waiting", "official", "", ""]);
           case "live_start": return Promise.resolve({ session_id: "preview", w: 1280, h: 720 });
           case "live_stop": return Promise.resolve();
           case "live_refresh_meta": return Promise.resolve(null);
