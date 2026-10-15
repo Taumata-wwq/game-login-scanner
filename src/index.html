@@ -665,18 +665,15 @@
   .m-scanbtn:active { transform: scale(0.975); }
   .m-scanbtn.running { background: var(--panel-2); color: #ff9090; box-shadow: inset 0 0 0 1.5px rgba(207, 74, 74, 0.6); }
 
-  /* 左抽屉：侧栏（右侧连续圆角——现代抽屉手法；动效统一 --m-dur-3） */
+  /* 左抽屉：侧栏（拼接模型：位于 .app 内——.app 位移后自身恒定 -80vw 即贴主界面左侧） */
   html.mobile .sidebar {
     position: fixed; top: 0; bottom: 0; left: 0;
-    width: 84vw; max-width: 360px; z-index: 200;
+    width: 80vw; max-width: none; z-index: 200;
     background: var(--panel); border-right: 1px solid var(--line);
     border-radius: 0 var(--m-r-xl) var(--m-r-xl) 0;
-    transform: translateX(-102%);
-    transition: transform var(--m-dur-3) var(--m-ease);
+    transform: translateX(-80vw);
     padding-top: env(safe-area-inset-top, 0px);
-    box-shadow: 8px 0 40px rgba(0, 0, 0, 0.55);
   }
-  html.mobile .sidebar.open { transform: translateX(0); }
   /* 房间卡：62px 行高、统一圆角；移动端无 hover——删除按钮常驻（32px 触控目标）。 */
   html.mobile .room-card { height: 62px; border-radius: var(--m-r-md); }
   html.mobile .room-card .thumb { width: 64px; height: 40px; border-radius: var(--m-r-xs); }
@@ -691,17 +688,22 @@
   html.mobile .room-card .x:active { background: rgba(207, 74, 74, 0.18); color: #ff8f8f; }
   html.mobile .room-add { height: 44px; font-size: var(--m-fs-md); border-radius: var(--m-r-md); }
 
-  /* 右抽屉：设置（复用 toolsOverlay；左侧连续圆角） */
-  html.mobile #toolsOverlay { justify-content: flex-end; align-items: stretch; padding: 0; z-index: 200; }
+  /* 右抽屉：设置（同一拼接模型；位移 = 自身宽 + --m-swipe；容器穿透仅 dialog 可交互） */
+  html.mobile #toolsOverlay {
+    justify-content: flex-end; align-items: stretch; padding: 0; z-index: 200;
+    background: transparent;
+    pointer-events: none;
+  }
   html.mobile #toolsOverlay .dialog {
-    width: 90vw; max-width: 420px; height: 100%; max-height: none;
+    width: 80vw; max-width: none; height: 100%; max-height: none;
     border-radius: var(--m-r-xl) 0 0 var(--m-r-xl);
-    transform: translateX(102%); transition: transform var(--m-dur-3) var(--m-ease);
+    transform: translateX(calc(80vw + var(--m-swipe)));
+    transition: transform var(--m-dur-3) var(--m-ease);
     padding-top: env(safe-area-inset-top, 0px);
     padding-bottom: env(safe-area-inset-bottom, 0px);
     animation: none; /* 抽屉由 transform 过渡驱动，不套弹层入场动画 */
+    pointer-events: auto;
   }
-  html.mobile #toolsOverlay.open .dialog { transform: translateX(0); }
   html.mobile #toolsOverlay .dbody { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 
   html.mobile .m-idle-art {
@@ -766,6 +768,46 @@
   html.mobile .code-row button { height: 42px; font-size: var(--m-fs-sm); }
   html.mobile .dialog .btn.block { height: 46px; font-size: var(--m-fs-lg); border-radius: var(--m-r-md); }
 
+  /* ---------------------------------------------------------------
+     第二批调整（2026-10-15 夜）
+     1) 移除预览区信息行（顶栏已承载标题/状态）；
+     2) 左抽屉 header 对齐顶栏规格（52px / 17px）；
+     3) 移动端弹层置于抽屉之上（修复从侧栏打开弹层被遮挡）；
+     4) 字重/圆角/按钮右对齐等细节统一；
+     5) 右抽屉：设置项顶部、日志填充中部、应用信息置底。
+     --------------------------------------------------------------- */
+  html.mobile .vp-info { display: none; }
+  html.mobile .sidebar header { height: 52px; padding: 0 10px 0 14px; gap: 9px; }
+  html.mobile .sidebar header .logo { width: 18px; height: 18px; }
+  html.mobile .sidebar header h1 { font-size: var(--m-fs-xl); letter-spacing: 0.01em; }
+  html.mobile .overlay { z-index: 300; }
+  html.mobile .m-game, html.mobile .m-chan { font-weight: 600; }
+  html.mobile #fpsSeg { border-radius: var(--m-r-sm); padding: 3px; }
+  html.mobile #fpsSeg button { border-radius: var(--m-r-xs); }
+  html.mobile #toolsOverlay .btn.tiny {
+    height: 30px; padding: 0 12px; border-radius: var(--m-r-xs);
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+  }
+  html.mobile #toolsOverlay .dsec { justify-content: space-between; }
+  html.mobile #toolsOverlay .dsec::after { display: none; }
+  html.mobile #toolsOverlay .dbody { display: flex; flex-direction: column; overflow-y: hidden; }
+  html.mobile #toolsOverlay #log { flex: 1 1 auto; min-height: 140px; max-height: none; overflow-y: auto; }
+  html.mobile #toolsOverlay .proj-info { flex: none; margin-top: 10px; }
+
+  /* ---------------------------------------------------------------
+     抽屉滑动模型（三面板拼接：主界面 1 + 左右侧栏各 0.8 视口宽）
+     --m-swipe 为主界面位移（+ 露左抽屉 / - 露右抽屉），由 JS 跟手更新；
+     松手按位置与速度吸附三档。跟手期间 .m-swiping 关闭过渡。
+     --------------------------------------------------------------- */
+  html.mobile { --m-swipe: 0px; }
+  html.mobile body { touch-action: pan-y; }
+  html.mobile .m-topbar, html.mobile .app, html.mobile .m-bottombar {
+    transform: translateX(var(--m-swipe));
+    transition: transform var(--m-dur-3) var(--m-ease);
+  }
+  html.mobile.m-swiping .m-topbar, html.mobile.m-swiping .app, html.mobile.m-swiping .m-bottombar,
+  html.mobile.m-swiping #toolsOverlay .dialog { transition: none; }
+
   /* 设置面板（移动端）：内部控件与文字提升到移动规格（桌面为紧凑小号） */
   html.mobile #toolsOverlay .lbl { font-size: var(--m-fs-md); }
   html.mobile #toolsOverlay .lbl small { font-size: var(--m-fs-xs); }
@@ -818,7 +860,7 @@
       <div class="m-sub" id="mSub"></div>
     </div>
     <button class="m-iconbtn" id="mBtnRight" title="设置">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="3"/></svg>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     </button>
   </header>
 
@@ -1317,6 +1359,11 @@
   function setToolsOpen(open) { $('toolsOverlay').hidden = !open; $('btnTools').classList.toggle('open', open); }
   document.querySelectorAll('[data-close]').forEach((b) => {
     b.addEventListener('click', () => {
+      // 移动端工具面板为滑动抽屉（常驻显示）：交由抽屉模型收回，勿置 hidden。
+      if (window.__MOBILE__ && b.dataset.close === 'toolsOverlay') {
+        if (window.closeRight) window.closeRight();
+        return;
+      }
       $(b.dataset.close).hidden = true;
       if (b.dataset.close === 'loginOverlay') cancelQr();
     });
@@ -1324,6 +1371,7 @@
   document.querySelectorAll('.overlay').forEach((o) => {
     o.addEventListener('mousedown', (e) => {
       if (e.target === o) {
+        if (window.__MOBILE__ && o.id === 'toolsOverlay') return; // 抽屉模型：勿置 hidden
         o.hidden = true;
         if (o.id === 'loginOverlay') cancelQr();
       }
@@ -1332,6 +1380,10 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       document.querySelectorAll('.overlay').forEach((o) => {
+        if (window.__MOBILE__ && o.id === 'toolsOverlay') {
+          if (window.closeRight) window.closeRight();
+          return;
+        }
         o.hidden = true;
         if (o.id === 'loginOverlay') cancelQr();
       });
@@ -3675,44 +3727,126 @@
     }
     window.updateMobileTitle = updateMobileTitle;
 
-    // --- 抽屉：左（直播间）/ 右（设置） ---
-    const scrim = $("mScrim");
+    // --- 抽屉滑动模型（2026-10-15：三面板拼接、跟手位移、自动吸附） ---
+    // 模型：主界面（1 宽）与左右抽屉（各 0.8 视口宽）拼为 2.6，--m-swipe 为主界面
+    // 位移（+ 露左抽屉 / - 露右抽屉，0 为居中）；松手按位置与速度吸附三档。
     const sidebar = document.querySelector(".sidebar");
     const tools = $("toolsOverlay");
+    const mobileRoot = document.documentElement;
+    const drawerW = () => Math.round(window.innerWidth * 0.8);
+    const SWIPE_EDGE = 26; // 屏幕边缘预留（系统返回手势区）
+    let swipeTarget = 0; // 当前吸附目标（px）
+    let dragState = null;
+
+    function curSwipe() {
+      return parseFloat(getComputedStyle(mobileRoot).getPropertyValue("--m-swipe")) || 0;
+    }
+    function applySwipe(tx) {
+      mobileRoot.style.setProperty("--m-swipe", tx + "px");
+    }
+    function settleSwipe(tx) {
+      swipeTarget = tx;
+      mobileRoot.classList.remove("m-swiping");
+      applySwipe(tx);
+    }
+    function drawerOpen() {
+      return swipeTarget > 0 ? "left" : swipeTarget < 0 ? "right" : "";
+    }
+
     function openLeft() {
-      sidebar.classList.add("open");
-      scrim.hidden = false;
+      settleSwipe(drawerW());
       try { invoke("frontend_log", { level: "info", msg: "移动端：打开直播间抽屉" }); } catch (e) {}
     }
-    function closeLeft() { sidebar.classList.remove("open"); maybeHideScrim(); }
-    function openRight() {
-      if (tools) { tools.hidden = false; tools.classList.add("open"); }
-      $("btnTools") && $("btnTools").classList.add("open");
-    }
-    function closeRight() {
-      // 注：只 remove("open") 会让 overlay 的 hidden 残留 → 透明遮罩拦截全屏点击
-      // （移动端点遮罩关闭设置后界面"点不动"）。此处一并复位 hidden。
-      if (tools) { tools.classList.remove("open"); tools.hidden = true; }
-      $("btnTools") && $("btnTools").classList.remove("open");
-      maybeHideScrim();
-    }
-    function maybeHideScrim() {
-      const anyOpen = (sidebar && sidebar.classList.contains("open")) || (tools && tools.classList.contains("open"));
-      if (!anyOpen) scrim.hidden = true;
-    }
+    function closeLeft() { settleSwipe(0); }
+    function openRight() { settleSwipe(-drawerW()); }
+    function closeRight() { settleSwipe(0); }
+    window.closeLeft = closeLeft;
+    window.closeRight = closeRight;
     window.closeMGameOverlay = function () { const o = $("mGameOverlay"); if (o) o.hidden = true; };
-    $("mBtnLeft").addEventListener("click", openLeft);
-    $("mBtnRight").addEventListener("click", openRight);
-    scrim.addEventListener("click", () => { closeLeft(); closeRight(); });
-    // 移动端 toolsOverlay 为全屏遮罩容器（z-index 200，高于 mScrim）：点击其空白区
-    // 由通用 .overlay mousedown 处理复位 hidden，此处同步清理 open 类与抽屉状态——
-    // 保证「点面板外」一次点击完成全部关闭（此前需点两次，第一次会被残留层吞掉）。
-    if (tools) {
-      tools.addEventListener("mousedown", (e) => {
-        if (e.target === tools) closeRight();
-      });
+
+    // 拼接模型下工具面板常驻（以 transform 藏于屏外，不再用 hidden 开关）。
+    if (tools) tools.hidden = false;
+
+    // --- 手势：跟手位移 + 松手吸附（pointer 事件，触屏/鼠标通用） ---
+    function anyModalOpen() {
+      return Array.from(document.querySelectorAll(".overlay")).some(
+        (o) => o.id !== "toolsOverlay" && !o.hidden
+      );
     }
-    // 桌面端 setToolsOpen 与移动端 openRight 统一：toolsOverlay 关闭时同步清 open 类。
+    document.addEventListener("pointerdown", (e) => {
+      if (anyModalOpen()) return;
+      const W = window.innerWidth;
+      if (e.clientX < SWIPE_EDGE || e.clientX > W - SWIPE_EDGE) return; // 边缘预留
+      if (e.target.closest(".vp-stage")) return; // 预览区交互优先
+      dragState = {
+        x: e.clientX, y: e.clientY, base: curSwipe(),
+        lastX: e.clientX, lastT: performance.now(), vx: 0, active: false,
+      };
+    }, { passive: true });
+    document.addEventListener("pointermove", (e) => {
+      if (!dragState) return;
+      const dx = e.clientX - dragState.x, dy = e.clientY - dragState.y;
+      if (!dragState.active) {
+        if (Math.abs(dx) < 8) return;
+        if (Math.abs(dx) < Math.abs(dy) * 1.15) { dragState = null; return; } // 纵向：放行滚动
+        dragState.active = true;
+        mobileRoot.classList.add("m-swiping");
+      }
+      const now = performance.now();
+      if (now - dragState.lastT > 15) {
+        dragState.vx = (e.clientX - dragState.lastX) / (now - dragState.lastT);
+        dragState.lastX = e.clientX;
+        dragState.lastT = now;
+      }
+      const DW = drawerW();
+      applySwipe(Math.max(-DW, Math.min(DW, dragState.base + dx)));
+    }, { passive: true });
+    function endDrag() {
+      if (!dragState) return;
+      const s = dragState;
+      dragState = null;
+      if (!s.active) return; // 点按：由下方 click 逻辑处理
+      const DW = drawerW();
+      const cur = curSwipe();
+      // 三档吸附（-DW / 0 / +DW）：以「手势起点档位」为基准，一次手势最多跨一档——
+      // 从某侧抽屉滑回时吸回中心，而非被速度方向误判到对侧。
+      const slots = [-DW, 0, DW];
+      const from = slots.reduce((a, b) => (Math.abs(b - s.base) < Math.abs(a - s.base) ? b : a));
+      const fromIdx = slots.indexOf(from);
+      const moved = cur - from;
+      const dir = Math.sign(moved) || Math.sign(s.vx) || 0;
+      const fast = Math.abs(s.vx) > 0.3 && Math.sign(s.vx) === dir && dir !== 0;
+      const cross = fast || Math.abs(moved) > DW * 0.3;
+      const idx = Math.min(2, Math.max(0, fromIdx + (cross ? dir : 0)));
+      settleSwipe(slots[idx]);
+    }
+    document.addEventListener("pointerup", endDrag, { passive: true });
+    document.addEventListener("pointercancel", endDrag, { passive: true });
+
+    // 抽屉打开时点击主界面 → 收回（吞掉该次点击，避免误触主界面按钮）。
+    // 注：弹层打开时不做拦截（弹层交互优先，且弹层打开可能使 click 目标变为 body）。
+    document.addEventListener("click", (e) => {
+      if (!drawerOpen()) return;
+      if (anyModalOpen()) return;
+      if (e.target.closest("#toolsOverlay .dialog") || e.target.closest(".sidebar")) return;
+      settleSwipe(0);
+      e.stopPropagation();
+      e.preventDefault();
+    }, true);
+
+    // 视口变化（旋转/尺寸变化）：按当前档位重新贴合。
+    window.addEventListener("resize", () => {
+      if (swipeTarget > 0) settleSwipe(drawerW());
+      else if (swipeTarget < 0) settleSwipe(-drawerW());
+      else applySwipe(0);
+    });
+
+    $("mBtnLeft").addEventListener("click", () => {
+      if (swipeTarget > 0) closeLeft(); else openLeft();
+    });
+    $("mBtnRight").addEventListener("click", () => {
+      if (swipeTarget < 0) closeRight(); else openRight();
+    });
     document.querySelectorAll('[data-close="toolsOverlay"]').forEach((b) => {
       b.addEventListener("click", () => { closeRight(); });
     });
