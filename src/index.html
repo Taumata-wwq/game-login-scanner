@@ -523,6 +523,36 @@
   /* ===================== 移动端（html.mobile 生效；桌面完全不受影响） ===================== */
   .m-topbar, .m-bottombar, .m-gamerow, .m-scrim { display: none; }
 
+  /* -------------------------------------------------------------------------
+     移动端设计 tokens（2026-10-15 统一化）
+     参考成熟移动设计体系的通用做法：Material 3 的分层/状态层（state layer）、
+     iOS 的连续圆角与按压反馈、现代 app 的胶囊主按钮。
+     数值阶梯（圆角/字号/动效）集中定义，组件只引用，避免散落硬编码。
+     ------------------------------------------------------------------------- */
+  html.mobile {
+    /* 圆角阶梯：随组件体量递增（小 → 大） */
+    --m-r-xs: 6px;    /* 微元素：chip / 角标 */
+    --m-r-sm: 10px;   /* 小件：图标按钮 / switch */
+    --m-r-md: 14px;   /* 中件：列表卡 / 输入 / 次级按钮 */
+    --m-r-lg: 18px;   /* 大件：面板 / 缩略图 */
+    --m-r-xl: 22px;   /* 弹层 dialog */
+    /* 字号阶梯：移动可读（最小 11.5px） */
+    --m-fs-xs: 11.5px;
+    --m-fs-sm: 12.5px;
+    --m-fs-md: 14px;
+    --m-fs-lg: 15px;
+    --m-fs-xl: 17px;
+    --m-fs-title: 20px;
+    /* 动效时长与缓动（统一节奏：微反馈 → 常规 → 抽屉/弹层） */
+    --m-dur-1: 150ms;
+    --m-dur-2: 240ms;
+    --m-dur-3: 320ms;
+    --m-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+    /* 状态层（半透明白叠加，随底色自适应——M3 手法，替代写死的灰） */
+    --m-layer-1: rgba(255, 255, 255, 0.055);
+    --m-layer-2: rgba(255, 255, 255, 0.1);
+  }
+
   html.mobile body {
     display: flex; flex-direction: column; height: 100vh;
     padding-top: env(safe-area-inset-top, 0px);
@@ -535,25 +565,27 @@
   html.mobile .app { flex: 1 1 auto; min-height: 0; }
   html.mobile .main-col { width: 100%; }
 
-  /* 顶栏 */
+  /* 顶栏（52px；图标按钮 44px 触控目标 + 统一按压反馈） */
   html.mobile .m-topbar {
     display: flex; align-items: center; gap: 4px;
-    height: 48px; flex: none; padding: 0 4px;
+    height: 52px; flex: none; padding: 0 6px;
     background: var(--panel); border-bottom: 1px solid var(--line);
   }
   .m-iconbtn {
     width: 44px; height: 44px; flex: none; display: grid; place-items: center;
-    background: transparent; color: var(--text); border: none; border-radius: 6px; cursor: pointer; padding: 0;
+    background: transparent; color: var(--text); border: none;
+    border-radius: var(--m-r-sm); cursor: pointer; padding: 0;
+    transition: background var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
   }
-  .m-iconbtn:active { background: var(--active); }
+  .m-iconbtn:active { background: var(--m-layer-2); transform: scale(0.94); }
   .m-titlewrap { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; }
   .m-titlewrap.inline { flex-direction: row; gap: 7px; align-items: baseline; }
-  .m-title { font-size: 16px; font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-  .m-sub { font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .m-title { font-size: var(--m-fs-xl); font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; letter-spacing: 0.01em; }
+  .m-sub { font-size: var(--m-fs-sm); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 
   /* 3:2 视口 */
   html.mobile .viewport { flex: none; background: #000; }
-  html.mobile .vp-info { height: 34px; padding: 0 12px; font-size: 12px; }
+  html.mobile .vp-info { height: 36px; padding: 0 14px; font-size: var(--m-fs-sm); }
   html.mobile .vp-info #btnStart { display: none; }
   html.mobile .vp-fit { width: 100%; height: auto; }
   /* 3:2 视口：用 vw 高度（100vw * 2/3）比 aspect-ratio 更可靠。 */
@@ -564,15 +596,19 @@
   html.mobile #alwaysOnTop { display: none; }
   html.mobile .opt-row:has(#alwaysOnTop) { display: none; }
 
-  /* 账号区 */
-  html.mobile .acct-area { flex: 1 1 auto; min-height: 0; flex-direction: column; padding: 8px; }
+  /* 账号区（54px 行高 + 统一圆角；按压反馈与选中过渡） */
+  html.mobile .acct-area { flex: 1 1 auto; min-height: 0; flex-direction: column; padding: 10px; }
   html.mobile .acct-col { flex: 1 1 auto; min-height: 0; }
-  html.mobile .acct-item { height: 48px; }
-  html.mobile .acct-list { gap: 6px; }
+  html.mobile .acct-item {
+    height: 54px; border-radius: var(--m-r-md);
+    transition: background var(--m-dur-1) var(--m-ease), border-color var(--m-dur-2) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
+  }
+  html.mobile .acct-item:active { background: var(--m-layer-1); transform: scale(0.985); }
+  html.mobile .acct-list { gap: 8px; }
   /* 添加账号按钮：移动端放大到触摸友好高度。 */
-  html.mobile .acct-add { height: 48px; font-size: 14px; }
+  html.mobile .acct-add { height: 52px; font-size: var(--m-fs-lg); border-radius: var(--m-r-md); }
   /* 账号行内文字放大（桌面端为紧凑的 11px）。 */
-  html.mobile .acct-item .nm { font-size: 15px; }
+  html.mobile .acct-item .nm { font-size: var(--m-fs-lg); }
   html.mobile .acct-item .chip { font-size: 12px; }
   html.mobile .acct-item .remark { font-size: 12.5px; max-width: 120px; }
   html.mobile .acct-item .radio { width: 18px; height: 18px; }
@@ -583,65 +619,87 @@
   }
   html.mobile .acct-item .ibtn svg { width: 15px; height: 15px; }
 
-  /* 游戏/区服选择行 */
-  html.mobile .m-gamerow { display: flex; gap: 8px; flex: none; margin-bottom: 8px; }
+  /* 游戏/区服选择行（48px 高；双按钮均分同规格） */
+  html.mobile .m-gamerow { display: flex; gap: 10px; flex: none; margin-bottom: 10px; }
   .m-game {
-    flex: 0 1 auto; max-width: 62%; height: 44px; padding: 0 16px;
+    flex: 1 1 0; min-width: 0; height: 48px; padding: 0 16px;
     display: inline-flex; align-items: center;
     background: var(--panel-2); color: var(--text-strong);
-    font-family: inherit; font-size: 15px; font-weight: 600; line-height: 1;
-    border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+    font-family: inherit; font-size: var(--m-fs-lg); font-weight: 600; line-height: 1;
+    border: 1px solid var(--border); border-radius: var(--m-r-md); cursor: pointer;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: background var(--m-dur-1) var(--m-ease), border-color var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
   }
   .m-chan {
-    flex: 1 1 auto; height: 44px; padding: 0 16px;
+    flex: 1 1 0; min-width: 0; height: 48px; padding: 0 16px;
     display: inline-flex; align-items: center; justify-content: center;
     background: var(--panel-2); color: var(--text);
-    font-family: inherit; font-size: 15px; font-weight: 500; line-height: 1;
-    border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+    font-family: inherit; font-size: var(--m-fs-lg); font-weight: 500; line-height: 1;
+    border: 1px solid var(--border); border-radius: var(--m-r-md); cursor: pointer;
+    transition: background var(--m-dur-1) var(--m-ease), border-color var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
   }
-  .m-game:active, .m-chan:active { background: var(--active); }
+  .m-game:active, .m-chan:active { background: var(--m-layer-1); transform: scale(0.97); }
 
-  /* 底部操作栏 */
+  /* 底部操作栏（64px；主按钮胶囊化——现代移动 CTA 手法） */
   html.mobile .m-bottombar {
-    display: flex; align-items: center; gap: 10px;
-    height: 62px; flex: none; padding: 0 14px;
+    display: flex; align-items: center; gap: 12px;
+    height: 64px; flex: none; padding: 0 16px;
     background: var(--panel); border-top: 1px solid var(--line);
   }
   .m-sqbtn {
-    width: 46px; height: 46px; flex: none; display: grid; place-items: center;
+    width: 48px; height: 48px; flex: none; display: grid; place-items: center;
     background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 10px; cursor: pointer; padding: 0;
+    border-radius: var(--m-r-md); cursor: pointer; padding: 0;
+    transition: background var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
   }
-  .m-sqbtn:active { background: var(--active); }
+  .m-sqbtn:active { background: var(--m-layer-2); transform: scale(0.94); }
   .m-scanbtn {
-    flex: 1 1 auto; height: 46px; display: flex; align-items: center; justify-content: center; gap: 8px;
+    flex: 1 1 auto; height: 50px; display: flex; align-items: center; justify-content: center; gap: 8px;
     background: var(--primary-bg); color: var(--primary-fg); border: none;
-    border-radius: 10px; cursor: pointer;
-    font-family: inherit; font-size: 16px; font-weight: 700; line-height: 1;
+    border-radius: 999px; cursor: pointer;
+    font-family: inherit; font-size: var(--m-fs-xl); font-weight: 600; line-height: 1;
+    letter-spacing: 0.01em;
+    transition: background var(--m-dur-2) var(--m-ease), color var(--m-dur-2) var(--m-ease),
+                box-shadow var(--m-dur-2) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
   }
-  .m-scanbtn:active { background: #ffffff; }
-  .m-scanbtn.running { background: var(--panel-2); color: #ff8f8f; box-shadow: inset 0 0 0 1px rgba(207,74,74,0.55); }
+  .m-scanbtn:active { transform: scale(0.975); }
+  .m-scanbtn.running { background: var(--panel-2); color: #ff9090; box-shadow: inset 0 0 0 1.5px rgba(207, 74, 74, 0.6); }
 
-  /* 左抽屉：侧栏 */
+  /* 左抽屉：侧栏（右侧连续圆角——现代抽屉手法；动效统一 --m-dur-3） */
   html.mobile .sidebar {
     position: fixed; top: 0; bottom: 0; left: 0;
-    width: 82vw; max-width: 340px; z-index: 200;
+    width: 84vw; max-width: 360px; z-index: 200;
     background: var(--panel); border-right: 1px solid var(--line);
-    transform: translateX(-100%); transition: transform 0.25s ease;
+    border-radius: 0 var(--m-r-xl) var(--m-r-xl) 0;
+    transform: translateX(-102%);
+    transition: transform var(--m-dur-3) var(--m-ease);
     padding-top: env(safe-area-inset-top, 0px);
-    box-shadow: 2px 0 16px rgba(0,0,0,0.5);
+    box-shadow: 8px 0 40px rgba(0, 0, 0, 0.55);
   }
   html.mobile .sidebar.open { transform: translateX(0); }
-  html.mobile .room-card { height: 56px; }
+  /* 房间卡：62px 行高、统一圆角；移动端无 hover——删除按钮常驻（32px 触控目标）。 */
+  html.mobile .room-card { height: 62px; border-radius: var(--m-r-md); }
+  html.mobile .room-card .thumb { width: 64px; height: 40px; border-radius: var(--m-r-xs); }
+  html.mobile .room-card .rname { font-size: var(--m-fs-md); }
+  html.mobile .room-card .rsub { font-size: var(--m-fs-xs); color: var(--muted); }
+  html.mobile .room-card .st { font-size: var(--m-fs-xs); padding: 2px 8px; border-radius: 999px; }
+  html.mobile .room-card .x {
+    position: static; width: 32px; height: 100%; flex: none;
+    background: transparent; border-radius: var(--m-r-sm);
+    transform: none; opacity: 1; font-size: var(--m-fs-sm);
+  }
+  html.mobile .room-card .x:active { background: rgba(207, 74, 74, 0.18); color: #ff8f8f; }
+  html.mobile .room-add { height: 44px; font-size: var(--m-fs-md); border-radius: var(--m-r-md); }
 
-  /* 右抽屉：设置（复用 toolsOverlay） */
+  /* 右抽屉：设置（复用 toolsOverlay；左侧连续圆角） */
   html.mobile #toolsOverlay { justify-content: flex-end; align-items: stretch; padding: 0; z-index: 200; }
   html.mobile #toolsOverlay .dialog {
-    width: 90vw; max-width: 420px; height: 100%; max-height: none; border-radius: 0;
-    transform: translateX(100%); transition: transform 0.25s ease;
+    width: 90vw; max-width: 420px; height: 100%; max-height: none;
+    border-radius: var(--m-r-xl) 0 0 var(--m-r-xl);
+    transform: translateX(102%); transition: transform var(--m-dur-3) var(--m-ease);
     padding-top: env(safe-area-inset-top, 0px);
     padding-bottom: env(safe-area-inset-bottom, 0px);
+    animation: none; /* 抽屉由 transform 过渡驱动，不套弹层入场动画 */
   }
   html.mobile #toolsOverlay.open .dialog { transform: translateX(0); }
   html.mobile #toolsOverlay .dbody { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
@@ -655,9 +713,44 @@
   html.mobile .m-scrim { position: fixed; inset: 0; z-index: 150; background: rgba(0,0,0,0.55); display: block; }
   html.mobile .m-scrim[hidden] { display: none; }
 
-  /* 移动端其它弹窗铺满度更高 */
-  html.mobile .dialog { max-width: 92vw; }
+  /* 移动端弹层：更高铺满度 + 统一大圆角 + 入场动效（淡入 + 轻微上浮，重开时自动重播） */
   html.mobile .overlay { padding: 12px; }
+  html.mobile .dialog { max-width: 92vw; border-radius: var(--m-r-xl); }
+  html.mobile .overlay:not([hidden]) { animation: m-fade-in var(--m-dur-2) var(--m-ease); }
+  html.mobile .overlay:not([hidden]) .dialog { animation: m-dialog-pop var(--m-dur-2) var(--m-ease); }
+  @keyframes m-fade-in {
+    from { opacity: 0; }
+  }
+  @keyframes m-dialog-pop {
+    from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  }
+
+  /* 设置开关：移动端放大到 M3 规格（48x28，滑块 22px） */
+  html.mobile .switch { width: 48px; height: 28px; }
+  html.mobile .switch .track::after { top: 2px; left: 2px; width: 22px; height: 22px; }
+  html.mobile .switch input:checked + .track::after { transform: translateX(20px); }
+
+  /* 交互反馈补充：列表空态按钮（+ 添加账号 / + 添加直播间）的按压 */
+  html.mobile .acct-add, html.mobile .room-add {
+    transition: background var(--m-dur-1) var(--m-ease), border-color var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
+  }
+  html.mobile .acct-add:active, html.mobile .room-add:active {
+    transform: scale(0.98); background: var(--m-layer-1);
+  }
+
+  /* 设置面板（移动端）：内部控件与文字提升到移动规格（桌面为紧凑小号） */
+  html.mobile #toolsOverlay .lbl { font-size: var(--m-fs-md); }
+  html.mobile #toolsOverlay .lbl small { font-size: var(--m-fs-xs); }
+  html.mobile #toolsOverlay #displayName {
+    height: 40px; max-width: none; flex: 1 1 auto;
+    font-size: var(--m-fs-md); border-radius: var(--m-r-sm);
+  }
+  html.mobile #toolsOverlay .dsec { font-size: var(--m-fs-md); }
+  html.mobile #toolsOverlay #log { font-size: var(--m-fs-xs); }
+  html.mobile #toolsOverlay .proj-info { font-size: var(--m-fs-xs); }
+  html.mobile #toolsOverlay .pi-head > span:first-child { font-size: var(--m-fs-md); }
+  html.mobile #toolsOverlay .btn { font-size: var(--m-fs-sm); }
+  html.mobile #toolsOverlay [data-fps] { height: 34px; min-width: 46px; font-size: var(--m-fs-sm); }
 
 </style>
 </head>
