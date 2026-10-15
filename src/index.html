@@ -828,7 +828,7 @@
   html.mobile #toolsOverlay .btn.tiny { height: 32px; }
   html.mobile .acct-area { padding: 12px; }
   /* 列表本体：浏览器层面禁横向手势（防御任何"左右滑动趋势"） */
-  html.mobile .room-list, html.mobile .acct-list { touch-action: pan-y; }
+  html.mobile .room-list, html.mobile .acct-list, html.mobile #log { touch-action: pan-y; }
   html.mobile .dialog .dbody { padding-left: 14px; padding-right: 14px; }
   /* 长按编辑防御：卡片不选中文本 / 不弹系统长按菜单 */
   html.mobile .room-card, html.mobile .acct-item {
@@ -3841,10 +3841,8 @@
       if (anyModalOpen()) return;
       const W = window.innerWidth;
       if (e.clientX < SWIPE_EDGE || e.clientX > W - SWIPE_EDGE) return; // 边缘预留
-      if (e.target.closest(".vp-stage")) return; // 预览区交互优先
-      // 列表本体 / 设置面板内容不参与全屏滑动（取消列表上的"横向移动"判定）；
-      // 其余主界面区域（顶栏/底栏/游戏行/账号区空白）均可滑。
-      if (e.target.closest(".room-list, .acct-list, #log, .proj-info, .dbody")) return;
+      // 全区域跟手：不做区域排除（列表 / 预览 / 侧栏内容均可滑；纵向滚动由
+      // 方向判定与各容器 touch-action 层让行；canvas 触摸拖拽对横向主导让位）。
       dragState = {
         x: e.clientX, y: e.clientY, base: swipeCurrent,
         lastX: e.clientX, lastT: performance.now(), vx: 0, active: false,
@@ -3935,7 +3933,6 @@
         it.style.padding = "0 12px";
         it.style.borderRadius = "var(--m-r-md, 14px)";
         it.style.border = "1px solid var(--border)";
-        it.style.marginBottom = "8px";
         it.style.fontSize = "var(--m-fs-lg, 15px)";
         it.textContent = g.name;
         it.addEventListener("click", () => switchGame(g.id));
@@ -3960,7 +3957,6 @@
         it.style.padding = "0 12px";
         it.style.borderRadius = "var(--m-r-md, 14px)";
         it.style.border = "1px solid var(--border)";
-        it.style.marginBottom = "8px";
         it.style.fontSize = "var(--m-fs-lg, 15px)";
         it.textContent = label;
         it.addEventListener("click", () => {
@@ -4027,11 +4023,12 @@
         lastTap = now;
       }, { passive: true });
       // 单指平移 / 双指捏合缩放
-      let t0 = null, t1 = null, pinchDist0 = 0, scale0 = 1;
+      let t0 = null, t1 = null, pinchDist0 = 0, scale0 = 1, dragStart = null;
       cv.addEventListener("touchstart", (e) => {
         if (!preview) return;
         if (e.touches.length === 1) {
           t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+          dragStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
           if (preview) enterDrag();
         } else if (e.touches.length === 2) {
           t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -4042,6 +4039,12 @@
       }, { passive: true });
       cv.addEventListener("touchmove", (e) => {
         if (!preview) return;
+        // 横向主导的单指滑动让位给抽屉手势（不拖拽预览画面）。
+        if (e.touches.length === 1 && !t1 && dragStart) {
+          const adx = Math.abs(e.touches[0].clientX - dragStart.x);
+          const ady = Math.abs(e.touches[0].clientY - dragStart.y);
+          if (adx > 12 && adx > ady * 1.2) return;
+        }
         e.preventDefault();
         if (e.touches.length === 1 && t0 && !t1) {
           const dx = e.touches[0].clientX - t0.x;
@@ -4066,28 +4069,12 @@
         }
       }, { passive: false });
       cv.addEventListener("touchend", (e) => {
-        if (e.touches.length === 0) { t0 = null; t1 = null; dragging = false; ensureViewAnim(); }
+        if (e.touches.length === 0) { t0 = null; t1 = null; dragStart = null; dragging = false; ensureViewAnim(); }
         else if (e.touches.length === 1) { t1 = null; t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
       }, { passive: true });
     })();
-    // --- 账号区左右滑动触发抽屉 ---
-    (function bindAcctSwipe() {
-      const area = document.querySelector(".acct-area");
-      if (!area) return;
-      let sx = 0, sy = 0, tracking = false;
-      area.addEventListener("touchstart", (e) => {
-        if (e.touches.length !== 1) return;
-        sx = e.touches[0].clientX; sy = e.touches[0].clientY; tracking = true;
-      }, { passive: true });
-      area.addEventListener("touchend", (e) => {
-        if (!tracking) return;
-        tracking = false;
-        const t = e.changedTouches[0];
-        const dx = t.clientX - sx, dy = t.clientY - sy;
-        if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
-        if (dx > 0) openLeft(); else openRight();
-      }, { passive: true });
-    })();
+    // 注：早期「账号区滑动松手跳切」的 bindAcctSwipe 已移除——
+    // 全屏跟手滑动统一由文档级手势模型（pointer 事件）处理。
   }
   moduleOk = true;   // 脚本求值完成（自检哨兵）
   init();
