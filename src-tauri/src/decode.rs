@@ -26,6 +26,203 @@ pub struct DecodedFrame {
     pub v: Vec<u8>,
 }
 
+/// 从 Annex-B 字节流中解析 H.264 SPS 的显示宽高（像素）。
+///
+/// 用途：Android 的 `MediaCodec` 在 `configure` 时**必须**提供 width/height
+/// （NDK 头 `AMediaCodec_configure` 与官方示例均如此），而解码器无法自行从
+/// SPS 推导——故在收到首个含 SPS 的访问单元后解析出宽高再 configure。
+///
+/// 实现要点：找 NAL type 7（SPS），去 emulation prevention（`00 00 03`），
+/// 按 H.264 语法用指数哥伦布读 `pic_width_in_mbs_minus1` /
+/// `pic_height_in_map_units_minus1` / `frame_mbs_only_flag` / `frame_cropping`，
+/// 换算为显示宽高。解析失败返回 `None`（调用方可退回经验值或报错）。
+///
+/// 该函数跨平台（纯字节运算），便于桌面单元测试覆盖。
+pub fn sps_dimensions(annexb: &[u8]) -> Option<(u32, u32)> {
+    for (start, nal) in annexb_nalus(annexb) {
+        let _ = start;
+        if !nal.is_empty() && nal[0] & 0x1F == 7 {
+            if let Some(d) = parse_sps_dims(&nal[1..]) {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
+/// 把 Annex-B 字节流切分为 (起始码偏移, NAL 字节含头) 列表。
+/// 起始码为 00 00 01 或 00 00 00 01。
+fn annexb_nalus(data: &[u8]) -> Vec<(usize, &[u8])> {
+    let mut starts = Vec::new();
+    let mut i = 0usize;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 {
+            if data[i + 2] == 1 {
+                starts.push((i, i + 3));
+                i += 3;
+                continue;
+            }
+            if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1 {
+                starts.push((i, i + 4));
+                i += 4;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    let mut out = Vec::with_capacity(starts.len());
+    for (idx, &(sc_pos, hdr_off)) in starts.iter().enumerate() {
+        let end = starts.get(idx + 1).map(|&(p, _)| p).unwrap_or(data.len());
+        if hdr_off < end {
+            out.push((sc_pos, &data[hdr_off..end]));
+        }
+    }
+    out
+}
+
+/// 去除 SPS 的 emulation prevention bytes（00 00 03 → 00 00）。
+fn unescape_sps(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut zeros = 0u32;
+    for &b in data {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue; // 丢弃 emulation prevention byte
+        }
+        out.push(b);
+        if b == 0 {
+            zeros += 1;
+        } else {
+            zeros = 0;
+        }
+    }
+    out
+}
+
+/// 指数哥伦布比特读取器。
+struct BitReader<'a> {
+    data: &'a [u8],
+    pos: usize, // 比特位置
+}
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+    fn read_bit(&mut self) -> Option<u32> {
+        let byte = self.pos / 8;
+        if byte >= self.data.len() {
+            return None;
+        }
+        let bit = (self.data[byte] >> (7 - (self.pos % 8))) & 1;
+        self.pos += 1;
+        Some(bit as u32)
+    }
+    fn read_bits(&mut self, n: u32) -> Option<u32> {
+        let mut v = 0u32;
+        for _ in 0..n {
+            v = (v << 1) | self.read_bit()?;
+        }
+        Some(v)
+    }
+    /// 无符号指数哥伦布（ue(v)）。
+    fn read_ue(&mut self) -> Option<u32> {
+        let mut leading = 0u32;
+        while self.read_bit()? == 0 {
+            leading += 1;
+            if leading > 31 {
+                return None;
+            }
+        }
+        if leading == 0 {
+            return Some(0);
+        }
+        let rest = self.read_bits(leading)?;
+        Some((1u32 << leading) - 1 + rest)
+    }
+    /// 有符号指数哥伦布（se(v)）。
+    fn read_se(&mut self) -> Option<i32> {
+        let ue = self.read_ue()?;
+        let k = (ue as i32 + 1) / 2;
+        Some(if ue % 2 == 1 { k } else { -k })
+    }
+}
+
+/// 解析 SPS 载荷（已去 emulation prevention），返回显示宽高。
+fn parse_sps_dims(sps: &[u8]) -> Option<(u32, u32)> {
+    let data = unescape_sps(sps);
+    let mut br = BitReader::new(&data);
+    let profile_idc = br.read_bits(8)?;
+    br.read_bits(8)?; // constraint_set flags + reserved
+    br.read_bits(8)?; // level_idc
+    br.read_ue()?; // seq_parameter_set_id
+    let mut chroma_format_idc = 1u32;
+    if matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    ) {
+        chroma_format_idc = br.read_ue()?;
+        if chroma_format_idc == 3 {
+            br.read_bit()?; // separate_colour_plane_flag
+        }
+        br.read_ue()?; // bit_depth_luma_minus8
+        br.read_ue()?; // bit_depth_chroma_minus8
+        br.read_bit()?; // qpprime_y_zero_transform_bypass_flag
+        if br.read_bit()? == 1 {
+            // seq_scaling_matrix_present_flag：跳过 scaling list（简化：直接放弃解析）。
+            return None;
+        }
+    }
+    let _ = chroma_format_idc;
+    br.read_ue()?; // log2_max_frame_num_minus4
+    let pic_order_cnt_type = br.read_ue()?;
+    if pic_order_cnt_type == 0 {
+        br.read_ue()?; // log2_max_pic_order_cnt_lsb_minus4
+    } else if pic_order_cnt_type == 1 {
+        br.read_bit()?; // delta_pic_order_always_zero_flag
+        br.read_se()?; // offset_for_non_ref_pic
+        br.read_se()?; // offset_for_top_to_bottom_field
+        let n = br.read_ue()?;
+        for _ in 0..n {
+            br.read_se()?;
+        }
+    }
+    br.read_ue()?; // max_num_ref_frames
+    br.read_bit()?; // gaps_in_frame_num_value_allowed_flag
+    let pic_width_in_mbs_minus1 = br.read_ue()?;
+    let pic_height_in_map_units_minus1 = br.read_ue()?;
+    let frame_mbs_only_flag = br.read_bit()?;
+    if frame_mbs_only_flag == 0 {
+        br.read_bit()?; // mb_adaptive_frame_field_flag
+    }
+    br.read_bit()?; // direct_8x8_inference_flag
+    let mut crop_l = 0u32;
+    let mut crop_r = 0u32;
+    let mut crop_t = 0u32;
+    let mut crop_b = 0u32;
+    if br.read_bit()? == 1 {
+        // frame_cropping_flag
+        crop_l = br.read_ue()?;
+        crop_r = br.read_ue()?;
+        crop_t = br.read_ue()?;
+        crop_b = br.read_ue()?;
+    }
+    let width = (pic_width_in_mbs_minus1 + 1) * 16;
+    let height = (pic_height_in_map_units_minus1 + 1) * 16 * (2 - frame_mbs_only_flag);
+    // 裁剪单位（亮度）：取决于 chroma_format_idc（此处按 4:2:0 = 2 处理）。
+    let crop_unit_x = if chroma_format_idc == 0 { 1 } else { 2 };
+    let crop_unit_y = if chroma_format_idc == 0 {
+        2
+    } else {
+        2 * (2 - frame_mbs_only_flag)
+    };
+    let width = width.saturating_sub((crop_l + crop_r) * crop_unit_x);
+    let height = height.saturating_sub((crop_t + crop_b) * crop_unit_y);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height))
+}
+
 /// YUV420 输出缓冲的色度排布（不同平台/编解码器不同）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ChromaLayout {

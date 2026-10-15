@@ -13,12 +13,16 @@
 //!   解码器会缓冲多帧才输出，直播追帧场景不可接受。
 //! - 同步 \`dequeue_*\` 模式（非异步 callback）：解码线程自持自用，最简单可控。
 //!
+//! **两阶段初始化**（真机实测修正）：\`configure\` **必须**提供 width/height（NDK 要求，
+//! 解码器不会自行从 SPS 推导——缺失会返回 \`ErrorUnknown\`）。故 \`new()\` 只创建 codec，
+//! 首个含 SPS 的访问单元到达时解析出宽高再 configure + start。
+//!
 //! 输出布局：ByteBuffer 的 YUV 排布**设备/编解码器相关**（NDK 文档明确警告不可移植）。
 //! 本实现按输出 MediaFormat 的 \`color-format\` 键分支解析：半平面（NV12/NV21，最常见）
 //! 与平面（I420）；\`stride\` / \`slice-height\` 用于逐行定位。**Y 平面严格正确**（扫码
 //! 只需亮度）；U/V 在未知格式下退回中性灰 128（预览偏灰，不影响扫码识别）。
 
-use crate::decode::{ChromaLayout, DecodedFrame, VideoDecoder};
+use crate::decode::{sps_dimensions, ChromaLayout, DecodedFrame, VideoDecoder};
 use anodecs::{
     CodecOutputBuffer, ColorFormat, DequeueInputError, DequeueOutputError, MediaCodec, MediaFormat,
 };
@@ -36,35 +40,45 @@ struct OutLayout {
 }
 
 pub struct MediaCodecDecoder {
+    /// 创建后即存在；configure 延迟到解析出 SPS 宽高。
     codec: MediaCodec,
+    started: bool,
     layout: Option<OutLayout>,
 }
 
 impl MediaCodecDecoder {
-    /// 创建 H.264 硬解器。对应桌面端 \`MfDecoder::new()\`。
+    /// 创建 H.264 解码器句柄（**尚未 configure/start**）。对应桌面端 \`MfDecoder::new()\`。
     pub fn new() -> Result<Self, String> {
-        let mut codec = MediaCodec::create_decoder("video/avc")
+        let codec = MediaCodec::create_decoder("video/avc")
             .map_err(|e| format!("MediaCodec 创建 H.264 解码器失败: {e:?}"))?;
-        let mut fmt = MediaFormat::new().map_err(|e| format!("MediaFormat 创建失败: {e:?}"))?;
-        if !fmt.set_string("mime", "video/avc") {
-            return Err("MediaCodec 设置 mime=video/avc 失败".to_string());
-        }
-        // 低延迟（API 30+ 生效；低版本返回 false 但无害）。值类型 i32=1。
-        // 键名 "low-latency" 对应 AMEDIAFORMAT_KEY_LOW_LATENCY。
-        let _ = fmt.set_i32("low-latency", 1);
-        // 不设宽高 / color-format：宽高由解码器从 SPS 推导，输出布局由厂商决定
-        // （后续按 color-format 解析）。
-        codec
-            .init(&fmt, None, 0)
-            .map_err(|e| format!("MediaCodec 配置失败: {e:?}"))?;
-        codec
-            .start()
-            .map_err(|e| format!("MediaCodec 启动失败: {e:?}"))?;
-        log::info!("MediaCodec H.264 解码器已启动（ByteBuffer 模式，低延迟请求）");
+        log::info!("MediaCodec H.264 解码器已创建（等待 SPS 后 configure）");
         Ok(Self {
             codec,
+            started: false,
             layout: None,
         })
+    }
+
+    /// 用解析出的宽高 configure + start（仅一次）。
+    fn start_with(&mut self, w: u32, h: u32) -> Result<(), String> {
+        let mut fmt = MediaFormat::new().map_err(|e| format!("MediaFormat 创建失败: {e:?}"))?;
+        // 注意：anodecs 0.1.11 把 AMediaFormat_setString/setInt32 的 FFI 声明为 -> bool，
+        // 但 NDK 头里二者均返回 **void**——返回值是寄存器残留垃圾（随机真/假），
+        // **不可用于判成败**（真机实测：检查 set_string 返回值会误判初始化失败）。
+        let _ = fmt.set_string("mime", "video/avc");
+        let _ = fmt.set_i32("width", w as i32);
+        let _ = fmt.set_i32("height", h as i32);
+        // 低延迟（API 30+ 生效；低版本忽略）。值类型 i32=1。
+        let _ = fmt.set_i32("low-latency", 1);
+        self.codec
+            .init(&fmt, None, 0)
+            .map_err(|e| format!("MediaCodec 配置失败（{w}x{h}）: {e:?}"))?;
+        self.codec
+            .start()
+            .map_err(|e| format!("MediaCodec 启动失败: {e:?}"))?;
+        self.started = true;
+        log::info!("MediaCodec H.264 解码器已启动（{w}x{h}，ByteBuffer 模式，低延迟请求）");
+        Ok(())
     }
 
     /// 喂入一个 Annex-B 访问单元（可含 SPS/PPS + IDR 等）到一个输入缓冲。
@@ -156,6 +170,13 @@ impl VideoDecoder for MediaCodecDecoder {
         if annexb.is_empty() {
             return Ok(Vec::new());
         }
+        // 首次：从 SPS 解析宽高并 configure + start。
+        if !self.started {
+            let (w, h) = sps_dimensions(annexb).ok_or_else(|| {
+                "MediaCodec：首个访问单元中未找到可解析的 SPS（无法确定尺寸）".to_string()
+            })?;
+            self.start_with(w, h)?;
+        }
         self.feed(annexb, ts_ms)?;
         self.drain()
     }
@@ -165,7 +186,7 @@ impl VideoDecoder for MediaCodecDecoder {
     }
 }
 
-/// 输出缓冲 → 紧凑 I420（像素提取复用跨平台纯函数 `decode::planes_from_yuv420`，
+/// 输出缓冲 → 紧凑 I420（像素提取复用跨平台纯函数 \`decode::planes_from_yuv420\`，
 /// 其 Y 路径可被桌面单元测试覆盖）。
 fn build_frame(l: &OutLayout, data: &[u8]) -> DecodedFrame {
     let layout = match l.color {
