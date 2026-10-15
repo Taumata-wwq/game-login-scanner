@@ -2057,6 +2057,24 @@ fn take_captcha_result(state: tauri::State<'_, AppState>) -> Option<String> {
 /// 初始化文件日志与 panic 记录。GUI 进程无控制台，闪退 / 异常只有落到文件
 /// 才能事后排查（`%APPDATA%\游戏扫码器\game-login-scanner.log`，超过 2MB 轮转为 .old）。
 fn init_file_logging() {
+    // Android：日志走 logcat（`adb logcat -s GameScanner`），真机联调主要通道；
+    // 文件日志依赖 AppConfig::path()（Android 上的落点不保证可用），移动端不启用。
+    #[cfg(target_os = "android")]
+    {
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Info)
+                .with_tag("GameScanner"),
+        );
+    }
+    // 桌面：文件日志（用户回传用）+ panic 落盘。
+    #[cfg(not(target_os = "android"))]
+    init_file_logging_desktop();
+}
+
+/// 桌面端文件日志（Windows 专用；Android 走 logcat，见 [`init_file_logging`]）。
+#[cfg(not(target_os = "android"))]
+fn init_file_logging_desktop() {
     let path = AppConfig::path().with_file_name("game-login-scanner.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
