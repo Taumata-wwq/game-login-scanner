@@ -180,4 +180,70 @@ Add-Prop "abiList"    "abiList=$AbiList"
 Add-Prop "archList"   "archList=$ArchList"
 Add-Prop "targetList" "targetList=$TargetList"
 
+Write-Host "== 8. release 签名配置（真机安装 / 分发用） =="
+# tauri 默认只给 debug 包签名（debug keystore）；release 包不加签名配置会产出
+# 无法安装的 unsigned APK。这里生成一个本地 release keystore（不入库，位于 gen/ 下）
+# 并把签名配置写进 app/build.gradle.kts（幂等：已存在则跳过，不覆盖已有 keystore）。
+$ksPath = Join-Path $gen "game-scanner-release.jks"
+$ksProps = Join-Path $gen "keystore.properties"
+$keytool = Join-Path (Split-Path $JavaHomeAscii -Parent) "Java21/bin/keytool.exe"
+if (-not (Test-Path $keytool)) { $keytool = "G:/Java21/bin/keytool.exe" }
+
+if ((Test-Path $ksProps) -and (Test-Path $ksPath)) {
+    Write-Host "  = keystore 已存在（跳过生成）"
+} elseif (Test-Path $keytool) {
+    $pass = -join ((1..24) | ForEach-Object { "0123456789abcdefghijklmnopqrstuvwxyz"[(Get-Random -Max 36)] })
+    & $keytool -genkeypair -v -keystore $ksPath -alias game-scanner `
+        -keyalg RSA -keysize 2048 -validity 10000 `
+        -storepass $pass -keypass $pass `
+        -dname "CN=Game Login Scanner, OU=Dev, O=Taumata, L=CN, ST=CN, C=CN" 2>&1 | Out-Null
+    @(
+        "storeFile=game-scanner-release.jks",
+        "storePassword=$pass",
+        "keyAlias=game-scanner",
+        "keyPassword=$pass"
+    ) | Set-Content -Path $ksProps -Encoding ASCII
+    Write-Host "  + 生成 game-scanner-release.jks + keystore.properties（本地签名用，勿入库）"
+} else {
+    Write-Host "  ! 未找到 keytool，跳过签名配置"
+}
+
+if (Test-Path $ksProps) {
+    $gradleTxt = Get-Content $appGradle -Raw
+    if ($gradleTxt -notmatch "keystore.properties") {
+        $lines = Get-Content $appGradle
+        $out = New-Object System.Collections.ArrayList
+        foreach ($l in $lines) {
+            if ($l -match "^android \{") {
+                [void]$out.Add('// release 签名参数（由 scripts/android/patch-gen.ps1 生成；不入库）')
+                [void]$out.Add('val keystoreProperties = Properties().apply {')
+                [void]$out.Add('    val f = file("keystore.properties")')
+                [void]$out.Add('    if (f.exists()) { f.inputStream().use { load(it) } }')
+                [void]$out.Add('}')
+                [void]$out.Add('')
+            }
+            [void]$out.Add($l)
+            if ($l -match '^\s+namespace = ') {
+                [void]$out.Add('    signingConfigs {')
+                [void]$out.Add('        if (keystoreProperties.getProperty("storeFile") != null) {')
+                [void]$out.Add('            create("release") {')
+                [void]$out.Add('                storeFile = file(keystoreProperties.getProperty("storeFile"))')
+                [void]$out.Add('                storePassword = keystoreProperties.getProperty("storePassword")')
+                [void]$out.Add('                keyAlias = keystoreProperties.getProperty("keyAlias")')
+                [void]$out.Add('                keyPassword = keystoreProperties.getProperty("keyPassword")')
+                [void]$out.Add('            }')
+                [void]$out.Add('        }')
+                [void]$out.Add('    }')
+            }
+            if ($l -match '^\s+getByName\("release"\) \{') {
+                [void]$out.Add('            signingConfig = signingConfigs.findByName("release")')
+            }
+        }
+        $out | Set-Content $appGradle
+        Write-Host "  + app/build.gradle.kts 已加签名配置（signingConfigs.release）"
+    } else {
+        Write-Host "  = 签名配置已存在"
+    }
+}
+
 Write-Host "全部补丁完成。"

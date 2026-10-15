@@ -424,6 +424,15 @@
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
   }
   /* 画面上浮控件：fps 左上、重置右上。 */
+  /* 预览区即时提示：解释「拖拽/滚轮没反应」的原因（无画面 / 已是完整视图）。 */
+  .vp-toast {
+    position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+    padding: 5px 10px; border-radius: 999px; background: rgba(8, 10, 14, 0.74);
+    color: #e6edf5; font-size: 11px; white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity var(--m-dur-2, 240ms) var(--m-ease, ease);
+    z-index: 6;
+  }
+  .vp-toast.on { opacity: 1; }
   .vp-stage .fps {
     position: absolute; left: 6px; top: 6px; z-index: 5;
     height: 20px; padding: 0 6px; display: grid; place-items: center;
@@ -600,6 +609,49 @@
   /* 移动端隐藏"窗口置顶"设置项（无意义）。 */
   html.mobile #alwaysOnTop { display: none; }
   html.mobile .opt-row:has(#alwaysOnTop) { display: none; }
+
+  /* ---- 摄像头扫码模式：中间显示区平滑扩展，覆盖账号 / 游戏区服区 ----
+     保留顶栏（52px）与底部操作栏（64px），其余高度全部让给取景区。
+     .acct-area 的高度由 JS 写入具体像素值驱动过渡（flex-basis 不能平滑动画）。 */
+  html.mobile.m-camera .acct-area {
+    flex: none; overflow: hidden; opacity: 0; pointer-events: none;
+    padding-top: 0; padding-bottom: 0;
+    transition: height var(--m-dur-3) var(--m-ease),
+                opacity var(--m-dur-2) var(--m-ease),
+                padding var(--m-dur-3) var(--m-ease);
+  }
+  html.mobile.m-camera .viewport { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  html.mobile.m-camera .vp-fit { flex: 1 1 auto; min-height: 0; display: flex; }
+  html.mobile.m-camera .vp-stage { height: 100% !important; }
+  html.mobile.m-camera #mBtnCameraScan { color: var(--primary-bg); background: var(--m-layer-1); }
+  .m-camera-view {
+    position: absolute; inset: 0; z-index: 5; display: flex;
+    flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+    background: #0c0c0c; pointer-events: none;
+  }
+  .m-camera-view[hidden] { display: none; }
+  .mc-frame {
+    position: relative; width: 58%; max-width: 250px; aspect-ratio: 1 / 1;
+    border: 1.5px solid rgba(150, 180, 210, 0.4); border-radius: var(--m-r-md);
+    overflow: hidden;
+  }
+  .mc-frame::before, .mc-frame::after {
+    content: ""; position: absolute; width: 22px; height: 22px;
+    border: 2.5px solid var(--primary-bg);
+  }
+  .mc-frame::before { left: -1px; top: -1px; border-right: 0; border-bottom: 0; border-radius: var(--m-r-md) 0 0 0; }
+  .mc-frame::after { right: -1px; bottom: -1px; border-left: 0; border-top: 0; border-radius: 0 0 var(--m-r-md) 0; }
+  .mc-scan {
+    position: absolute; left: 6%; right: 6%; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--primary-bg), transparent);
+    animation: mc-scan 1.9s var(--m-ease) infinite;
+  }
+  @keyframes mc-scan {
+    0% { top: 6%; opacity: 0; } 12% { opacity: 1; }
+    88% { opacity: 1; } 100% { top: 94%; opacity: 0; }
+  }
+  .mc-tip { font-size: var(--m-fs-md); color: var(--muted); text-align: center; line-height: 1.7; }
+  .mc-tip span { display: block; font-size: var(--m-fs-xs); color: var(--faint); margin-top: 5px; }
 
   /* 账号区（54px 行高 + 统一圆角；按压反馈与选中过渡） */
   html.mobile .acct-area { flex: 1 1 auto; min-height: 0; flex-direction: column; padding: 10px; }
@@ -955,10 +1007,19 @@
               <img id="vpCoverImg" alt="" referrerpolicy="no-referrer">
               <div class="vp-cover-tip" id="vpCoverTip"></div>
             </div>
+            <span class="vp-toast" id="vpToast"></span>
             <span class="fps" id="fpsMeter" title="预览帧率（点击暂停/继续）。直播模式跟随直播流帧率，上限为设置中的「显示区域帧率」">--</span>
             <button class="region-reset" id="btnRegionReset" title="重置视图">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/><path d="M3 12h18"/></svg>
             </button>
+            <!-- 摄像头取景层（移动端「摄像头扫码」模式：中间区域扩展覆盖账号/区服区） -->
+            <div class="m-camera-view" id="mCameraView" hidden>
+              <div class="mc-frame"><span class="mc-scan"></span></div>
+              <div class="mc-tip">
+                将游戏登录二维码对准取景框
+                <span id="mcCamTip">摄像头取帧将在后续版本接入</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1265,6 +1326,10 @@
   let stoppingTargets = new Set();
   // 「扫码成功后自动停止其他直播间」（设置项；renderOptions 从配置同步）。
   let stopOthersOnScanSuccess = true;
+  // 移动端「摄像头扫码」取景模式：中间显示区扩展覆盖账号 / 游戏区服区。
+  // 纯 UI 模式——进入/退出都不触碰任何扫描会话（直播 / 屏幕各路照常运行）。
+  let cameraMode = false;
+  let cameraSavedH = 0;   // 进入前 .acct-area 的高度（退出时按此值平滑还原）
   let filter = 'official';            // 账号筛选：official | bilibili（默认官服）
   // 扫描区域（实时监视器）
   let preview = null;                 // {mon:{x,y,w,h}} 预览所在显示器信息
@@ -1272,6 +1337,12 @@
   // 目标视口：鼠标/滚轮直接设置它，view 每帧快速追向它（把瞬时跳变变为平滑滑动，
   // 削弱起手/缩放时的卡顿感）。重置视图也只需设目标值。
   let viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+  // 只读调试探针：供浏览器预览下的自动化验证读取视口状态（拖拽/缩放是否真的生效）。
+  // 画布内容本身不可靠——预览帧持续更新会让像素哈希自然变化。
+  window.__viewState = () => ({
+    target: { ...viewT }, shown: { ...view }, hasPreview: !!preview,
+    mon: preview && preview.mon ? { ...preview.mon } : null,
+  });
 
   const $ = (id) => document.getElementById(id);
   const logEl = $('log');
@@ -2387,6 +2458,13 @@
   function updateVpInfo() {
     const ttl = $('vpTitle'), sub = $('vpSub');
     if (!ttl) return;
+    // 摄像头取景模式：标题栏改为「摄像头扫码」（顶栏标题同步），直播会话状态不变。
+    if (cameraMode) {
+      ttl.textContent = '摄像头扫码';
+      sub.textContent = '取景中';
+      if (window.updateMobileTitle) window.updateMobileTitle('摄像头扫码', '取景中');
+      return;
+    }
     if (!activeLiveId) {
       ttl.textContent = '屏幕预览';
       sub.textContent = '未连接直播';
@@ -3502,6 +3580,18 @@
   // ---------- 拖拽 / 缩放 ----------
   let panStart = null;
   let viewDirty = false;
+  // 预览区即时提示（解释「拖拽/滚轮没反应」）：无画面 / 已是完整视图两种情形。
+  let vpToastTimer = null;
+  function vpToast(msg) {
+    const el = $('vpToast');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.add('on');
+    clearTimeout(vpToastTimer);
+    vpToastTimer = setTimeout(() => el.classList.remove('on'), 1700);
+  }
+  // 画面已完整可见（scale≤1 且非 cover 裁切）时，平移没有可移动余量。
+  function panIsNoop() { return viewT.scale <= 1.02 && !coverFill; }
   function enterDrag() {
     if (dragging) return;
     dragging = true;
@@ -3510,9 +3600,11 @@
   }
   canvas.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
+    if (!preview) { vpToast('先点「屏幕扫码」授权捕获，再拖动画面'); return; }
+    if (panIsNoop()) vpToast('画面已完整显示，滚轮放大后可拖动');
     panStart = { x: e.clientX, y: e.clientY };
     canvas.classList.add('dragging');
-    if (preview) enterDrag();
+    enterDrag();
   });
   window.addEventListener('mousemove', (e) => {
     if (!panStart) return;
@@ -3540,7 +3632,7 @@
 
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    if (!preview) return;
+    if (!preview) { vpToast('先点「屏幕扫码」授权捕获，再缩放画面'); return; }
     const rect = canvas.getBoundingClientRect();
     const sx = ((e.clientX - rect.left) * canvas.width) / rect.width;
     const sy = ((e.clientY - rect.top) * canvas.height) / rect.height;
@@ -3596,6 +3688,18 @@
   // ---------- 渲染 ----------
   function renderScan() {
     const btn = $('btnStart');
+    // 摄像头取景模式：按钮语义优先变为「停止摄像扫描」——点击只退出取景，
+    // 不停止任何正在运行的扫描（屏幕 / 直播各路状态不受影响）。
+    if (cameraMode) {
+      btn.classList.remove('running');
+      btn.innerHTML = '<span>停止摄像扫描</span>';
+      const mb0 = $('mBtnScan');
+      if (mb0) {
+        mb0.classList.remove('running');
+        mb0.innerHTML = '<span>停止摄像扫描</span>';
+      }
+      return;
+    }
     const t = activeScanTarget();
     const running = !!t && scanningTargets.has(t);
     const stopping = !!t && stoppingTargets.has(t);
@@ -3976,6 +4080,7 @@
 
     // --- 底部栏 ---
     $("mBtnScan").addEventListener("click", async () => {
+      if (cameraMode) { exitCameraMode(); return; }
       if (!(await ensureScreenCapture())) return;
       $("btnStart").click();
     });
@@ -3986,9 +4091,47 @@
       renderScan();
       setTimeout(() => $("btnStart").click(), 50);
     });
-    $("mBtnCameraScan").addEventListener("click", () => {
-      log("摄像头扫码将在后续版本提供", "info");
-      invoke("frontend_log", { level: "info", msg: "移动端：请求摄像头扫码（待实现）" }).catch(() => {});
+    // --- 摄像头扫码取景模式（进入 / 退出） ---
+    // 纯视图切换：把 .acct-area（账号 + 游戏/区服选择）高度平滑收到 0，
+    // 让出的高度全部交给中间显示区；顶栏与底部操作栏保持不动。
+    const acctArea = document.querySelector(".acct-area");
+    const camView = $("mCameraView");
+    const camBtn = $("mBtnCameraScan");
+    function enterCameraMode() {
+      if (cameraMode) return;
+      cameraSavedH = acctArea ? acctArea.getBoundingClientRect().height : 0;
+      cameraMode = true;
+      if (acctArea) acctArea.style.height = cameraSavedH + "px";
+      mobileRoot.classList.add("m-camera");
+      requestAnimationFrame(() => { if (acctArea) acctArea.style.height = "0px"; });
+      if (camView) camView.removeAttribute("hidden");
+      if (camBtn) camBtn.classList.add("on");
+      updateVpInfo();
+      renderScan();
+      log("已进入摄像头取景（取帧能力将在后续版本接入）", "info");
+      invoke("frontend_log", { level: "info", msg: "移动端：进入摄像头扫码取景模式" }).catch(() => {});
+    }
+    window.exitCameraMode = function exitCameraMode() {
+      if (!cameraMode) return;
+      cameraMode = false;
+      if (camView) camView.setAttribute("hidden", "");
+      if (camBtn) camBtn.classList.remove("on");
+      renderScan();
+      updateVpInfo();
+      const finish = () => {
+        if (acctArea) acctArea.style.height = "";
+        mobileRoot.classList.remove("m-camera");
+        if (acctArea) acctArea.removeEventListener("transitionend", finish);
+      };
+      if (acctArea) {
+        acctArea.addEventListener("transitionend", finish);
+        acctArea.style.height = cameraSavedH + "px";   // 平滑还原到进入前的高度
+        setTimeout(finish, 420);                        // 兜底（transitionend 未触发时）
+      } else finish();
+    };
+    camBtn.addEventListener("click", () => {
+      if (cameraMode) window.exitCameraMode();
+      else enterCameraMode();
     });
 
 
@@ -4028,10 +4171,11 @@
       // 单指平移 / 双指捏合缩放
       let t0 = null, t1 = null, pinchDist0 = 0, scale0 = 1;
       cv.addEventListener("touchstart", (e) => {
-        if (!preview) return;
+        if (!preview) { vpToast('先点「屏幕扫码」授权捕获，再捏合缩放'); return; }
         if (e.touches.length === 1) {
+          if (panIsNoop()) vpToast('画面已完整显示，双指放大后可拖动');
           t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-          if (preview) enterDrag();
+          enterDrag();
         } else if (e.touches.length === 2) {
           t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
           t1 = { x: e.touches[1].clientX, y: e.touches[1].clientY };

@@ -115,7 +115,9 @@
     dv.setInt32(16, 1920, true);
     dv.setInt32(20, 1080, true);
     var px = new Uint8ClampedArray(buf, 24);
-    frameTick++;
+    // 测试用开关：冻结动画后每帧内容完全一致，可用画布哈希判定「平移/缩放是否真的生效」
+    // （否则动画本身就会让哈希变化，验证不可信）。
+    if (!window.__freezePreview) frameTick++;
     var blockX = (frameTick * 3) % (w + 24) - 12;
     for (var y = 0; y < h; y++) {
       for (var x = 0; x < w; x++) {
