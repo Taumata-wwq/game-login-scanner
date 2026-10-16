@@ -9,19 +9,25 @@
 
 use std::sync::OnceLock;
 
-use jni::objects::{Global, JObject};
+use jni::objects::{Global, JClass};
 use jni::JavaVM;
 
-/// HttpBridge 实例的 JavaVM + 全局引用（Kotlin 初始化时注册，进程内单例）。
-static BRIDGE: OnceLock<Option<(JavaVM, Global<JObject>)>> = OnceLock::new();
+/// HttpBridge 的 JavaVM + **类**全局引用（Kotlin 初始化时注册，进程内单例）。
+///
+/// 用类引用 + `call_static_method`：Kotlin `@JvmStatic fun request` 生成的是静态方法。
+static BRIDGE: OnceLock<Option<(JavaVM, Global<JClass>)>> = OnceLock::new();
 
-/// Kotlin `HttpBridge.nativeInit()`：注册 JavaVM 与实例全局引用。
-pub fn init_from_env(env: &mut jni::Env, this: &JObject) {
+/// Kotlin `HttpBridge.nativeInit()`：注册 JavaVM 与类全局引用。
+pub fn init_from_env(env: &mut jni::Env, this: &jni::objects::JObject) {
     let vm = match env.get_java_vm() {
         Ok(v) => v,
         Err(_) => return,
     };
-    let gref = match env.new_global_ref(this) {
+    let class = match env.get_object_class(this) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let gref = match env.new_global_ref(class) {
         Ok(g) => g,
         Err(_) => return,
     };
@@ -43,6 +49,7 @@ pub fn request(
         .and_then(|o| o.as_ref())
         .ok_or("系统 TLS 桥未初始化（HttpBridge.nativeInit 未调用）")?;
     vm.attach_current_thread(|env| -> Result<String, jni::errors::Error> {
+        use jni::objects::JObject;
         let jm = env.new_string(method)?;
         let ju = env.new_string(url)?;
         let jh = env.new_string(headers_json)?;
@@ -50,7 +57,7 @@ pub fn request(
             Some(b) => JObject::from(env.new_string(b)?),
             None => JObject::null(),
         };
-        let res = env.call_method(
+        let res = env.call_static_method(
             &**gref,
             jni_str!("request"),
             jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),

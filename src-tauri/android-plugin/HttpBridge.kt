@@ -1,6 +1,7 @@
 package com.taumata.scanner.plugins
 
 import android.util.Base64
+import androidx.annotation.Keep
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -16,6 +17,7 @@ import java.net.URL
  * 接口：全部以字符串进出，返回 JSON（status/headers/bodyBase64 或 error）。
  * Rust 侧 [crate::android::http_bridge] 经 JNI 调用（同步）。
  */
+@Keep
 object HttpBridge {
 
     init {
@@ -37,6 +39,7 @@ object HttpBridge {
      * @return JSON：成功 {"status":200,"headers":{...},"bodyBase64":"..."}；
      *         失败 {"error":"..."}
      */
+    @Keep
     @JvmStatic
     fun request(method: String, url: String, headersJson: String, body: String?): String {
         return try {
