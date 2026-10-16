@@ -31,6 +31,7 @@ node_modules/
 # 例外：Android 构建必需的补丁脚本（gen/android 不入库，需脚本固化本地化修改）。
 !/scripts/android/
 !/scripts/android/patch-gen.ps1
+!/scripts/android/channel-proguard-rules.pro
 # tests/：忽略「内容」而非整个目录，白名单固化 CI 质量门测试（否则 git 不进入被忽略目录）。
 /src-tauri/tests/*
 !/src-tauri/tests/unit.rs

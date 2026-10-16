@@ -209,6 +209,54 @@ if (-not (Test-Path $chanRules)) {
     Write-Host "  + app/proguard-rules.pro 渠道路段已刷新"
 }
 
+Write-Host "== 5d. 渠道 SDK 二进制同步（vendor/channel_sdk -> app/libs，可选）=="
+# 与 5b 的 mi_sdk（源码模块）不同：vivo 等厂商只提供 jar/aar + .so 二进制，
+# 无法以 Gradle 模块引入，改为放进 app/libs 并声明 fileTree 依赖。
+# 目录结构沿用参考项目 app/libs：*.jar/*.aar 平铺，.so 按 ABI 子目录放（需
+# sourceSets.jniLibs 指向 libs，否则 .so 不进 APK → 运行时 UnsatisfiedLinkError）。
+$sdkSrc = Join-Path $root "vendor/channel_sdk"
+$sdkDst = Join-Path $gen "app/libs"
+if (-not (Test-Path $sdkSrc)) {
+    Write-Host "  ! 未找到 vendor/channel_sdk（跳过；仅 mi_sdk 渠道可用）"
+} else {
+    New-Item -ItemType Directory -Force -Path $sdkDst | Out-Null
+    Get-ChildItem -Path $sdkSrc -Recurse -File | ForEach-Object {
+        $rel = $_.FullName.Substring($sdkSrc.Length).TrimStart('\', '/')
+        $dst = Join-Path $sdkDst $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
+        Copy-Item $_.FullName -Destination $dst -Force
+        Write-Host "  -> libs/$rel"
+    }
+
+    $ag2Path = Join-Path $gen "app/build.gradle.kts"
+    $ft = 'implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))'
+    $ag2 = [System.IO.File]::ReadAllText($ag2Path)
+    # 换行符跟随文件（tauri 生成的是 LF；早期版本曾被改写为 CRLF，不能写死）。
+    $nl2 = if ($ag2.Contains("`r`n")) { "`r`n" } else { "`n" }
+    if ($ag2 -notmatch [regex]::Escape('fileTree(mapOf("dir" to "libs"')) {
+        $ag2 = $ag2.Replace("dependencies {", "dependencies {" + $nl2 + "    $ft")
+        [System.IO.File]::WriteAllText($ag2Path, $ag2, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "  + app/build.gradle.kts: fileTree(libs) 依赖"
+    } else {
+        Write-Host "  = fileTree(libs) 依赖已存在"
+    }
+    $ag2 = [System.IO.File]::ReadAllText($ag2Path)
+    if ($ag2 -notmatch "jniLibs.srcDirs") {
+        $srcSets = @(
+            "    sourceSets {",
+            '        getByName("main") {',
+            '            jniLibs.srcDirs("libs")',
+            "        }",
+            "    }"
+        ) -join $nl2
+        $ag2 = $ag2.Replace("android {" + $nl2, "android {" + $nl2 + $srcSets + $nl2, 1)
+        [System.IO.File]::WriteAllText($ag2Path, $ag2, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "  + app/build.gradle.kts: jniLibs.srcDirs(libs)"
+    } else {
+        Write-Host "  = jniLibs 配置已存在"
+    }
+}
+
 Write-Host "== 6. AndroidManifest：屏幕捕获权限与前台服务声明 =="
 $manifest = Join-Path $gen "app/src/main/AndroidManifest.xml"
 $c = Get-Content $manifest -Raw
@@ -272,6 +320,76 @@ if ($c -notmatch "com\.taumata\.scanner\.plugins\.ScreenCaptureService") {
 if ($changed) {
     [System.IO.File]::WriteAllText($manifest, $c, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "  Manifest 已更新"
+}
+
+Write-Host "== 6b. AndroidManifest：渠道 SDK 声明（vivo） =="
+# vivo 联合 SDK 以 jar 形式引入，组件/权限不会随 aar 清单自动合并，必须手写到主清单：
+#   - 权限 vivo.game.permission.OPEN_JUMP_INTENTS
+#   - meta-data vivo_union_sdk（SDK 版本号）
+#   - UnionActivity + vivounion://openjump 深链（SDK 登录 UI 容器）
+# 声明内容照参考项目 AndroidManifest.xml（vivo 段）。
+$mf2 = Join-Path $gen "app/src/main/AndroidManifest.xml"
+$mc = [System.IO.File]::ReadAllText($mf2)
+$nl2 = if ($mc.Contains("`r`n")) { "`r`n" } else { "`n" }
+$mChg = $false
+
+if ($mc -notmatch "vivo\.game\.permission\.OPEN_JUMP_INTENTS") {
+    $mc = $mc.Replace(
+        '    <uses-permission android:name="android.permission.INTERNET" />',
+        '    <uses-permission android:name="vivo.game.permission.OPEN_JUMP_INTENTS" />' + $nl2 +
+        '    <uses-permission android:name="android.permission.INTERNET" />'
+    )
+    $mChg = $true
+    Write-Host "  + vivo 权限（OPEN_JUMP_INTENTS）"
+} else {
+    Write-Host "  = vivo 权限已存在"
+}
+
+if ($mc -notmatch 'android:name="vivo_union_sdk"') {
+    $meta = @(
+        '        <meta-data',
+        '            android:name="vivo_union_sdk"',
+        '            android:value="4.6.0.1" />',
+        '    </application>'
+    ) -join $nl2
+    $mc = $mc.Replace('    </application>', $meta)
+    $mChg = $true
+    Write-Host "  + vivo meta-data（vivo_union_sdk=4.6.0.1）"
+} else {
+    Write-Host "  = vivo meta-data 已存在"
+}
+
+if ($mc -notmatch "com\.vivo\.unionsdk\.ui\.UnionActivity") {
+    $act = @(
+        '        <activity',
+        '            android:name="com.vivo.unionsdk.ui.UnionActivity"',
+        '            android:configChanges="orientation|keyboardHidden|navigation|screenSize"',
+        '            android:exported="true"',
+        '            android:theme="@android:style/Theme.Dialog">',
+        '            <intent-filter>',
+        '                <action android:name="android.intent.action.VIEW" />',
+        '',
+        '                <category android:name="android.intent.category.DEFAULT" />',
+        '                <category android:name="android.intent.category.BROWSABLE" />',
+        '',
+        '                <data',
+        '                    android:host="union.vivo.com"',
+        '                    android:path="/openjump"',
+        '                    android:scheme="vivounion" />',
+        '            </intent-filter>',
+        '        </activity>',
+        '    </application>'
+    ) -join $nl2
+    $mc = $mc.Replace('    </application>', $act)
+    $mChg = $true
+    Write-Host "  + vivo UnionActivity 声明"
+} else {
+    Write-Host "  = vivo UnionActivity 已存在"
+}
+
+if ($mChg) {
+    [System.IO.File]::WriteAllText($mf2, $mc, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  Manifest（渠道段）已更新"
 }
 
 Write-Host "== 7. gradle.properties：ABI 裁剪（APK 体积） =="

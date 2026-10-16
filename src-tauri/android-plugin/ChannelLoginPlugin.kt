@@ -7,6 +7,8 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import com.vivo.unionsdk.open.VivoAccountCallback
+import com.vivo.unionsdk.open.VivoUnionSDK
 import com.xiaomi.gamecenter.sdk.MiCommplatform
 import com.xiaomi.gamecenter.sdk.MiErrorCode
 import com.xiaomi.gamecenter.sdk.OnInitProcessListener
@@ -42,6 +44,7 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
         val args = invoke.parseArgs(ChannelLoginArgs::class.java)
         when (args.channel) {
             "xiaomi" -> loginXiaomi(invoke)
+            "vivo" -> loginVivo(invoke)
             else -> invoke.reject("暂不支持的渠道：${args.channel}")
         }
     }
@@ -83,5 +86,51 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
                 activity.runOnUiThread { invoke.reject("小米登录失败（code=$code）") }
             }
         }
+    }
+
+    // ---------- vivo（照参考项目 login/Vivo.java） ----------
+
+    /**
+     * vivo 渠道登录。
+     *
+     * 链路与参考项目一致：initSdk(appKey) → registerAccountCallback → login
+     * （SDK 自弹登录 UI）→ onVivoAccountLogin 回调取 (uid, authtoken)，
+     * 由 Rust 侧以 channel_id=19 + `{"authtoken":..}` 换取 combo 凭证。
+     *
+     * appKey 沿用参考项目 `Constant.VIVO_APP_KEY`（渠道服固定值）。
+     */
+    private fun loginVivo(invoke: Invoke) {
+        // 参考项目传 BuildConfig.DEBUG；本应用统一以非调试模式初始化（登录链路一致，
+        // 该标志只影响 SDK 自有的日志与调试提示）。
+        VivoUnionSDK.initSdk(activity, VIVO_APP_KEY, false)
+        VivoUnionSDK.registerAccountCallback(activity, object : VivoAccountCallback {
+            override fun onVivoAccountLogin(p0: String?, uid: String?, token: String?) {
+                if (uid == null || token == null) {
+                    activity.runOnUiThread { invoke.reject("vivo 登录返回空凭证") }
+                    return
+                }
+                val cred = JSONObject()
+                cred.put("authtoken", token)
+                val obj = JSObject()
+                obj.put("cred", cred.toString())
+                obj.put("uid", uid)
+                obj.put("name", uid)
+                activity.runOnUiThread { invoke.resolve(obj) }
+            }
+
+            override fun onVivoAccountLogout(code: Int) {
+                activity.runOnUiThread { invoke.reject("vivo 账号登出（code=$code）") }
+            }
+
+            override fun onVivoAccountLoginCancel() {
+                activity.runOnUiThread { invoke.reject("vivo 登录已取消") }
+            }
+        })
+        VivoUnionSDK.login(activity)
+    }
+
+    companion object {
+        /** vivo 渠道 appKey（参考项目 Constant.VIVO_APP_KEY）。 */
+        private const val VIVO_APP_KEY = "94c93e8ac604d1909943862f12803ac9"
     }
 }
