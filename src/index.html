@@ -3826,6 +3826,12 @@
           scanningTargets.delete(t);
           stoppingTargets.delete(t);
         }
+        // 摄像头扫码成功：自动退出取景模式回到主界面（2026-10-17 用户实测需求）。
+        // exitCameraMode 内部幂等（非取景态直接返回），且会 stopCamera
+        // （停 camera 扫描 + 停物理相机）并平滑还原布局。
+        if (p.type === 'success' && t === 'camera') {
+          window.exitCameraMode && window.exitCameraMode();
+        }
         // 扫码成功：按设置决定是否一并停止其余各路（默认停止；同一码由共享
         // 票据集防重复确认，此处仅省资源）。
         if (p.type === 'success' && stopOthersOnScanSuccess) {
