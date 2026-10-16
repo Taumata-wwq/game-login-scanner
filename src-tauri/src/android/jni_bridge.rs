@@ -88,30 +88,46 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_ScreenCaptureBridge_onCa
 
 /// `CameraCaptureBridge.onFrame(buffer, width, height, rowStride)`
 ///
-/// 相机 Y 平面帧（灰度）：同步读取 direct buffer 裸指针（零拷贝），拷贝与指纹在
+/// 相机 YUV420 三平面帧：同步读取 direct buffer 裸指针（零拷贝），拷贝与指纹在
 /// [`super::camera::push_frame`] 内完成；返回后 Kotlin 立即 `image.close()`。
 #[no_mangle]
 pub extern "system" fn Java_com_taumata_scanner_plugins_CameraCaptureBridge_onFrame<'local>(
     mut unowned_env: EnvUnowned<'local>,
     _this: JObject<'local>,
-    buffer: JByteBuffer<'local>,
+    y_buf: JByteBuffer<'local>,
+    u_buf: JByteBuffer<'local>,
+    v_buf: JByteBuffer<'local>,
     width: jint,
     height: jint,
-    row_stride: jint,
+    y_row_stride: jint,
+    uv_row_stride: jint,
+    _uv_pixel_stride: jint,
 ) {
     let outcome = unowned_env.with_env(|env| -> Result<(), jni::errors::Error> {
-        if width <= 0 || height <= 0 || row_stride <= 0 {
+        if width <= 0 || height <= 0 || y_row_stride <= 0 || uv_row_stride <= 0 {
             return Ok(());
         }
-        let addr = env.get_direct_buffer_address(&buffer)?;
-        let cap = env.get_direct_buffer_capacity(&buffer)?;
-        if addr.is_null() || cap == 0 {
-            return Ok(());
-        }
-        // SAFETY: addr 指向 Java direct ByteBuffer 的连续内存（容量 cap）；
-        // 回调同步执行（Kotlin 在本次调用返回前不 close image），内存有效。
-        let src = unsafe { std::slice::from_raw_parts(addr, cap) };
-        super::camera::push_frame(src, width as u32, height as u32, row_stride as usize);
+        // SAFETY: 各 direct buffer 在本次同步回调内有效（Kotlin 返回前不 close）。
+        let slice_of = |buf: &JByteBuffer| -> Result<&[u8], jni::errors::Error> {
+            let addr = env.get_direct_buffer_address(buf)?;
+            let cap = env.get_direct_buffer_capacity(buf)?;
+            if addr.is_null() || cap == 0 {
+                return Ok(&[]);
+            }
+            Ok(unsafe { std::slice::from_raw_parts(addr, cap) })
+        };
+        let y = slice_of(&y_buf)?;
+        let u = slice_of(&u_buf)?;
+        let v = slice_of(&v_buf)?;
+        super::camera::push_frame(
+            y,
+            u,
+            v,
+            width as u32,
+            height as u32,
+            y_row_stride as usize,
+            uv_row_stride as usize,
+        );
         Ok(())
     });
     outcome.resolve::<ThrowRuntimeExAndDefault>()

@@ -143,9 +143,14 @@ object CameraCaptureService {
             null
         } ?: return
         try {
-            val plane = image.planes.firstOrNull() ?: return
-            // Y 平面：像素跨距恒 1，行跨距可能含 padding。
-            CameraCaptureBridge.onFrame(plane.buffer, image.width, image.height, plane.rowStride)
+            val planes = image.planes
+            if (planes.size < 3) return
+            // 推 YUV 三平面：Y 用于扫码（灰度），U/V 用于彩色预览。
+            CameraCaptureBridge.onFrame(
+                planes[0].buffer, planes[1].buffer, planes[2].buffer,
+                image.width, image.height,
+                planes[0].rowStride, planes[1].rowStride, planes[1].pixelStride,
+            )
         } catch (_: Throwable) {
             // 帧路径不允许异常穿透（否则回调被移除）。
         } finally {

@@ -65,4 +65,11 @@ class ScreenCapturePlugin(private val activity: Activity) : Plugin(activity) {
         obj.put("capturing", ScreenCaptureService.isRunning)
         invoke.resolve(obj)
     }
+
+    /** 把应用切到后台（屏幕扫码后自动切出，让用户去游戏里对着二维码）。 */
+    @Command
+    fun moveToBack(invoke: Invoke) {
+        activity.moveTaskToBack(true)
+        invoke.resolve()
+    }
 }

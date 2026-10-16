@@ -1,31 +1,30 @@
 //! Android 摄像头捕获帧总线。
 //!
 //! 数据流：Kotlin（Camera2 + ImageReader YUV_420_888 回调线程）→ JNI `onFrame`
-//! → [`push_frame`] 拷贝 **Y 平面**（剥离行 padding）→ 取帧侧拉取灰度帧。
+//! → [`push_frame`] 拷贝 **YUV 三平面**（剥离行 padding）→ 取帧侧拉取：
+//! - **扫码**：只用 Y（亮度）——即灰度，跳过 YUV→RGB→灰度；
+//! - **预览**：用 Y/U/V 做 YUV→RGB，输出**彩色**画面（此前仅推 Y，预览为灰度）。
 //!
-//! 与屏幕捕获（[`super::capture`]，RGBA）的差异：
-//! - 相机原生输出 **YUV_420_888**，**扫码只需 Y（亮度）**——Y 平面即灰度，
-//!   直接存储，跳过 YUV→RGB→灰度 两步（相机 Y 是唯一需要的平面）；
-//! - 同样用「帧序号 + 采样指纹」做去重与变化检测。
+//! 同样用「帧序号 + 采样指纹」做去重与变化检测。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
-/// 最新相机帧（灰度：Y 平面紧凑存储，行跨距恒为 w）。
+/// 最新相机帧（紧凑 YUV420：Y 行跨距 = w，U/V 行跨距 = w/2）。
 pub struct CameraFrame {
-    pub gray: Vec<u8>,
+    pub y: Vec<u8>,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
     pub w: u32,
     pub h: u32,
     /// 单调递增帧序号。
     pub seq: u64,
-    /// 采样指纹（内容变化检测）。
+    /// 采样指纹（内容变化检测，抽在 Y 上）。
     pub fingerprint: u64,
 }
 
 static SLOT: OnceLock<Mutex<Option<CameraFrame>>> = OnceLock::new();
-/// `scan_frame` 上次消费的帧序号。
 static LAST_SCAN_SEQ: AtomicU64 = AtomicU64::new(0);
-/// `preview_frame` 上次消费的帧序号。
 static LAST_PREVIEW_SEQ: AtomicU64 = AtomicU64::new(0);
 /// 相机 sensor 方向（度；预览旋转用）。
 static ROTATION: AtomicU64 = AtomicU64::new(90);
@@ -58,33 +57,56 @@ fn fingerprint(data: &[u8]) -> u64 {
     h
 }
 
-/// JNI 回调线程推入一帧相机 Y 平面（`row_stride` 可能含行尾对齐 padding）。
+/// 逐行拷贝一个平面（剥离行 padding；pixel_stride 恒 1）。
+fn copy_plane(dst: &mut [u8], src: &[u8], w: usize, h: usize, row_stride: usize) {
+    let usable = (src.len() / row_stride.max(1)).min(h);
+    let copy_w = w.min(row_stride);
+    for y in 0..usable {
+        let off = y * row_stride;
+        if off + copy_w > src.len() {
+            break;
+        }
+        dst[y * w..y * w + copy_w].copy_from_slice(&src[off..off + copy_w]);
+    }
+}
+
+/// JNI 回调线程推入一帧相机 YUV420（三平面，各含 row_stride padding）。
 ///
-/// `src` 为 Y 平面缓冲；像素跨距恒 1（相机 Y 平面保证）。锁内逐行剥离 padding。
-pub fn push_frame(src: &[u8], w: u32, h: u32, row_stride: usize) {
-    if w == 0 || h == 0 || row_stride == 0 {
+/// Y：像素跨距 1；U/V：像素跨距 1（相机保证），尺寸 w/2 × h/2（紧凑存储）。
+pub fn push_frame(
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    w: u32,
+    h: u32,
+    y_row_stride: usize,
+    uv_row_stride: usize,
+) {
+    if w == 0 || h == 0 || y_row_stride == 0 || uv_row_stride == 0 {
         return;
     }
-    let rows = h as usize;
-    let usable = (src.len() / row_stride).min(rows);
-    if usable == 0 {
-        return;
-    }
-    let ww = w as usize;
-    let copy_w = ww.min(row_stride);
+    let (ww, hh) = (w as usize, h as usize);
+    let (cw, ch) = (ww / 2, hh / 2);
 
     let mut g = lock();
     let prev = g.take();
     let seq = prev.as_ref().map(|f| f.seq).unwrap_or(0) + 1;
-    let mut data = prev.map(|f| f.gray).unwrap_or_default();
-    data.resize(ww * rows, 0);
-    for y in 0..usable {
-        let off = y * row_stride;
-        data[y * ww..y * ww + copy_w].copy_from_slice(&src[off..off + copy_w]);
-    }
-    let fp = fingerprint(&data);
+    let mut yv = prev.as_ref().map(|f| f.y.clone()).unwrap_or_default();
+    let mut uv = prev.as_ref().map(|f| f.u.clone()).unwrap_or_default();
+    let mut vv = prev.as_ref().map(|f| f.v.clone()).unwrap_or_default();
+    yv.resize(ww * hh, 0);
+    uv.resize(cw * ch, 0);
+    vv.resize(cw * ch, 0);
+    copy_plane(&mut yv, y, ww, hh, y_row_stride);
+    copy_plane(&mut uv, u, cw, ch, uv_row_stride);
+    copy_plane(&mut vv, v, cw, ch, uv_row_stride);
+    drop(prev);
+
+    let fp = fingerprint(&yv);
     *g = Some(CameraFrame {
-        gray: data,
+        y: yv,
+        u: uv,
+        v: vv,
         w,
         h,
         seq,
@@ -92,7 +114,7 @@ pub fn push_frame(src: &[u8], w: u32, h: u32, row_stride: usize) {
     });
 }
 
-/// 相机会话停止（用户停止 / 出错 / 服务销毁）：清空帧槽与去重状态。
+/// 相机会话停止：清空帧槽与去重状态。
 pub fn on_camera_stopped() {
     *lock() = None;
     LAST_SCAN_SEQ.store(0, Ordering::Relaxed);
@@ -121,14 +143,14 @@ pub fn scan_frame(scale: u32) -> Option<crate::screenshot::GrayFrame> {
     }
     set_last_scan_seq(f.seq);
     let (gray, w, h) = if scale <= 1 {
-        (f.gray.clone(), f.w, f.h)
+        (f.y.clone(), f.w, f.h)
     } else {
-        downsample(&f.gray, f.w, f.h, scale as usize)
+        downsample(&f.y, f.w, f.h, scale as usize)
     };
     Some(crate::screenshot::GrayFrame { gray, w, h })
 }
 
-/// 取一帧灰度用于预览（RGBA 输出：Y 复制到 R/G/B）。无新帧返回 Unchanged。
+/// 取一帧彩色 RGBA 用于预览（YUV420→RGB，BT.601 有限范围）。无新帧返回 None。
 pub fn preview_frame(tw: u32) -> Option<(Vec<u8>, u32, u32)> {
     let g = lock();
     let f = g.as_ref()?;
@@ -138,19 +160,31 @@ pub fn preview_frame(tw: u32) -> Option<(Vec<u8>, u32, u32)> {
     set_last_preview_seq(f.seq);
     let ow = tw.clamp(1, f.w.max(1));
     let oh = ((f.h as u64 * ow as u64) / f.w as u64).max(1) as u32;
+    let (sw, sh) = (f.w as usize, f.h as usize);
+    let cw = sw / 2;
     let mut out = Vec::with_capacity(ow as usize * oh as usize * 4);
     for oy in 0..oh {
-        let sy = (oy as usize * f.h as usize) / oh as usize;
+        let sy = (oy as usize * sh) / oh as usize;
         for ox in 0..ow {
-            let sx = (ox as usize * f.w as usize) / ow as usize;
-            let v = f.gray[sy * f.w as usize + sx];
-            out.extend_from_slice(&[v, v, v, 255]);
+            let sx = (ox as usize * sw) / ow as usize;
+            let yy = f.y[sy * sw + sx] as i32;
+            let ci = (sy / 2) * cw + (sx / 2);
+            let uu = f.u.get(ci).copied().unwrap_or(128) as i32 - 128;
+            let vv = f.v.get(ci).copied().unwrap_or(128) as i32 - 128;
+            // BT.601 有限范围 YUV→RGB。
+            let c = (yy - 16).max(0);
+            let d = uu;
+            let e = vv;
+            let r = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
+            let gg = ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
+            let b = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
+            out.extend_from_slice(&[r, gg, b, 255]);
         }
     }
     Some((out, ow, oh))
 }
 
-/// 步长降采样（整数倍，无除法内层）。
+/// 步长降采样（整数倍）。
 fn downsample(gray: &[u8], w: u32, h: u32, step: usize) -> (Vec<u8>, u32, u32) {
     let step = step.max(1);
     let ow = (w as usize / step).max(1);

@@ -75,6 +75,28 @@ pub async fn start_camera_capture() -> Result<(), String> {
     }
 }
 
+/// 把应用切到后台（屏幕扫码后自动切出）。其他平台空操作成功。
+#[tauri::command]
+pub async fn move_to_back() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let h = screen_handle().ok_or("屏幕插件未注册")?;
+        h.run_mobile_plugin_async::<serde_json::Value>("moveToBack", ())
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("切后台失败：{e}"))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "android")]
+fn screen_handle() -> Option<&'static tauri::plugin::PluginHandle<tauri::Wry>> {
+    crate::screen_capture_plugin::handle()
+}
+
 /// 停止摄像头捕获；其他平台空操作成功。
 #[tauri::command]
 pub async fn stop_camera_capture() -> Result<(), String> {

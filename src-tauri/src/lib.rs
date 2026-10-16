@@ -2244,6 +2244,7 @@ pub fn run() {
             crate::camera_plugin::camera_capture_state,
             capture_camera_frame,
             camera_rotation,
+            crate::camera_plugin::move_to_back,
         ])
         .on_window_event(|window, event| match event {
             // 关闭主窗口 = 退出程序。退出前记住主窗口位置。

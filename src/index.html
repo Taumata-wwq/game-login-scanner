@@ -2326,6 +2326,15 @@
     stoppingTargets.add(t);
     renderScan();
     invoke('stop_scan', { target: t }).catch(() => {});
+    // 兜底：后端若未回 stopped 事件（目标已不存在 / 事件丢失），3 秒后强制清理，
+    // 否则按钮永久卡在「停止中…」，无法回到「开始扫码」。
+    setTimeout(() => {
+      if (stoppingTargets.has(t)) {
+        stoppingTargets.delete(t);
+        scanningTargets.delete(t);
+        renderScan();
+      }
+    }, 3000);
   }
   $('btnStart').addEventListener('click', () => {
     const t = activeScanTarget();
@@ -3237,6 +3246,8 @@
     previewGen++;
     if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
   }
+  // 屏幕扫码「自动切后台」标志：回到前台时据此自动停止屏幕扫码（用完即止）。
+  let screenScanAutoBg = false;
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       // 隐藏时若正处于拖拽中，window 的 mouseup 可能不再触发 → dragging 永久为 true
@@ -3246,6 +3257,14 @@
       stopPreview();
     } else {
       startPreview();
+      // 屏幕扫码切后台后用户切回：自动停止屏幕扫码（避免持续占屏幕共享）。
+      if (screenScanAutoBg) {
+        screenScanAutoBg = false;
+        if (scanningTargets.has("screen") || stoppingTargets.has("screen")) {
+          stopScanTarget("screen");
+          log("已回到应用，自动停止屏幕扫码", "info");
+        }
+      }
     }
   });
 
@@ -3257,13 +3276,15 @@
     if (!preview) return { cw: cw0, ch: ch0, ox: 0, oy: 0 };
     const ma = preview.mon.w / preview.mon.h;
     const ca = cw0 / ch0;
+    // 放大后（scale>1）按 cover 铺满显示区，消除 letterbox 黑边；未放大时 contain。
+    const fill = coverFill || viewT.scale > 1.02;
     let cw, ch;
     if (ma >= ca) {
       // 内容更宽：contain 横向填满+上下黑边；cover 纵向填满+横向裁切。
-      if (coverFill) { ch = ch0; cw = Math.round(ch0 * ma); }
+      if (fill) { ch = ch0; cw = Math.round(ch0 * ma); }
       else { cw = cw0; ch = Math.round(cw0 / ma); }
     } else {
-      if (coverFill) { cw = cw0; ch = Math.round(cw0 / ma); }
+      if (fill) { cw = cw0; ch = Math.round(cw0 / ma); }
       else { ch = ch0; cw = Math.round(ch0 * ma); }
     }
     return { cw, ch, ox: Math.round((cw0 - cw) / 2), oy: Math.round((ch0 - ch) / 2) };
@@ -4104,7 +4125,10 @@
     // --- 底部栏 ---
     $("mBtnScan").addEventListener("click", async () => {
       if (cameraMode) { exitCameraMode(); return; }
-      if (!(await ensureScreenCapture())) return;
+      // 直播扫码走 FLV→MediaCodec 硬解，**不需要** MediaProjection 屏幕捕获授权
+      // （授权框只属于屏幕扫码路径）。仅当目标是桌面（screen）时才请求授权。
+      const t = activeScanTarget();
+      if (t === 'screen' && !(await ensureScreenCapture())) return;
       $("btnStart").click();
     });
     $("mBtnScreenScan").addEventListener("click", async () => {
@@ -4112,10 +4136,17 @@
       if (!(await ensureScreenCapture())) return;
       exitLiveMode();
       renderScan();
+      // 若已在扫屏幕：再点一次 = 停止。
+      if (scanningTargets.has("screen") || stoppingTargets.has("screen")) {
+        stopScanTarget("screen");
+        return;
+      }
       setTimeout(() => {
         $("btnStart").click();
-        // 屏幕扫码需用户切到游戏/其它应用才能扫到二维码，给出明确引导。
+        // 屏幕扫码需用户切到游戏/其它应用才能扫到二维码：自动把应用切到后台。
         vpToast("已开启屏幕扫码，请移动到其他应用扫描二维码");
+        screenScanAutoBg = true;
+        invoke("move_to_back").catch(() => {});
       }, 50);
     });
     // --- 摄像头扫码取景模式（进入 / 退出） ---
@@ -4221,7 +4252,7 @@
       if (!cameraMode || cameraPreviewBusy) { scheduleCameraFrame(); return; }
       cameraPreviewBusy = true;
       try {
-        const buf = await invoke("capture_camera_frame", { maxWidth: 480 });
+        const buf = await invoke("capture_camera_frame", { maxWidth: 720 });
         if (buf instanceof ArrayBuffer && buf.byteLength > 24) {
           const dv = new DataView(buf);
           const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);

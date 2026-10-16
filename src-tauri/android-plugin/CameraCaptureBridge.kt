@@ -27,7 +27,16 @@ object CameraCaptureBridge {
      * @param height    图像高度（像素）
      * @param rowStride Y 平面行跨距（字节，可能含对齐 padding）
      */
-    external fun onFrame(buffer: ByteBuffer, width: Int, height: Int, rowStride: Int)
+    external fun onFrame(
+        yBuf: ByteBuffer,
+        uBuf: ByteBuffer,
+        vBuf: ByteBuffer,
+        width: Int,
+        height: Int,
+        yRowStride: Int,
+        uvRowStride: Int,
+        uvPixelStride: Int,
+    )
 
     /** 上报相机 sensor 方向（度；预览旋转用）。 */
     external fun onCameraInfo(rotationDegrees: Int)
