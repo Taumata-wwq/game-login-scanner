@@ -595,7 +595,7 @@ pub(crate) fn request_sync(
 
 /// 该主机是否需要走系统 TLS 桥（Android：rustls 指纹被 WAF 拒的域名）。
 ///
-/// 目前仅米哈游系（`*.mihoyo.com`）；B站/抖音对 rustls 正常，继续走 rustls。
+/// 米哈游系与字节系（抖音）均拒 rustls；B站对 rustls 正常，继续走 rustls。
 #[cfg(target_os = "android")]
 fn needs_system_tls(host: &str) -> bool {
     // 米哈游系 + 字节系（抖音）均按 TLS 指纹拒绝 rustls（真机实测 ProtocolVersion
