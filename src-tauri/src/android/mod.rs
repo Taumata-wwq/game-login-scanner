@@ -10,6 +10,7 @@ pub mod camera;
 pub mod capture;
 pub mod clipboard;
 pub mod duplication;
+pub mod http_bridge;
 pub mod jni_bridge;
 pub mod mediacodec_decode;
 pub mod screenshot;

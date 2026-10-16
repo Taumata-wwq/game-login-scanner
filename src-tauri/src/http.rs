@@ -379,6 +379,21 @@ fn tls_connect_fallback(
     Err("当前平台无 TLS 回退路径（rustls 握手被拒）".to_string())
 }
 
+/// TLS 诊断探针：对指定 host:port 发起 rustls 握手并返回结果描述。
+///
+/// 用途：验证「mihoyo WAF 拒绝 rustls ClientHello 指纹、B站放行」的推断——
+/// 真机分别对 passport.bilibili.com 与 passport-api.mihoyo.com 探测，据 alert
+/// 决定是否需要 Kotlin 系统 TLS 桥（Android 无 schannel 回退）。
+pub fn probe_tls(host: &str, port: u16) -> String {
+    match tls_connect(host, port, READ_TIMEOUT) {
+        Ok(mut t) => match t.conn.complete_io(&mut t.sock) {
+            Ok(_) => format!("{host}:{port} rustls 握手成功"),
+            Err(e) => format!("{host}:{port} rustls 握手被拒: {e}"),
+        },
+        Err(e) => format!("{host}:{port} rustls 连接失败: {e}"),
+    }
+}
+
 /// Read + Write 组合 trait（双 TLS 栈的统一流类型）。
 /// 需要 Send：连接池为进程级 static（跨线程共享/归还）。
 pub(crate) trait ReadWrite: Read + Write + Send {}
@@ -544,6 +559,24 @@ pub(crate) fn request_sync(
     })
 }
 
+/// 该主机是否需要走系统 TLS 桥（Android：rustls 指纹被 WAF 拒的域名）。
+///
+/// 目前仅米哈游系（`*.mihoyo.com`）；B站/抖音对 rustls 正常，继续走 rustls。
+#[cfg(target_os = "android")]
+fn needs_system_tls(host: &str) -> bool {
+    host.ends_with("mihoyo.com") || host.ends_with("hoyoverse.com")
+}
+
+/// 请求头 → JSON 对象字符串（系统 TLS 桥入参）。
+#[cfg(target_os = "android")]
+fn headers_to_json(headers: &Headers) -> String {
+    let mut map = serde_json::Map::new();
+    for (k, v) in headers {
+        map.insert(k.clone(), serde_json::Value::String(v.clone()));
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
 /// 同步请求（二进制响应体版）：HLS 分片/m3u8 等非 UTF-8 内容与全部 API 调用用。
 ///
 /// 连接策略：优先复用连接池中的 keep-alive 连接（见 `API_CONN_POOL`）；
@@ -560,6 +593,27 @@ pub(crate) fn request_bytes_sync(
         let (https, host, port, path) = split_url(&current)?;
         if !https {
             return Err("明文 http 已禁用（凭据安全）".to_string());
+        }
+
+        // 0) Android：米哈游域名经系统 TLS 桥（rustls 指纹被其 WAF 拒，见
+        //    android/http_bridge.rs）。桥内部用 HttpURLConnection（系统 TLS）。
+        #[cfg(target_os = "android")]
+        if needs_system_tls(&host) {
+            let headers_json = headers_to_json(headers);
+            let (status, resp_headers, resp_body) =
+                crate::android::http_bridge::request_bytes(method, &current, &headers_json, body)?;
+            if (300..400).contains(&status) {
+                let loc = header_find(&resp_headers, "location")
+                    .ok_or_else(|| format!("HTTP {status} 重定向缺少 Location 头"))?
+                    .to_string();
+                current = if loc.starts_with("http://") || loc.starts_with("https://") {
+                    loc
+                } else {
+                    format!("https://{host}{loc}")
+                };
+                continue;
+            }
+            return Ok((status, resp_headers, resp_body));
         }
 
         // 1) 取连接：池中借出（复用），无则新建。

@@ -256,6 +256,12 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// TLS 诊断探针（真机排查 mihoyo 域名的 rustls 握手被拒）。
+#[tauri::command]
+fn probe_tls(host: String, port: u16) -> String {
+    crate::http::probe_tls(&host, port)
+}
+
 /// 用系统默认程序打开 https 链接（项目信息 / 更新页用；仅允许 https）。
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -2177,6 +2183,7 @@ pub fn run() {
             set_last_live,
             set_ui_widths,
             get_app_version,
+            probe_tls,
             open_url,
             check_update,
             refresh_official_unames,
