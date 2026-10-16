@@ -131,6 +131,37 @@ pub struct BiliToken {
     pub last_used_at: i64,
 }
 
+/// 第三方渠道账号（渠道扩展；一个账号一条记录）。
+///
+/// `cred` 为渠道凭证 JSON（各渠道格式不同，如小米 `{"uid":..,"session":..}`），
+/// 与 B站 / 官服令牌同等待遇：落盘前加密（Windows DPAPI / Android Keystore），
+/// 内存中保持明文。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChannelAccount {
+    /// 渠道 key（`sdk::channel::CHANNELS` 的 key，如 `xiaomi`）。
+    pub channel: String,
+    /// 渠道侧 UID（各渠道形态不同）。
+    #[serde(default)]
+    pub uid: String,
+    /// 渠道昵称（SDK 返回；可为空）。
+    #[serde(default)]
+    pub name: String,
+    /// 渠道凭证 JSON（落盘加密）。
+    #[serde(default)]
+    pub cred: String,
+    /// 用户备注名。
+    #[serde(default)]
+    pub alias: String,
+    /// 用户备注信息。
+    #[serde(default)]
+    pub remark: String,
+    #[serde(default)]
+    pub last_login_succ: bool,
+    /// 最近一次登录 / 使用时间（Unix 秒）。
+    #[serde(default)]
+    pub last_used_at: i64,
+}
+
 /// 官服账号令牌（一个账号一条记录）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OfficialToken {
@@ -207,6 +238,8 @@ pub struct AppConfig {
     pub official_accounts: Vec<OfficialToken>,
     /// 鹰角账号（终末地/明日方舟用；独立账号体系，手机号+验证码登录）。
     pub hypergryph_accounts: Vec<crate::sdk::hypergryph::HypergryphToken>,
+    /// 第三方渠道账号（渠道扩展；默认空——旧配置兼容）。
+    pub channel_accounts: Vec<ChannelAccount>,
     /// 当前游戏（决定 biz_key 与确认端点）。默认崩坏3。
     pub current_game: Game,
     /// 各游戏「上次选中的 B 服账号」uid（game → uid）。
@@ -295,6 +328,7 @@ impl Default for AppConfig {
             bili_accounts: Vec::new(),
             official_accounts: Vec::new(),
             hypergryph_accounts: Vec::new(),
+            channel_accounts: Vec::new(),
             current_game: Game::Bh3,
             active_bili: std::collections::HashMap::new(),
             active_official: std::collections::HashMap::new(),
@@ -761,6 +795,9 @@ impl AppConfig {
         for a in self.official_accounts.iter_mut() {
             a.stoken = crypto::protect_secret(&a.stoken);
         }
+        for a in self.channel_accounts.iter_mut() {
+            a.cred = crypto::protect_secret(&a.cred);
+        }
     }
 
     /// 解密敏感字段。旧版明文（无 `dpapi:` 前缀）原样保留，向后兼容。
@@ -771,6 +808,9 @@ impl AppConfig {
         }
         for a in self.official_accounts.iter_mut() {
             a.stoken = crypto::unprotect_secret(&a.stoken);
+        }
+        for a in self.channel_accounts.iter_mut() {
+            a.cred = crypto::unprotect_secret(&a.cred);
         }
     }
 

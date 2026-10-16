@@ -1668,3 +1668,37 @@ fn parse_verify_response_handles_cases() {
     let bad = json!({ "retcode": 0 });
     assert!(mihoyo::parse_verify_response(bad).is_err());
 }
+
+#[test]
+fn channel_account_cred_encrypted_on_save_roundtrip() {
+    // 渠道账号 cred 与 B站 / 官服令牌同等待遇：落盘密文、内存明文、读回一致。
+    let mut cfg = AppConfig::default();
+    cfg.channel_accounts
+        .push(game_login_scanner_lib::config::ChannelAccount {
+            channel: "xiaomi".into(),
+            uid: "10001".into(),
+            name: "小米账号".into(),
+            cred: "{\"uid\":\"10001\",\"session\":\"MI-SESSION\"}".into(),
+            ..Default::default()
+        });
+    let mut disk = cfg.clone();
+    disk.encrypt_secrets();
+    #[cfg(windows)]
+    {
+        assert_ne!(
+            disk.channel_accounts[0].cred,
+            "{\"uid\":\"10001\",\"session\":\"MI-SESSION\"}"
+        );
+    }
+    disk.decrypt_secrets();
+    assert_eq!(
+        disk.channel_accounts[0].cred,
+        "{\"uid\":\"10001\",\"session\":\"MI-SESSION\"}"
+    );
+    // 序列化往返（`#[serde(default)]` 保证旧配置无该字段时兼容）。
+    let text = serde_json::to_string(&disk).unwrap();
+    let back: AppConfig = serde_json::from_str(&text).unwrap();
+    assert_eq!(back.channel_accounts.len(), 1);
+    assert_eq!(back.channel_accounts[0].channel, "xiaomi");
+    assert_eq!(back.channel_accounts[0].uid, "10001");
+}

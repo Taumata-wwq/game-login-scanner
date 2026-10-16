@@ -1,6 +1,7 @@
 //! 游戏扫码器库入口：模块声明 + Tauri 命令 + 运行时装配。
 
 pub mod camera_plugin;
+pub mod channel_plugin;
 pub mod config;
 pub mod constants;
 pub mod crypto;
@@ -601,6 +602,64 @@ async fn refresh_official_unames(
 // ---------- 账号管理 ----------
 
 /// 选择要使用的账号（全局唯一）。
+/// 第三方渠道登录（Android）：调起渠道 SDK 登录 → combo/granter 换取并校验凭证 →
+/// 保存渠道账号（`cred` 落盘加密，见 `config::encrypt_secrets`）。
+///
+/// 返回账号摘要（channel / uid / name），供前端刷新账号列表。
+#[tauri::command]
+async fn channel_login(
+    state: tauri::State<'_, AppState>,
+    channel: String,
+) -> Result<serde_json::Value, String> {
+    let info =
+        crate::sdk::channel::parse(&channel).ok_or_else(|| format!("未知渠道：{channel}"))?;
+    // 1) Kotlin SDK 登录（阻塞至用户完成 / 取消）
+    let (cred, uid, name) = crate::channel_plugin::login(&channel).await?;
+    // 2) combo/granter 换取并校验 combo 凭证（channel_id 映射见 sdk::channel）
+    let device_id = {
+        state
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .device_id
+            .clone()
+    };
+    crate::sdk::channel::verify(&channel, &device_id, &cred).await?;
+    // 3) 保存账号（按 channel + uid 去重更新）
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_sec();
+    if let Some(a) = cfg
+        .channel_accounts
+        .iter_mut()
+        .find(|a| a.channel == channel && a.uid == uid)
+    {
+        a.cred = cred.clone();
+        a.name = name.clone();
+        a.last_login_succ = true;
+        a.last_used_at = now;
+    } else {
+        cfg.channel_accounts.push(crate::config::ChannelAccount {
+            channel: channel.clone(),
+            uid: uid.clone(),
+            name: name.clone(),
+            cred: cred.clone(),
+            last_login_succ: true,
+            last_used_at: now,
+            ..Default::default()
+        });
+    }
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "channel": channel,
+        "channel_label": info.label,
+        "uid": uid,
+        "name": name,
+    }))
+}
+
 /// 游戏登录码是通用的——任何渠道账号都能确认登录，因此这里把「当前账号」
 /// 明确设为该账号：扫描时**只用它**确认，不做多渠道轮询。
 #[tauri::command]
@@ -2196,6 +2255,7 @@ pub fn run() {
         .plugin(crate::screen_capture_plugin::init())
         // 摄像头扫码移动插件（Android 真实现；其他平台空装配）。
         .plugin(crate::camera_plugin::init())
+        .plugin(crate::channel_plugin::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -2216,6 +2276,7 @@ pub fn run() {
             set_account_meta,
             reorder_accounts,
             switch_game,
+            channel_login,
             login_qr_start,
             login_qr_poll,
             login_qr_cancel,
