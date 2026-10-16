@@ -1,5 +1,6 @@
 package com.taumata.scanner.plugins
 
+import androidx.annotation.Keep
 import java.nio.ByteBuffer
 
 /**
@@ -13,7 +14,11 @@ import java.nio.ByteBuffer
  * - onFrame 由 ImageReader 回调线程同步调用，Rust 侧在调用内完成拷贝，返回后
  *   Kotlin 即 close(image)，Buffer 不可再引用；
  * - buffer 为 Y 平面直接缓冲（像素跨距恒 1，行跨距可能含对齐 padding）。
+ *
+ * 为什么 @Keep：与 ScreenCaptureBridge 同因——JNI 静态符号约定要求类名与
+ * 方法名不被 R8 改写（防未来混淆策略变化时重演「帧桥被移除」事故）。
  */
+@Keep
 object CameraCaptureBridge {
     init {
         System.loadLibrary("game_login_scanner_lib")

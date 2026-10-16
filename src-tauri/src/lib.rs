@@ -261,9 +261,12 @@ fn get_app_version() -> String {
 fn probe_secret(plain: String) -> String {
     let enc = crate::crypto::protect_secret(&plain);
     let dec = crate::crypto::unprotect_secret(&enc);
-    format!("加密={enc}
+    format!(
+        "加密={enc}
 解密={dec}
-往返一致={}", dec == plain)
+往返一致={}",
+        dec == plain
+    )
 }
 
 /// TLS 诊断探针（真机排查 mihoyo 域名的 rustls 握手被拒）。

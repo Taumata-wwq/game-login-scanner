@@ -140,6 +140,17 @@ if (-not (Test-Path $pluginSrc)) {
     }
 }
 
+# 兼容清理：历史遗留的旧版插件源码目录（主包下 game_scanner/plugins）。
+# 它会与 scanner/plugins 版同时参与编译，干扰 R8 的保留判定——2026-10-17
+# 真机实证：屏幕捕获组件 "not found" + 帧桥类被 R8 移除即由此叠加引发。
+$legacyDst = Join-Path $gen "app/src/main/java/com/taumata/game_scanner/plugins"
+if (Test-Path $legacyDst) {
+    Remove-Item -Recurse -Force $legacyDst
+    Write-Host "  - 清理历史残留目录 game_scanner/plugins（旧版插件源码）"
+} else {
+    Write-Host "  = 无历史残留目录"
+}
+
 Write-Host "== 6. AndroidManifest：屏幕捕获权限与前台服务声明 =="
 $manifest = Join-Path $gen "app/src/main/AndroidManifest.xml"
 $c = Get-Content $manifest -Raw
@@ -176,17 +187,26 @@ if ($c -notmatch "android.permission.CAMERA") {
     Write-Host "  = CAMERA 权限已存在"
 }
 
-if ($c -notmatch "ScreenCaptureService") {
+# 兼容修复：早期模板写入的 ".plugins.ScreenCaptureService" 为相对名，解析为
+# com.taumata.game_scanner.plugins.*（该类不存在——插件实际包为 scanner.plugins）
+# → 运行时组件 not found、屏幕捕获无法启动（2026-10-17 真机实证）。
+$badSvc = 'android:name=".plugins.ScreenCaptureService"'
+if ($c.Contains($badSvc)) {
+    $c = $c.Replace($badSvc, 'android:name="com.taumata.scanner.plugins.ScreenCaptureService"')
+    $changed = $true
+    Write-Host "  ~ 修正 ScreenCaptureService 类名（相对名 -> 全限定名）"
+}
+if ($c -notmatch "com\.taumata\.scanner\.plugins\.ScreenCaptureService") {
     $svc = @(
         '        <service',
-        '            android:name=".plugins.ScreenCaptureService"',
+        '            android:name="com.taumata.scanner.plugins.ScreenCaptureService"',
         '            android:exported="false"',
         '            android:foregroundServiceType="mediaProjection" />',
         '    </application>'
     ) -join $nl
     $c = $c.Replace('    </application>', $svc)
     $changed = $true
-    Write-Host "  + service 声明（.plugins.ScreenCaptureService, mediaProjection）"
+    Write-Host "  + service 声明（com.taumata.scanner.plugins.ScreenCaptureService, mediaProjection）"
 } else {
     Write-Host "  = service 声明已存在"
 }
