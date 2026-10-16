@@ -416,6 +416,12 @@ pub(crate) fn stream_tls_connect(
     port: u16,
     read_timeout: Duration,
 ) -> Result<Box<dyn ReadWrite>, String> {
+    // Android：WAF 敏感域名（抖音/米哈游）的流走系统 TLS 隧道——Kotlin SSLSocket
+    // 完成握手并把明文透传到本地端口，Rust 连本地端口即得已握手流（无需 rustls）。
+    #[cfg(target_os = "android")]
+    if needs_system_tls(host) {
+        return tunnel_connect(host, port, read_timeout);
+    }
     match tls_connect(host, port, read_timeout) {
         Ok(mut t) => match t.conn.complete_io(&mut t.sock) {
             Ok(_) => Ok(Box::new(t)),
@@ -426,6 +432,28 @@ pub(crate) fn stream_tls_connect(
         },
         Err(e) => Err(e),
     }
+}
+
+/// 经系统 TLS 隧道连接（Android）：Kotlin 起本地监听端口 + 系统 TLS，Rust 连本地端口。
+#[cfg(target_os = "android")]
+fn tunnel_connect(
+    host: &str,
+    port: u16,
+    read_timeout: Duration,
+) -> Result<Box<dyn ReadWrite>, String> {
+    let local_port = crate::android::tunnel::open(host, port)?;
+    let addr = ("127.0.0.1", local_port)
+        .to_socket_addrs()
+        .map_err(|e| format!("隧道本地地址解析失败: {e}"))?
+        .next()
+        .ok_or("隧道本地地址无效")?;
+    let tcp = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+        .map_err(|e| format!("连接隧道失败: {e}"))?;
+    tcp.set_nodelay(true).ok();
+    tcp.set_read_timeout(Some(read_timeout))
+        .map_err(|e| format!("设置读超时失败: {e}"))?;
+    log::info!("流经系统 TLS 隧道（{host}:{port} → 127.0.0.1:{local_port}）");
+    Ok(Box::new(tcp))
 }
 
 // ---------- API 连接池 ----------

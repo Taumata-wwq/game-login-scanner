@@ -28,6 +28,7 @@ class ScreenCapturePlugin(private val activity: Activity) : Plugin(activity) {
         // 触碰 HttpBridge 触发其 object 初始化 → 向 Rust 注册系统 TLS 桥
         // （native 线程后续发起 mihoyo 域名请求需要该注册）。
         HttpBridge
+        StreamTunnel
     }
 
     @Command

@@ -150,6 +150,19 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_CameraCaptureBridge_onCa
     outcome.resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// `StreamTunnel.nativeInit()`
+#[no_mangle]
+pub extern "system" fn Java_com_taumata_scanner_plugins_StreamTunnel_nativeInit<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    this: JObject<'local>,
+) {
+    let outcome = unowned_env.with_env(|env| -> Result<(), jni::errors::Error> {
+        super::tunnel::init_from_env(env, &this);
+        Ok(())
+    });
+    outcome.resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// `HttpBridge.nativeInit()`
 ///
 /// Kotlin `HttpBridge` 初始化时调用：把 JavaVM 与 HttpBridge 类的全局引用存到
