@@ -90,7 +90,8 @@ src-tauri/src/
 src-tauri/android-plugin/   Android 插件层 Kotlin 源码（屏幕捕获 / 摄像头 / 系统 TLS 桥）
 ```
 
-> 单元测试、真实网络探针与解码基准等内部验证设施为本地材料，不随仓库分发。
+> 单元测试（`src-tauri/tests/unit.rs`、`smoke.rs`）随仓库分发并由 CI 运行；
+> 其余验证设施（真实网络探针、解码基准、批量测试）为本地材料，不随仓库分发。
 
 ## 注意事项
 

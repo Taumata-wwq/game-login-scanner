@@ -14,9 +14,10 @@ jobs:
       - name: Install Rust
         # 固定 1.98.1（稳定性偏好，保留）。
         # 2026-10-15 更正：此前 CI 失败（invalid instruction `cargo:rustc-link-arg-tests`）
-        # 的真因是 build.rs 在无 tests/ 目录（不入库，CI 上不存在）时发出该指令，
-        # 被 cargo 以 "does not have a test target" 拒绝；已修复于 build.rs。
-        # 与 rustc 1.98/1.99 版本无关。
+        # 的真因是 build.rs 在无 tests/ 目录时发出该指令，被 cargo 以 "does not have
+        # a test target" 拒绝；已修复于 build.rs（保留目录存在性守卫）。
+        # 2026-10-17 起 tests/unit.rs 与 tests/smoke.rs 白名单入库——下方 cargo test
+        # 真实运行 89 个用例（此前因无测试目标而空转）。
         uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Cache cargo

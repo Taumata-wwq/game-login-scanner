@@ -1,8 +1,9 @@
 [toolchain]
 # 跟随 stable。
 # 历史备注（2026-10-15 更正）：曾将 CI 失败归因于「rustc 1.99.0 拒绝 embed-resource 指令」，
-# 实为 build.rs 在无 tests/ 目录（不入库，CI 上不存在）时发出 cargo:rustc-link-arg-tests，
-# 被 cargo 以 "does not have a test target" 拒绝；已修复（build.rs 先判断 tests/ 存在性）。
+# 实为 build.rs 在无 tests/ 目录时发出 cargo:rustc-link-arg-tests，被 cargo 以
+# "does not have a test target" 拒绝；已修复（build.rs 先判断 tests/ 存在性）。
+# 2026-10-17：tests/unit.rs + smoke.rs 白名单入库（CI 质量门真实运行 89 个用例）；
 # CI 仍固定 1.98.1（见 .github/workflows/ci.yml），作为稳定性偏好保留。
 channel = "stable"
 components = ["rustfmt", "clippy"]

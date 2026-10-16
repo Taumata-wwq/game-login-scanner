@@ -18,15 +18,20 @@ node_modules/
 
 # 内部记录与验证设施（本地保留，不入库；2026-10-12 撤出版本控制）。
 # 含：docs/（决策记录与调研/测试报告）、scripts/（采集与素材转换）、
-# src-tauri/tests/（单元测试/探针/基准/批量测试）、.workbuddy/（工作记忆）。
-# 注：.github/workflows 不在排除之列（CI 门禁可继续入库）。
+# .workbuddy/（工作记忆）。
+# 注：.github/workflows 不在排除之列（CI 门禁可继续入库）；
+# src-tauri/tests/ 自 2026-10-17 起白名单入库 unit.rs + smoke.rs（CI 质量门
+# 真实运行），其余（探针/基准/批量测试）仍为本地材料。
 /docs/
 # scripts/ 忽略“内容”而非整个目录，以便白名单固化构建脚本（否则 git 不进入被忽略目录）。
 /scripts/*
 # 例外：Android 构建必需的补丁脚本（gen/android 不入库，需脚本固化本地化修改）。
 !/scripts/android/
 !/scripts/android/patch-gen.ps1
-/src-tauri/tests/
+# tests/：忽略「内容」而非整个目录，白名单固化 CI 质量门测试（否则 git 不进入被忽略目录）。
+/src-tauri/tests/*
+!/src-tauri/tests/unit.rs
+!/src-tauri/tests/smoke.rs
 /.workbuddy/
 
 # 临时文件
