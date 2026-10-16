@@ -570,7 +570,20 @@ pub(crate) fn request_sync(
 /// 目前仅米哈游系（`*.mihoyo.com`）；B站/抖音对 rustls 正常，继续走 rustls。
 #[cfg(target_os = "android")]
 fn needs_system_tls(host: &str) -> bool {
-    host.ends_with("mihoyo.com") || host.ends_with("hoyoverse.com")
+    // 米哈游系 + 字节系（抖音）均按 TLS 指纹拒绝 rustls（真机实测 ProtocolVersion
+    // alert）；B站对 rustls 正常。这些域名改走系统 TLS 桥（Conscrypt）。
+    const SUFFIXES: &[&str] = &[
+        "mihoyo.com",
+        "hoyoverse.com",
+        "douyin.com",
+        "douyincdn.com",
+        "byteimg.com",
+        "bytedance.com",
+        "volccdn.com",
+        "pstatp.com",
+        "ixigua.com",
+    ];
+    SUFFIXES.iter().any(|s| host.ends_with(s))
 }
 
 /// 请求头 → JSON 对象字符串（系统 TLS 桥入参）。
