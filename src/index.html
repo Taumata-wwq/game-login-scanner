@@ -1532,6 +1532,8 @@
     (config.bili_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'bilibili', t }); });
     (config.official_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'official', t }); });
     (config.hypergryph_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'hypergryph', t }); });
+    // 第三方渠道账号（渠道扩展；按游戏独立显示）。
+    (config.channel_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'channel:' + t.channel, t }); });
     return out;
   }
   // 当前游戏下某渠道的激活账号标识（active_* 现为 { game: id } 映射）。
@@ -1544,9 +1546,13 @@
   }
   // 鹰角账号以 phone 作标识；其余以 uid。
   function acctKey(ch, t) { return ch === 'hypergryph' ? t.phone : t.uid; }
+  // 第三方渠道账号（ch 形如 'channel:xiaomi'）。
+  function isChannelAcct(ch) { return ch.startsWith('channel:'); }
   // 是否「当前账号」：该游戏该渠道的激活标识匹配。
   function isCurrentAccount(ch, key) {
     if (!config) return false;
+    // 渠道账号的「当前账号」机制待确认路由接入（后续版本）。
+    if (isChannelAcct(ch)) return false;
     const g = curGameId();
     if (ch === 'hypergryph') return (config.active_hypergryph || {})[g] === key;
     const curCh = (config.game_channel || {})[g];
@@ -1557,6 +1563,10 @@
       const base = t.phone || '未知';
       return t.alias ? (t.alias + '（' + base + '）') : base;
     }
+    if (isChannelAcct(ch)) {
+      const base = t.name || ('UID ' + t.uid);
+      return t.alias ? (t.alias + '（' + base + '）') : base;
+    }
     const base = ch === 'bilibili' ? (t.uname || 'UID ' + t.uid) : (t.uname || 'uid ' + t.uid);
     // 有备注名时显示「备注名（原名）」。
     return t.alias ? (t.alias + '（' + base + '）') : base;
@@ -1564,7 +1574,18 @@
   function channelLabel(ch) {
     if (ch === 'hypergryph') return '鹰角';
     if (ch === 'official') return '官服';
+    if (ch.startsWith('channel:')) return channelUiLabel(ch.slice(8));
     return 'B 服';
+  }
+
+  // ---------- 第三方渠道（渠道登录，Android）----------
+  // 与后端 sdk::channel::CHANNELS 对应——仅列已实现的渠道。
+  const CHANNELS_UI = [
+    { key: 'xiaomi', label: '小米' },
+  ];
+  function channelUiLabel(key) {
+    const c = CHANNELS_UI.find((x) => x.key === key);
+    return c ? c.label : key;
   }
 
   // ---------- 游戏（多游戏支持） ----------
@@ -1650,7 +1671,7 @@
       const row = document.createElement('div');
       const isCurrent = isCurrentAccount(ch, key);
       row.className = 'acct-item' + (isCurrent ? ' on' : '');
-      row.draggable = true;
+      row.draggable = !isChannelAcct(ch); // 渠道账号暂不参与拖拽排序
       row.dataset.uid = key;
       row.dataset.ch = ch;
       row.dataset.idx = idx;
@@ -1676,15 +1697,18 @@
       del.title = '删除该账号';
       del.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
       del.addEventListener('click', (e) => { e.stopPropagation(); deleteAccount(ch, key); });
-      row.append(radio, chip, nm, remark, del);
+      if (!isChannelAcct(ch)) row.append(radio);
+      row.append(chip, nm, remark, del);
       // 双击行（非按钮/选中点）→ 编辑备注（内部弹窗）；移动端触摸无双击：长按触发。
       row.addEventListener('dblclick', (e) => {
         if (e.target.closest('.radio') || e.target.closest('.ibtn')) return;
+        if (isChannelAcct(ch)) return; // 渠道账号备注编辑后续版本接入
         openRemarkDialog(ch, key);
       });
       if (window.__MOBILE__) {
         bindLongPress(row, (tgt) => {
           if (tgt && (tgt.closest('.radio') || tgt.closest('.ibtn'))) return;
+          if (isChannelAcct(ch)) return; // 渠道账号备注编辑后续版本接入
           openRemarkDialog(ch, key);
         });
       }
@@ -1716,6 +1740,10 @@
         $('hyperStatus').textContent = '';
         $('hyperOverlay').hidden = false;
         $('hyperPhone').focus();
+        return;
+      }
+      if (isChannelAcct(filter)) {
+        channelLogin(filter.slice(8));
         return;
       }
       openLogin();
@@ -1823,7 +1851,9 @@
   async function deleteAccount(ch, uid) {
     try {
       const game = curGameId();
-      if (ch === 'hypergryph') {
+      if (isChannelAcct(ch)) {
+        await invoke('delete_channel_account', { channel: ch.slice(8), game, uid });
+      } else if (ch === 'hypergryph') {
         await invoke('hypergryph_delete', { game, phone: uid });
       } else {
         await invoke('delete_account', { game, channel: ch, uid });
@@ -1971,6 +2001,21 @@
       startQrLogin();
     } else {
       cancelQr();
+    }
+  }
+
+  // 第三方渠道登录（渠道扩展，Android）：调起渠道 SDK 登录 UI → 后端换取
+  // combo/granter 凭证并保存渠道账号（channel_login 命令）。
+  async function channelLogin(key) {
+    const label = channelUiLabel(key);
+    log('正在打开' + label + '登录…', 'info');
+    try {
+      const r = await invoke('channel_login', { channel: key, game: curGameId() });
+      log(label + '账号已添加：' + (r.name || r.uid), 'info');
+      config = await invoke('get_config');
+      renderAll();
+    } catch (e) {
+      log(label + '登录失败：' + String(e), 'error');
     }
   }
 
@@ -4096,6 +4141,10 @@
       if (g.official) opts.push(["official", "官服"]);
       if (g.bili) opts.push(["bilibili", "B 服"]);
       if (g.hyper) opts.push(["hypergryph", "鹰角账号"]);
+      // 第三方渠道（渠道登录；仅米哈游系游戏——鹰角无渠道服）。
+      if (g.vendor === "mihoyo") {
+        for (const c of CHANNELS_UI) opts.push(["channel:" + c.key, c.label]);
+      }
       for (const [f, label] of opts) {
         const it = document.createElement("div");
         it.className = "gitem" + (f === filter ? " on" : "");

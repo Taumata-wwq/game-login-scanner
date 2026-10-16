@@ -140,6 +140,9 @@ pub struct BiliToken {
 pub struct ChannelAccount {
     /// 渠道 key（`sdk::channel::CHANNELS` 的 key，如 `xiaomi`）。
     pub channel: String,
+    /// 所属游戏 id（与其余账号同——渠道账号按游戏独立显示）。
+    #[serde(default)]
+    pub game: String,
     /// 渠道侧 UID（各渠道形态不同）。
     #[serde(default)]
     pub uid: String,

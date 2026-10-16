@@ -17,6 +17,7 @@
       { uid: "20001", stoken: "x", mid: "20001", uname: "米游社主号", game: "bh3", alias: "", remark: "主用", last_login_succ: true, last_used_at: now }
     ],
     hypergryph_accounts: [],
+    channel_accounts: [],
     current_game: "bh3",
     active_bili: { bh3: "10001" },
     active_official: { bh3: "20001" },
@@ -284,6 +285,25 @@
             var hg2 = (args && args.game) || cfg.current_game;
             loginUpsert("hypergryph", hg2, args.phone, "鹰角预览号 " + args.phone);
             return Promise.resolve({ status: "ok" });
+          }
+          // --- 渠道登录（渠道扩展）：预览环境直接"成功"，添加一个渠道账号 ---
+          case "channel_login": {
+            var cch = (args && args.channel) || "xiaomi";
+            var cg = (args && args.game) || cfg.current_game;
+            var cuid = "mock-" + cch + "-" + String(90000 + Math.floor(Math.random() * 9999));
+            cfg.channel_accounts.push({
+              channel: cch, game: cg, uid: cuid, name: "预览渠道号 " + cuid,
+              cred: "mock", alias: "", remark: "", last_login_succ: true, last_used_at: nowSec()
+            });
+            console.log("[dev-preview] 已添加渠道账号 " + cuid + "（" + cch + "）");
+            return Promise.resolve({ channel: cch, channel_label: "预览渠道", uid: cuid, name: "预览渠道号 " + cuid });
+          }
+          case "delete_channel_account": {
+            var dch = args && args.channel, dg = (args && args.game) || cfg.current_game, du = args && args.uid;
+            cfg.channel_accounts = cfg.channel_accounts.filter(function (a) {
+              return !(a.channel === dch && a.game === dg && a.uid === du);
+            });
+            return Promise.resolve();
           }
           case "live_watch_sync": case "set_last_live": case "set_preview_active": case "set_scan_region":
           case "set_tile_mode": case "set_ui_widths": case "open_url":

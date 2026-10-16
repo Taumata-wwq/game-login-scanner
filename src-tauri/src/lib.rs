@@ -605,11 +605,13 @@ async fn refresh_official_unames(
 /// 第三方渠道登录（Android）：调起渠道 SDK 登录 → combo/granter 换取并校验凭证 →
 /// 保存渠道账号（`cred` 落盘加密，见 `config::encrypt_secrets`）。
 ///
+/// `game` 为所属游戏 id（与其余账号同——渠道账号按游戏独立存储与显示）。
 /// 返回账号摘要（channel / uid / name），供前端刷新账号列表。
 #[tauri::command]
 async fn channel_login(
     state: tauri::State<'_, AppState>,
     channel: String,
+    game: String,
 ) -> Result<serde_json::Value, String> {
     let info =
         crate::sdk::channel::parse(&channel).ok_or_else(|| format!("未知渠道：{channel}"))?;
@@ -634,7 +636,7 @@ async fn channel_login(
     if let Some(a) = cfg
         .channel_accounts
         .iter_mut()
-        .find(|a| a.channel == channel && a.uid == uid)
+        .find(|a| a.channel == channel && a.game == game && a.uid == uid)
     {
         a.cred = cred.clone();
         a.name = name.clone();
@@ -643,6 +645,7 @@ async fn channel_login(
     } else {
         cfg.channel_accounts.push(crate::config::ChannelAccount {
             channel: channel.clone(),
+            game: game.clone(),
             uid: uid.clone(),
             name: name.clone(),
             cred: cred.clone(),
@@ -658,6 +661,24 @@ async fn channel_login(
         "uid": uid,
         "name": name,
     }))
+}
+
+/// 删除一个渠道账号（按 channel + game + uid）。
+#[tauri::command]
+fn delete_channel_account(
+    state: tauri::State<'_, AppState>,
+    channel: String,
+    game: String,
+    uid: String,
+) -> Result<(), String> {
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cfg.channel_accounts
+        .retain(|a| !(a.channel == channel && a.game == game && a.uid == uid));
+    let _ = cfg.save();
+    Ok(())
 }
 
 /// 游戏登录码是通用的——任何渠道账号都能确认登录，因此这里把「当前账号」
@@ -2277,6 +2298,7 @@ pub fn run() {
             reorder_accounts,
             switch_game,
             channel_login,
+            delete_channel_account,
             login_qr_start,
             login_qr_poll,
             login_qr_cancel,
