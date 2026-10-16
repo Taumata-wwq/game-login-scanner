@@ -18,6 +18,15 @@ import java.net.URL
  */
 object HttpBridge {
 
+    init {
+        System.loadLibrary("game_login_scanner_lib")
+        // 把 HttpBridge 的全局引用与 JavaVM 注册给 Rust（native 线程后续复用）。
+        nativeInit()
+    }
+
+    /** 注册 global ref 与 JavaVM 到 Rust（object 初始化时自动调用一次）。 */
+    private external fun nativeInit()
+
     /**
      * 发起一次 HTTP(S) 请求。
      *

@@ -384,6 +384,12 @@ fn tls_connect_fallback(
 /// 用途：验证「mihoyo WAF 拒绝 rustls ClientHello 指纹、B站放行」的推断——
 /// 真机分别对 passport.bilibili.com 与 passport-api.mihoyo.com 探测，据 alert
 /// 决定是否需要 Kotlin 系统 TLS 桥（Android 无 schannel 回退）。
+/// HTTP 探针：走 request_bytes_sync 完整路径（验证系统 TLS 桥）。
+pub fn probe_http(url: &str) -> Result<String, String> {
+    let (status, _h, body) = request_bytes_sync("GET", url, &Vec::new(), None)?;
+    Ok(format!("HTTP {status}（{} 字节）", body.len()))
+}
+
 pub fn probe_tls(host: &str, port: u16) -> String {
     match tls_connect(host, port, READ_TIMEOUT) {
         Ok(mut t) => match t.conn.complete_io(&mut t.sock) {

@@ -262,6 +262,15 @@ fn probe_tls(host: String, port: u16) -> String {
     crate::http::probe_tls(&host, port)
 }
 
+/// HTTP 探针（走完整请求路径：Android 上 mihoyo 域名经系统 TLS 桥）。
+#[tauri::command]
+fn probe_http(url: String) -> String {
+    match crate::http::probe_http(&url) {
+        Ok(s) => s,
+        Err(e) => format!("请求失败: {e}"),
+    }
+}
+
 /// 用系统默认程序打开 https 链接（项目信息 / 更新页用；仅允许 https）。
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -2184,6 +2193,7 @@ pub fn run() {
             set_ui_widths,
             get_app_version,
             probe_tls,
+            probe_http,
             open_url,
             check_update,
             refresh_official_unames,

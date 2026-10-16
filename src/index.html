@@ -3876,6 +3876,15 @@
       window.updateMobileTitle('屏幕预览', '未连接直播');
     }
     log('应用就绪。添加账号后点击「开始扫码」即可自动识别并登录', 'info');
+    // [临时诊断] 验证系统 TLS 桥（mihoyo 应成功）与 rustls（B站应成功）。
+    if (window.__MOBILE__) {
+      invoke('probe_http', { url: 'https://passport-api.mihoyo.com/account/ma-cn-passport/app/createQRLogin' })
+        .then((r) => log('[HTTP探针] mihoyo: ' + r, 'info'))
+        .catch((e) => log('[HTTP探针] mihoyo: ' + e, 'error'));
+      invoke('probe_http', { url: 'https://passport.bilibili.com/x/passport-tv-login/qrcode/auth_code' })
+        .then((r) => log('[HTTP探针] bili: ' + r, 'info'))
+        .catch((e) => log('[HTTP探针] bili: ' + e, 'error'));
+    }
     // 版本号（单一来源：Cargo.toml）。
     invoke('get_app_version').then((v) => {
       if ($('piVer')) $('piVer').textContent = 'v' + v;

@@ -133,6 +133,23 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_CameraCaptureBridge_onCa
     outcome.resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// `HttpBridge.nativeInit()`
+///
+/// Kotlin `HttpBridge` 初始化时调用：把 JavaVM 与 HttpBridge 类的全局引用存到
+/// 进程级静态，供后续 native 线程发起系统 TLS 请求（不依赖 ndk_context，
+/// 该版本 tao 不会初始化它——真机实测 android_context() 直接 panic）。
+#[no_mangle]
+pub extern "system" fn Java_com_taumata_scanner_plugins_HttpBridge_nativeInit<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    this: JObject<'local>,
+) {
+    let outcome = unowned_env.with_env(|env| -> Result<(), jni::errors::Error> {
+        super::http_bridge::init_from_env(env, &this);
+        Ok(())
+    });
+    outcome.resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// `CameraCaptureBridge.onCameraStopped()`
 ///
 /// 相机会话停止：清空帧槽与去重状态。

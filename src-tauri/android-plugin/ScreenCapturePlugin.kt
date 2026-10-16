@@ -24,6 +24,12 @@ import app.tauri.plugin.Plugin
 @TauriPlugin
 class ScreenCapturePlugin(private val activity: Activity) : Plugin(activity) {
 
+    init {
+        // 触碰 HttpBridge 触发其 object 初始化 → 向 Rust 注册系统 TLS 桥
+        // （native 线程后续发起 mihoyo 域名请求需要该注册）。
+        HttpBridge
+    }
+
     @Command
     fun requestCapture(invoke: Invoke) {
         // 已在捕获：直接返回，避免重复弹授权框（前端每次点扫码都会调用本命令）。
