@@ -246,26 +246,28 @@ pub struct BhInfo {
     pub combo_token: String,
 }
 
-/// 校验 B 站账号并换取 bh_info。
-/// 注意：app_id/channel_id 需为数字、uid 需为数字，否则服务器返回「渠道错误」(-107)。
-pub async fn verify(uid: &str, access_key: &str) -> Result<BhInfo, String> {
-    let uid_num = uid.parse::<i64>().unwrap_or_default();
+/// 构造渠道验证请求体（纯函数，单测覆盖）。
+///
+/// 形态 `{device, app_id:1, channel_id, data, sign}`——`data` 为渠道凭证 JSON 字符串
+/// （B 服为 `{uid, access_key}`；第三方渠道由各 SDK 桥产出，如小米 `{uid, session}`）。
+/// 与参考项目 `bh3_login_simulation` 的 `Tools.verifyAccount` 同构。
+/// 注意：app_id / channel_id 需为数字，否则服务器返回「渠道错误」(-107)。
+pub fn build_verify_body(device: &str, channel_id: u32, data_json: &str) -> (Value, String) {
     let mut body = json!({
-        "device": "0000000000000000",
+        "device": device,
         "app_id": 1,
-        "channel_id": 14,
-        "data": {},
+        "channel_id": channel_id,
+        "data": data_json,
         "sign": ""
     });
-    let data = if uid_num != 0 {
-        json!({ "uid": uid_num, "access_key": access_key })
-    } else {
-        json!({ "uid": uid, "access_key": access_key })
-    };
-    body["data"] = Value::String(data.to_string());
     make_sign(&mut body);
     let post_body = body.to_string().replace(' ', "");
-    let feedback = send_post_json_str(constants::MIHOYO_VERIFY_URL, &post_body).await?;
+    (body, post_body)
+}
+
+/// 解析渠道验证响应（纯函数，单测覆盖）：`{retcode, message?, data:{open_id,
+/// combo_id, combo_token}}` → [`BhInfo`]。
+pub fn parse_verify_response(feedback: Value) -> Result<BhInfo, String> {
     if feedback.get("retcode").and_then(|v| v.as_i64()) != Some(0) {
         let msg = feedback
             .get("message")
@@ -293,6 +295,31 @@ pub async fn verify(uid: &str, access_key: &str) -> Result<BhInfo, String> {
             .unwrap_or("")
             .to_string(),
     })
+}
+
+/// 渠道验证通用实现：渠道凭证 → bh_info（combo 凭证）。
+///
+/// `channel_id` 见 [`crate::sdk::channel::CHANNELS`]（B 服=14，第三方渠道见渠道表）。
+pub async fn verify_with_data(
+    device: &str,
+    channel_id: u32,
+    data_json: &str,
+) -> Result<BhInfo, String> {
+    let (_body, post_body) = build_verify_body(device, channel_id, data_json);
+    let feedback = send_post_json_str(constants::MIHOYO_VERIFY_URL, &post_body).await?;
+    parse_verify_response(feedback)
+}
+
+/// 校验 B 站账号并换取 bh_info（渠道 14）。
+/// 注意：app_id/channel_id 需为数字、uid 需为数字，否则服务器返回「渠道错误」(-107)。
+pub async fn verify(uid: &str, access_key: &str) -> Result<BhInfo, String> {
+    let uid_num = uid.parse::<i64>().unwrap_or_default();
+    let data = if uid_num != 0 {
+        json!({ "uid": uid_num, "access_key": access_key })
+    } else {
+        json!({ "uid": uid, "access_key": access_key })
+    };
+    verify_with_data("0000000000000000", 14, &data.to_string()).await
 }
 
 /// 扫码确认（scanCheck -> scanConfirm）。

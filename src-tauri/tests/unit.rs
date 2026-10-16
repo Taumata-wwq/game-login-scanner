@@ -1610,3 +1610,61 @@ fn clipboard_payload_rejects_malformed() {
     zero.extend_from_slice(&1u32.to_le_bytes());
     assert!(qr::parse_clipboard_payload(&zero).is_none());
 }
+
+// ---------- 第三方渠道（协议层，2026-10-17 渠道扩展） ----------
+
+#[test]
+fn channel_table_matches_reference() {
+    use game_login_scanner_lib::sdk::channel;
+    // channel_id 映射与参考项目 bh3_login_simulation 一致
+    assert_eq!(channel::parse("xiaomi").unwrap().id, 11);
+    assert_eq!(channel::parse("yyb").unwrap().id, 13);
+    assert_eq!(channel::parse("huawei").unwrap().id, 15);
+    assert_eq!(channel::parse("vivo").unwrap().id, 19);
+    assert_eq!(channel::parse("wegame").unwrap().id, 27);
+    // 官服 / B站 不在渠道表（走各自已有链路）
+    assert!(channel::parse("official").is_none());
+    assert!(channel::parse("bilibili").is_none());
+    assert!(channel::parse("unknown").is_none());
+}
+
+#[test]
+fn verify_body_channel_shape_and_signature() {
+    use game_login_scanner_lib::sdk::mihoyo;
+    let (body, post) =
+        mihoyo::build_verify_body("0000000000000000", 11, "{\"uid\":\"1\",\"session\":\"s\"}");
+    assert_eq!(body["app_id"], 1);
+    assert_eq!(body["channel_id"], 11);
+    assert_eq!(body["data"], "{\"uid\":\"1\",\"session\":\"s\"}");
+    // 签名 = HMAC-SHA256 hex，输入为排序拼接（app_id < channel_id < data < device）
+    let sign = body["sign"].as_str().unwrap();
+    assert_eq!(sign.len(), 64);
+    let expect = mihoyo::bh3_sign(
+        "app_id=1&channel_id=11&data={\"uid\":\"1\",\"session\":\"s\"}&device=0000000000000000",
+    );
+    assert_eq!(sign, expect);
+    assert!(!post.contains(' '));
+}
+
+#[test]
+fn parse_verify_response_handles_cases() {
+    use game_login_scanner_lib::sdk::mihoyo;
+    use serde_json::json;
+    // 成功：提取 open_id / combo_id / combo_token
+    let ok = json!({
+        "retcode": 0,
+        "data": { "open_id": "o1", "combo_id": "c1", "combo_token": "t1" }
+    });
+    let info = mihoyo::parse_verify_response(ok).unwrap();
+    assert_eq!(info.open_id, "o1");
+    assert_eq!(info.combo_id, "c1");
+    assert_eq!(info.combo_token, "t1");
+    // 业务错误：透传 message（参考项目 -107「参数错误」即走此路径）
+    let err = json!({ "retcode": -107, "message": "参数错误" });
+    assert!(mihoyo::parse_verify_response(err)
+        .unwrap_err()
+        .contains("参数错误"));
+    // 缺 data
+    let bad = json!({ "retcode": 0 });
+    assert!(mihoyo::parse_verify_response(bad).is_err());
+}
