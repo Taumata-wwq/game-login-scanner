@@ -256,6 +256,16 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// 密钥保护往返探针（真机验证 DPAPI/Keystore 可用）。
+#[tauri::command]
+fn probe_secret(plain: String) -> String {
+    let enc = crate::crypto::protect_secret(&plain);
+    let dec = crate::crypto::unprotect_secret(&enc);
+    format!("加密={enc}
+解密={dec}
+往返一致={}", dec == plain)
+}
+
 /// TLS 诊断探针（真机排查 mihoyo 域名的 rustls 握手被拒）。
 #[tauri::command]
 fn probe_tls(host: String, port: u16) -> String {
@@ -2194,6 +2204,7 @@ pub fn run() {
             get_app_version,
             probe_tls,
             probe_http,
+            probe_secret,
             open_url,
             check_update,
             refresh_official_unames,
