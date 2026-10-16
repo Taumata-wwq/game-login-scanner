@@ -9,6 +9,7 @@
 pub mod camera;
 pub mod capture;
 pub mod clipboard;
+pub mod crypto_bridge;
 pub mod duplication;
 pub mod http_bridge;
 pub mod jni_bridge;

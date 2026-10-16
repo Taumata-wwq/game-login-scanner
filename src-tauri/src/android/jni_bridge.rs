@@ -150,6 +150,19 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_CameraCaptureBridge_onCa
     outcome.resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// `CryptoBridge.nativeInit()`
+#[no_mangle]
+pub extern "system" fn Java_com_taumata_scanner_plugins_CryptoBridge_nativeInit<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    this: JObject<'local>,
+) {
+    let outcome = unowned_env.with_env(|env| -> Result<(), jni::errors::Error> {
+        super::crypto_bridge::init_from_env(env, &this);
+        Ok(())
+    });
+    outcome.resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// `StreamTunnel.nativeInit()`
 #[no_mangle]
 pub extern "system" fn Java_com_taumata_scanner_plugins_StreamTunnel_nativeInit<'local>(

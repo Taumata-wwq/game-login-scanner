@@ -29,6 +29,7 @@ class ScreenCapturePlugin(private val activity: Activity) : Plugin(activity) {
         // （native 线程后续发起 mihoyo 域名请求需要该注册）。
         HttpBridge
         StreamTunnel
+        CryptoBridge
     }
 
     @Command

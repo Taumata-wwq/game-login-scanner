@@ -148,25 +148,52 @@ pub fn rsa_encrypt_b64(pem: &str, plain: &str) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(cipher))
 }
 
-/// 加密一个字符串字段（DPAPI），返回带前缀的密文。失败回退明文原样返回。
+// ---------- Android Keystore（敏感字段落盘加密） ----------
+
+/// Android Keystore 密文前缀。
+pub const KEYSTORE_PREFIX: &str = "keystore:";
+
+/// 加密一个字符串字段，返回带前缀的密文。失败回退明文原样返回。
+///
+/// 平台策略：Windows 用 DPAPI；Android 用 AndroidKeyStore（AES-256-GCM，密钥不出 TEE）；
+/// 其它平台无保护（开发环境）。
 pub fn protect_secret(plain: &str) -> String {
     if plain.is_empty() {
         return String::new();
     }
+    #[cfg(target_os = "android")]
+    {
+        match crate::android::crypto_bridge::encrypt(plain) {
+            Ok(c) => return format!("{KEYSTORE_PREFIX}{c}"),
+            Err(e) => {
+                log::warn!("Keystore 加密失败，回退明文: {e}");
+                return plain.to_string();
+            }
+        }
+    }
+    #[cfg(not(target_os = "android"))]
     match dpapi_protect(plain.as_bytes()) {
         Some(c) => c,
         None => plain.to_string(),
     }
 }
 
-/// 解密一个字符串字段：带前缀走 DPAPI 解密（失败返回空，避免泄漏密文），
-/// 不带前缀（非本程序写出的数据）返回空。
+/// 解密一个字符串字段：识别前缀走对应解密（失败返回空，避免泄漏密文/误用）；
+/// 不带前缀（旧版明文或外部写入）原样返回，兼容旧数据。
 pub fn unprotect_secret(stored: &str) -> String {
-    match stored.strip_prefix(DPAPI_PREFIX) {
-        Some(b64) => match dpapi_unprotect(b64) {
+    #[cfg(target_os = "android")]
+    if let Some(b64) = stored.strip_prefix(KEYSTORE_PREFIX) {
+        return match crate::android::crypto_bridge::decrypt(b64) {
+            Ok(Some(s)) => s,
+            _ => String::new(),
+        };
+    }
+    if let Some(b64) = stored.strip_prefix(DPAPI_PREFIX) {
+        return match dpapi_unprotect(b64) {
             Some(bytes) => String::from_utf8_lossy(&bytes).to_string(),
             None => String::new(),
-        },
-        None => String::new(),
+        };
     }
+    // 无前缀 = 明文（旧配置或未加密）。原样返回，向后兼容。
+    stored.to_string()
 }
