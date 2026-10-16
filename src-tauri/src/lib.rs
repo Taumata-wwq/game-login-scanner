@@ -2142,14 +2142,6 @@ fn init_file_logging_desktop() {
 // （否则 .so 校验报 "does not include required runtime symbols"）。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Android：配置落点必须用应用私有目录（%APPDATA% 不存在、当前目录不可写）。
-    // 必须在 init_file_logging / AppConfig::load 之前注入。
-    #[cfg(target_os = "android")]
-    {
-        if let Some(dir) = crate::android::files_dir() {
-            crate::config::set_data_dir(dir);
-        }
-    }
     init_file_logging();
 
     let mut cfg = AppConfig::load();
@@ -2274,6 +2266,27 @@ pub fn run() {
             _ => {}
         })
         .setup(move |app| {
+            // Android：配置落点必须用应用私有目录（%APPDATA% 不存在、当前目录不可写）。
+            // 用 Tauri 的跨平台路径解析器（app_data_dir），此处 app 句柄已就绪。
+            // 注入后**重载配置**到 state（run() 阶段的加载用的是默认路径 → 恒默认值）。
+            #[cfg(target_os = "android")]
+            {
+                use tauri::Manager;
+                if crate::config::data_dir().is_none() {
+                    if let Ok(dir) = app.path().app_data_dir() {
+                        crate::config::set_data_dir(dir);
+                        let mut cfg = AppConfig::load();
+                        if cfg.device_id.is_empty() {
+                            cfg.device_id = random_uuid_v4();
+                            let _ = cfg.save();
+                        }
+                        *app.state::<AppState>()
+                            .config
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg;
+                    }
+                }
+            }
             // 恢复主窗口尺寸（逻辑像素；越界值由 min/max 约束自动夹取）与位置。
             // 防御：跳过异常历史值（屏幕外坐标 / 迷你尺寸），避免「看不见的窗口」。
             if let Some(w) = app.get_webview_window("main") {

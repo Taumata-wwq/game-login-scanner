@@ -16,6 +16,11 @@ pub fn set_data_dir(dir: PathBuf) {
     let _ = DATA_DIR.set(dir);
 }
 
+/// 数据目录是否已注入。
+pub fn data_dir() -> Option<&'static PathBuf> {
+    DATA_DIR.get()
+}
+
 /// 游戏。支持米哈游系（崩坏3/星穹铁道/原神/绝区零）与鹰角系（终末地/明日方舟）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
