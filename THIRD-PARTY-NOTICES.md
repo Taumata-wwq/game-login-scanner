@@ -18,17 +18,27 @@
   > zedbar 与 zxing-cpp 仍以 **dev-dependencies** 形式保留，仅用于解码器对照基准
   > （`tests/bench_qr*.rs`），**不进发布二进制**（零体积影响），是上述结论可复现的基础。
 
-## 系统组件（随 Windows 提供，不随本项目分发）
+## 系统组件（随系统提供，不随本项目分发）
 
-- **Media Foundation H.264 解码器**（`CLSID_CMSH264DecoderMFT`）：直播视频解码。
+- **Media Foundation H.264 解码器**（`CLSID_CMSH264DecoderMFT`）：桌面端直播视频解码。
   Windows 10/11 全系内置（N/K 版需安装「媒体功能包」）。
-- **WebView2 运行时**：界面渲染。Win11 已内置；Win10 缺失时由安装包联网下载。
+- **WebView2 运行时**：桌面端界面渲染。Win11 已内置；Win10 缺失时由安装包联网下载。
+- **Android 系统能力**：MediaProjection（屏幕捕获）、Camera2（摄像头取景）、
+  MediaCodec（H.264 硬解）、Android Keystore（令牌加密）——均为操作系统组件。
 
 ## 其余依赖
 
-均为 MIT / Apache-2.0 / BSD / ISC 等宽松许可，包括但不限于：
-tauri、wry、windows（Rust 绑定）、rustls、schannel、serde / serde_json、tokio、
-rsa、sha2 / hmac / md-5、hex、rand、base64、uuid、log / env_logger、dirs、qrcodegen。
+均为 MIT / Apache-2.0 / Zlib 等宽松许可，包括但不限于：
+tauri、wry、windows（Rust 绑定，桌面）、rustls、rustls-native-certs、schannel（桌面）、
+serde / serde_json、tokio、rsa、sha2 / hmac / md-5、hex、rand、base64、
+log / env_logger、qrcodegen、miniz_oxide（MIT OR Zlib OR Apache-2.0）。
+
+Android 端专项依赖：
+
+- anodecs（MIT）：MediaCodec 绑定；jni（MIT/Apache-2.0）：JNI 桥；
+  ndk-context、android_logger（MIT OR Apache-2.0）。
+- **webpki-roots（CDLA-Permissive-2.0）**：Android 端内置 Mozilla 根证书集（该系统无系统
+  证书来源）。属允许型数据许可（Community Data License Agreement），商用分发无额外义务。
 
 > 完整依赖清单可用 `cargo metadata --format-version 1` 生成；
 > 逐包许可证文本以各依赖 crate 仓库为准。

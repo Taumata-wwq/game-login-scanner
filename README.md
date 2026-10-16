@@ -1,8 +1,8 @@
 # 游戏扫码器
 
-Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账号自动完成扫码确认，无需使用手机扫码或手动输入账号。
+Windows 桌面 + Android 双端工具。游戏登录界面出现二维码时，用已登录的账号自动完成扫码确认，无需使用手机扫码或手动输入账号。
 
-基于 Tauri 2（Rust + 系统 WebView2）构建，发布为单文件可执行程序，体积约 4.5 MB。
+基于 Tauri 2（Rust + 系统 WebView）构建：桌面端为单文件可执行程序（体积约 4.5 MB），Android 端为 APK（按 ABI 裁剪，16–24 MB；支持屏幕扫码、摄像头扫码与直播抢码）。
 
 支持的游戏：
 
@@ -14,6 +14,8 @@ Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账
 同一米游社 / B 站账号可登录米哈游全系游戏。账号按游戏独立存储与选择。
 
 > **渠道测试状态**：B 服目前仅在 **崩坏3** 上实测通过；**原神 / 崩坏：星穹铁道 / 绝区零** 的 B 服渠道**尚未测试**（与崩坏3同源、预期可用，但不保证，欢迎反馈）。官服（米游社）渠道四款均已实测。
+
+> **Android 端测试状态**：屏幕扫码、摄像头扫码（官服实测登录通过）、直播抢码（B站 / 抖音）已在真机验证（Redmi K40 / 安卓 13、华为 / 安卓 9）；剪贴板读图与第三方渠道暂未实现。
 
 ## 使用
 
@@ -28,18 +30,31 @@ Windows 桌面工具。游戏登录界面出现二维码时，用已登录的账
 
 窗口位置 / 尺寸、侧栏与游戏列宽、最后观看的直播间、账号与游戏选择、全部设置项均自动记忆，重启后原样恢复。应用为单实例运行（重复启动自动退出，防止配置互相覆盖）。
 
+## Android 端
+
+与桌面端同仓库构建（Tauri 2 Mobile），移动端界面为触屏优化版：
+
+- 底部操作栏三键：**屏幕扫码**（先授权，随后自动把应用切到后台去扫游戏；切回应用自动停止）、**开始扫码**（对当前目标启停）、**摄像头扫码**（取景模式——直接把取景框对准另一块屏幕上的登录二维码即可；识别成功后自动退回主界面）。
+- 左右抽屉：左为直播间列表，右为设置与运行日志。
+- 屏幕 / 摄像头扫码均在本机完成，不需要投屏或其它设备。
+- 构建：先 `pwsh -File scripts/android/patch-gen.ps1`（生成目录补丁，幂等），再 `cargo tauri android build`；依赖 JDK、Android SDK/NDK 与 Rust Android 目标。
+
 ## 延迟说明
 
-直播抢码直接拉取直播流边下边解（B站主流 FLV、HLS-only 房间自动回退 HLS；抖音 FLV），不经过浏览器播放链路，延迟约 0.3~0.4 秒。视频解码走 Windows Media Foundation **H.264 硬解**（系统组件、DXVA 加速、零体积增量；不支持硬件解码的环境自动回退系统软解，画面与扫码不受影响；Windows N/K 版需安装「媒体功能包」）。若本机解码吞吐不足，自动逐级降低清晰度（原画 → 高清 → 标清 → 流畅）；扫码对清晰度要求不高。CDN 节点异常时自动切换节点重连。支持 B站 与 抖音 直播间。
+直播抢码直接拉取直播流边下边解（B站主流 FLV、HLS-only 房间自动回退 HLS；抖音 FLV），不经过浏览器播放链路，延迟约 0.3~0.4 秒。视频解码：桌面端走 Windows Media Foundation **H.264 硬解**（系统组件、DXVA 加速、零体积增量；不支持硬件解码的环境自动回退系统软解，画面与扫码不受影响；Windows N/K 版需安装「媒体功能包」），Android 端走 **MediaCodec 硬解**。若本机解码吞吐不足，自动逐级降低清晰度（原画 → 高清 → 标清 → 流畅）；扫码对清晰度要求不高。CDN 节点异常时自动切换节点重连。支持 B站 与 抖音 直播间。
 
 ## 数据位置
 
 ```
+桌面端：
 %APPDATA%\游戏扫码器\config.json               配置与账号
 %APPDATA%\游戏扫码器\game-login-scanner.log    运行日志（超 2 MB 自动轮转为 .old）
+Android 端：
+应用私有目录 /data/data/com.taumata.game_scanner/（不可直接访问）
+日志经 logcat 查看：adb logcat -s GameScanner
 ```
 
-工具不输入、不存储账号密码，仅保存登录令牌，使用 Windows DPAPI 加密落盘（绑定当前用户，换机器或换用户无法解密）。
+工具不输入、不存储账号密码，仅保存登录令牌：桌面端使用 Windows DPAPI 加密落盘（绑定当前用户，换机器或换用户无法解密），Android 端使用 Android Keystore（AES-256-GCM，密钥不出安全硬件）。
 
 ## 构建
 
@@ -70,7 +85,9 @@ src-tauri/src/
   duplication.rs        DXGI 桌面复制（低开销取帧）
   clipboard.rs          剪贴板读图
   sdk/                  各渠道登录协议（mihoyo / official / bili / hypergryph / cred_login）
+  android/              Android 适配层（MediaProjection / Camera2 / MediaCodec / Keystore 桥）
   config.rs / crypto.rs / http.rs / constants.rs / douyin.rs
+src-tauri/android-plugin/   Android 插件层 Kotlin 源码（屏幕捕获 / 摄像头 / 系统 TLS 桥）
 ```
 
 > 单元测试、真实网络探针与解码基准等内部验证设施为本地材料，不随仓库分发。
