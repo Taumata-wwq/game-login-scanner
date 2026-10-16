@@ -101,7 +101,7 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_CameraCaptureBridge_onFr
     height: jint,
     y_row_stride: jint,
     uv_row_stride: jint,
-    _uv_pixel_stride: jint,
+    uv_pixel_stride: jint,
 ) {
     let outcome = unowned_env.with_env(|env| -> Result<(), jni::errors::Error> {
         if width <= 0 || height <= 0 || y_row_stride <= 0 || uv_row_stride <= 0 {
@@ -127,6 +127,7 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_CameraCaptureBridge_onFr
             height as u32,
             y_row_stride as usize,
             uv_row_stride as usize,
+            uv_pixel_stride.max(1) as usize,
         );
         Ok(())
     });

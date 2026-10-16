@@ -57,22 +57,43 @@ fn fingerprint(data: &[u8]) -> u64 {
     h
 }
 
-/// 逐行拷贝一个平面（剥离行 padding；pixel_stride 恒 1）。
-fn copy_plane(dst: &mut [u8], src: &[u8], w: usize, h: usize, row_stride: usize) {
+/// 逐行拷贝一个平面（剥离行 padding）。pixel_stride=1 时整行拷贝；>1 时按跨距
+/// 采样（相机 U/V 平面常 pixel_stride=2，与另一平面交错共享底层缓冲）。
+fn copy_plane(
+    dst: &mut [u8],
+    src: &[u8],
+    w: usize,
+    h: usize,
+    row_stride: usize,
+    pixel_stride: usize,
+) {
     let usable = (src.len() / row_stride.max(1)).min(h);
-    let copy_w = w.min(row_stride);
-    for y in 0..usable {
-        let off = y * row_stride;
-        if off + copy_w > src.len() {
-            break;
+    if pixel_stride <= 1 {
+        let copy_w = w.min(row_stride);
+        for y in 0..usable {
+            let off = y * row_stride;
+            if off + copy_w > src.len() {
+                break;
+            }
+            dst[y * w..y * w + copy_w].copy_from_slice(&src[off..off + copy_w]);
         }
-        dst[y * w..y * w + copy_w].copy_from_slice(&src[off..off + copy_w]);
+    } else {
+        for y in 0..usable {
+            let roff = y * row_stride;
+            for x in 0..w {
+                let si = roff + x * pixel_stride;
+                if si >= src.len() {
+                    break;
+                }
+                dst[y * w + x] = src[si];
+            }
+        }
     }
 }
 
 /// JNI 回调线程推入一帧相机 YUV420（三平面，各含 row_stride padding）。
 ///
-/// Y：像素跨距 1；U/V：像素跨距 1（相机保证），尺寸 w/2 × h/2（紧凑存储）。
+/// Y：像素跨距 1；U/V：像素跨距可能为 2（交错），尺寸 w/2 × h/2（紧凑存储）。
 pub fn push_frame(
     y: &[u8],
     u: &[u8],
@@ -81,6 +102,7 @@ pub fn push_frame(
     h: u32,
     y_row_stride: usize,
     uv_row_stride: usize,
+    uv_pixel_stride: usize,
 ) {
     if w == 0 || h == 0 || y_row_stride == 0 || uv_row_stride == 0 {
         return;
@@ -97,9 +119,9 @@ pub fn push_frame(
     yv.resize(ww * hh, 0);
     uv.resize(cw * ch, 0);
     vv.resize(cw * ch, 0);
-    copy_plane(&mut yv, y, ww, hh, y_row_stride);
-    copy_plane(&mut uv, u, cw, ch, uv_row_stride);
-    copy_plane(&mut vv, v, cw, ch, uv_row_stride);
+    copy_plane(&mut yv, y, ww, hh, y_row_stride, 1);
+    copy_plane(&mut uv, u, cw, ch, uv_row_stride, uv_pixel_stride);
+    copy_plane(&mut vv, v, cw, ch, uv_row_stride, uv_pixel_stride);
     drop(prev);
 
     let fp = fingerprint(&yv);

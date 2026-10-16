@@ -151,6 +151,7 @@ object CameraCaptureService {
                 image.width, image.height,
                 planes[0].rowStride, planes[1].rowStride, planes[1].pixelStride,
             )
+            // 注：U/V 的 pixelStride 常为 2（交错）——Rust 侧按其采样，见 camera.rs。
         } catch (_: Throwable) {
             // 帧路径不允许异常穿透（否则回调被移除）。
         } finally {
