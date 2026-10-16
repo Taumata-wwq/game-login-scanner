@@ -27,6 +27,18 @@ static SLOT: OnceLock<Mutex<Option<CameraFrame>>> = OnceLock::new();
 static LAST_SCAN_SEQ: AtomicU64 = AtomicU64::new(0);
 /// `preview_frame` 上次消费的帧序号。
 static LAST_PREVIEW_SEQ: AtomicU64 = AtomicU64::new(0);
+/// 相机 sensor 方向（度；预览旋转用）。
+static ROTATION: AtomicU64 = AtomicU64::new(90);
+
+/// 设置相机 sensor 方向（Kotlin 上报）。
+pub fn set_rotation(deg: u32) {
+    ROTATION.store(deg as u64, Ordering::Relaxed);
+}
+
+/// 相机 sensor 方向（度）。
+pub fn rotation() -> u32 {
+    ROTATION.load(Ordering::Relaxed) as u32
+}
 
 /// 取帧侧访问帧槽。
 pub fn lock() -> MutexGuard<'static, Option<CameraFrame>> {

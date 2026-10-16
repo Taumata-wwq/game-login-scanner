@@ -117,6 +117,22 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_CameraCaptureBridge_onFr
     outcome.resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// `CameraCaptureBridge.onCameraInfo(rotationDegrees)`
+#[no_mangle]
+pub extern "system" fn Java_com_taumata_scanner_plugins_CameraCaptureBridge_onCameraInfo<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    rotation_degrees: jint,
+) {
+    let outcome = unowned_env.with_env(|_env| -> Result<(), jni::errors::Error> {
+        if rotation_degrees >= 0 {
+            super::camera::set_rotation(rotation_degrees as u32);
+        }
+        Ok(())
+    });
+    outcome.resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// `CameraCaptureBridge.onCameraStopped()`
 ///
 /// 相机会话停止：清空帧槽与去重状态。

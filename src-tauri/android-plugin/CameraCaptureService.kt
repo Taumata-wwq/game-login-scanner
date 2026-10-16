@@ -51,6 +51,14 @@ object CameraCaptureService {
         if (isRunning) return true
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val cameraId = pickBackCamera(manager) ?: return false
+        // 上报 sensor 方向（预览需据此旋转；后置通常 90）。
+        try {
+            val ch = manager.getCameraCharacteristics(cameraId)
+            val orient = ch.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            CameraCaptureBridge.onCameraInfo(orient)
+        } catch (_: Exception) {
+            CameraCaptureBridge.onCameraInfo(90)
+        }
 
         val t = HandlerThread("CameraFrames").also { it.start() }
         val h = Handler(t.looper)

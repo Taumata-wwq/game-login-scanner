@@ -631,7 +631,7 @@
   }
   .m-camera-view[hidden] { display: none; }
   .mc-canvas {
-    position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
   }
   .mc-frame {
     position: relative; width: 58%; max-width: 250px; aspect-ratio: 1 / 1;
@@ -3698,11 +3698,12 @@
     // 摄像头取景模式：按钮语义优先变为「停止摄像扫描」——点击只退出取景，
     // 不停止任何正在运行的扫描（屏幕 / 直播各路状态不受影响）。
     if (cameraMode) {
-      btn.classList.remove('running');
+      // 摄像头扫码运行中：按钮呈「运行态」视觉（与屏幕/直播扫码的停止态一致）。
+      btn.classList.add('running');
       btn.innerHTML = '<span>停止摄像扫描</span>';
       const mb0 = $('mBtnScan');
       if (mb0) {
-        mb0.classList.remove('running');
+        mb0.classList.add('running');
         mb0.innerHTML = '<span>停止摄像扫描</span>';
       }
       return;
@@ -3858,11 +3859,16 @@
     await reloadLiveRooms();
     pollMetaRound();
     startMetaPoll();
-    // 恢复上次观看的直播间（离线显示封面、开播则自动连接；空表示上次在桌面）。
+    // 恢复上次观看的直播间（离线显示封面、开播则自动连接）。
+    // #8：列表非空时必选中一个——优先上次观看，否则第一个（不管是否开播）。
     {
       const lastLive = (config && config.last_live_id) || '';
-      if (lastLive && liveRooms.some((r) => (r.platform + ':' + r.room) === lastLive)) {
+      const has = (id) => liveRooms.some((r) => (r.platform + ':' + r.room) === id);
+      if (lastLive && has(lastLive)) {
         switchLive(lastLive);
+      } else if (liveRooms.length > 0) {
+        const first = liveRooms[0];
+        switchLive(first.platform + ':' + first.room);
       }
     }
     // 移动端：初始化标题栏（未恢复直播间时显示屏幕预览；有恢复的话切换流程会更新标题）。
@@ -3950,6 +3956,7 @@
         (o) => o.id !== "toolsOverlay" && !o.hidden
       );
     }
+    window.__anyModalOpen = anyModalOpen;
     document.addEventListener("pointerdown", (e) => {
       if (anyModalOpen()) return;
       const W = window.innerWidth;
@@ -4096,7 +4103,11 @@
       if (!(await ensureScreenCapture())) return;
       exitLiveMode();
       renderScan();
-      setTimeout(() => $("btnStart").click(), 50);
+      setTimeout(() => {
+        $("btnStart").click();
+        // 屏幕扫码需用户切到游戏/其它应用才能扫到二维码，给出明确引导。
+        vpToast("已开启屏幕扫码，请移动到其他应用扫描二维码");
+      }, 50);
     });
     // --- 摄像头扫码取景模式（进入 / 退出） ---
     // 纯视图切换：把 .acct-area（账号 + 游戏/区服选择）高度平滑收到 0，
@@ -4141,6 +4152,24 @@
       else enterCameraMode();
     });
 
+    // --- 系统返回键：抽屉打开 / 摄像头取景时拦截，先回到主界面 ---
+    // Android 返回键在 WebView 中触发 history back。用 pushState 垫一层「哨兵」，
+    // popstate 时若处于抽屉或取景态则只做界面复位并补回哨兵（不退出应用）。
+    (function bindBackHandler() {
+      try { history.pushState({ gsGuard: 1 }, ""); } catch (e) {}
+      window.addEventListener("popstate", () => {
+        let handled = false;
+        if (cameraMode) { window.exitCameraMode(); handled = true; }
+        else if (swipeTarget !== 0) { settleSwipe(0); handled = true; }
+        else if (window.__anyModalOpen && window.__anyModalOpen()) { handled = true; }
+        if (handled) {
+          // 补回哨兵：下一次返回继续由本处理器接管。
+          try { history.pushState({ gsGuard: 1 }, ""); } catch (e) {}
+        }
+        // handled=false：哨兵已弹出且无界面可退 → 交给系统（退出应用）。
+      });
+    })();
+
     // --- 摄像头捕获 + 预览 + 扫码 ---
     const mcCanvas = $("mcCanvas");
     const mcTip = $("mcCamTip");
@@ -4161,6 +4190,8 @@
         return;
       }
       if (mcTip) mcTip.textContent = "";
+      // 读取 sensor 方向（预览旋转用）。
+      try { mcRotation = await invoke("camera_rotation"); } catch (_) { mcRotation = 90; }
       // 启动摄像头扫码目标（不依赖 activeScanTarget）。
       invoke("start_scan", { target: "camera" }).catch((e) => log(String(e), "error"));
       scheduleCameraFrame();
@@ -4174,6 +4205,9 @@
       if (!cameraMode) return;
       cameraPreviewTimer = setTimeout(pullCameraFrame, 66);
     }
+    // 离屏源画布：存放相机原始帧（未旋转）。
+    let mcSrc = null;
+    let mcRotation = 90;
     async function pullCameraFrame() {
       if (!cameraMode || cameraPreviewBusy) { scheduleCameraFrame(); return; }
       cameraPreviewBusy = true;
@@ -4183,16 +4217,50 @@
           const dv = new DataView(buf);
           const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
           if (pw && ph && 24 + pw * ph * 4 <= buf.byteLength) {
-            if (mcCanvas.width !== pw || mcCanvas.height !== ph) {
-              mcCanvas.width = pw; mcCanvas.height = ph;
+            if (!mcSrc) mcSrc = document.createElement("canvas");
+            if (mcSrc.width !== pw || mcSrc.height !== ph) {
+              mcSrc.width = pw; mcSrc.height = ph;
             }
             const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
-            mcCanvas.getContext("2d").putImageData(img, 0, 0);
+            mcSrc.getContext("2d").putImageData(img, 0, 0);
+            drawCameraFrame();
           }
         }
       } catch (_) {}
       cameraPreviewBusy = false;
       scheduleCameraFrame();
+    }
+    // 把源帧按 sensor 方向旋转 90/270° 后以 contain 适配绘入取景画布。
+    function drawCameraFrame() {
+      if (!mcSrc) return;
+      // 显示区尺寸（取景层容器）。
+      const host = camView || mcCanvas;
+      const hostW = host.clientWidth || 480;
+      const hostH = host.clientHeight || 270;
+      const rot = ((mcRotation % 360) + 360) % 360;
+      const swap = rot === 90 || rot === 270;
+      const srcW = mcSrc.width, srcH = mcSrc.height;
+      const outW = swap ? srcH : srcW;
+      const outH = swap ? srcW : srcH;
+      // contain 适配显示区（不拉伸、不裁切）。
+      const scale = Math.min(hostW / outW, hostH / outH);
+      const dispW = Math.max(1, Math.round(outW * scale));
+      const dispH = Math.max(1, Math.round(outH * scale));
+      // 画布物理尺寸 = 显示尺寸（1:1，避免 CSS 拉伸失真）。
+      if (mcCanvas.width !== dispW || mcCanvas.height !== dispH) {
+        mcCanvas.width = dispW; mcCanvas.height = dispH;
+      }
+      mcCanvas.style.width = dispW + "px";
+      mcCanvas.style.height = dispH + "px";
+      const ctx = mcCanvas.getContext("2d");
+      ctx.save();
+      ctx.translate(dispW / 2, dispH / 2);
+      ctx.rotate((rot * Math.PI) / 180);
+      const dw = (swap ? dispH : dispW);
+      const dh = (swap ? dispW : dispH);
+      ctx.drawImage(mcSrc, -dw / 2, -dh / 2, dw, dh);
+      ctx.restore();
+    }
     }
 
 
@@ -4217,19 +4285,7 @@
     (function bindViewportTouch() {
       const cv = $("previewCanvas");
       if (!cv) return;
-      // 双击切换 contain/cover
-      let lastTap = 0;
-      cv.addEventListener("touchend", (e) => {
-        const now = Date.now();
-        if (now - lastTap < 280 && e.changedTouches.length === 1) {
-          window.__coverFill__ = !window.__coverFill__;
-          try { invoke("frontend_log", { level: "info", msg: "视口双击 -> cover=" + window.__coverFill__ }); } catch (x) {}
-          coverFill = window.__coverFill__;
-          drawView();
-        }
-        lastTap = now;
-      }, { passive: true });
-      // 单指平移 / 双指捏合缩放
+      // 单指平移 / 双指捏合缩放（双击放大已移除，仅保留双指缩放与拖拽平移）
       let t0 = null, t1 = null, pinchDist0 = 0, scale0 = 1;
       cv.addEventListener("touchstart", (e) => {
         if (!preview) { vpToast('先点「屏幕扫码」授权捕获，再捏合缩放'); return; }

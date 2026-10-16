@@ -1800,6 +1800,12 @@ async fn capture_live_frame(
     .map_err(|e| format!("直播取帧任务失败: {e}"))?
 }
 
+/// 相机 sensor 方向（度；预览旋转用）。
+#[tauri::command]
+fn camera_rotation() -> u32 {
+    crate::camera_plugin::camera_rotation()
+}
+
 /// 相机预览帧（Android）：24 字节头（w,h,0,0,w=相机宽,h=相机高）+ RGBA。
 /// 无新帧返回 24 字节零头（前端沿用上一帧）；相机未运行返回空。
 #[tauri::command]
@@ -2136,6 +2142,14 @@ fn init_file_logging_desktop() {
 // （否则 .so 校验报 "does not include required runtime symbols"）。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Android：配置落点必须用应用私有目录（%APPDATA% 不存在、当前目录不可写）。
+    // 必须在 init_file_logging / AppConfig::load 之前注入。
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dir) = crate::android::files_dir() {
+            crate::config::set_data_dir(dir);
+        }
+    }
     init_file_logging();
 
     let mut cfg = AppConfig::load();
@@ -2220,6 +2234,7 @@ pub fn run() {
             crate::camera_plugin::stop_camera_capture,
             crate::camera_plugin::camera_capture_state,
             capture_camera_frame,
+            camera_rotation,
         ])
         .on_window_event(|window, event| match event {
             // 关闭主窗口 = 退出程序。退出前记住主窗口位置。

@@ -29,6 +29,9 @@ object CameraCaptureBridge {
      */
     external fun onFrame(buffer: ByteBuffer, width: Int, height: Int, rowStride: Int)
 
+    /** 上报相机 sensor 方向（度；预览旋转用）。 */
+    external fun onCameraInfo(rotationDegrees: Int)
+
     /** 相机会话停止（用户停止 / 出错 / 服务销毁）时通知 Rust 清理状态。 */
     external fun onCameraStopped()
 }

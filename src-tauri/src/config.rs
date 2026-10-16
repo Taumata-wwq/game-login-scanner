@@ -1,7 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::crypto;
+
+/// 跨平台数据目录覆盖（Android 上由 setup 注入 Tauri 的 app_data_dir）。
+///
+/// 桌面端不设置（沿用 `%APPDATA%\游戏扫码器`，保持向后兼容）；Android 上
+/// `%APPDATA%` 环境变量不存在、当前目录不可写 → 必须由外部注入应用数据目录，
+/// 否则配置读写全部失败（真机实测：重启后直播间列表/设置全丢）。
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// 注入数据目录（仅 Android 调用；桌面端保持默认路径）。
+pub fn set_data_dir(dir: PathBuf) {
+    let _ = DATA_DIR.set(dir);
+}
 
 /// 游戏。支持米哈游系（崩坏3/星穹铁道/原神/绝区零）与鹰角系（终末地/明日方舟）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -551,6 +564,11 @@ impl AppConfig {
     /// 直接取 `%APPDATA%`（= `dirs::config_dir()` 在 Windows 上的取值）：本工具
     /// 仅支持 Windows，去掉 `dirs` 依赖（省一个 crate 的体积与依赖面）。
     pub fn path() -> PathBuf {
+        // Android：用注入的应用数据目录（app_data_dir 已含应用标识，不再拼 DIR）。
+        if let Some(dir) = DATA_DIR.get() {
+            return dir.join("config.json");
+        }
+        // 桌面：沿用 %APPDATA%游戏扫码器config.json（向后兼容既有配置）。
         let base = std::env::var_os("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));

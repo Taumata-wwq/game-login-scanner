@@ -127,6 +127,18 @@ pub fn camera_preview(tw: u32) -> Option<(Vec<u8>, u32, u32)> {
     }
 }
 
+/// 相机 sensor 方向（度；预览旋转用）。
+pub fn camera_rotation() -> u32 {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::camera::rotation()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        0
+    }
+}
+
 /// 相机扫码取帧（Android）：返回灰度帧；无新帧 None。
 pub fn camera_scan_frame(scale: u32) -> Option<crate::screenshot::GrayFrame> {
     #[cfg(target_os = "android")]
