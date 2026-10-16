@@ -193,6 +193,23 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_HttpBridge_nativeInit<'l
     outcome.resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// `ClipboardBridge.nativeInit()`
+///
+/// Kotlin `ClipboardBridge.attach()`（由 ScreenCapturePlugin 注册时调用）触发：
+/// 注册 JavaVM 与类全局引用，供后续 native 线程读取剪贴板位图
+/// （扫码「剪贴板优先」路径；2026-10-17 新增）。
+#[no_mangle]
+pub extern "system" fn Java_com_taumata_scanner_plugins_ClipboardBridge_nativeInit<'local>(
+    mut unowned_env: EnvUnowned<'local>,
+    this: JObject<'local>,
+) {
+    let outcome = unowned_env.with_env(|env| -> Result<(), jni::errors::Error> {
+        super::clipboard::init_from_env(env, &this);
+        Ok(())
+    });
+    outcome.resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// `CameraCaptureBridge.onCameraStopped()`
 ///
 /// 相机会话停止：清空帧槽与去重状态。

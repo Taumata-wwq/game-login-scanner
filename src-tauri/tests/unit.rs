@@ -1580,3 +1580,33 @@ fn sps_dimensions_finds_sps_after_other_nalus() {
     data.extend_from_slice(&make_sps(80, 45));
     assert_eq!(sps_dimensions(&data), Some((1280, 720)));
 }
+
+// ---------- android 剪贴板载荷解析（跨平台纯函数） ----------
+
+#[test]
+fn clipboard_payload_parses_rgba() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    let (rgba, w, h) = qr::parse_clipboard_payload(&bytes).unwrap();
+    assert_eq!((w, h), (2, 1));
+    assert_eq!(rgba, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn clipboard_payload_rejects_malformed() {
+    // 头部不足 8 字节
+    assert!(qr::parse_clipboard_payload(&[0u8; 7]).is_none());
+    // 头部齐但像素数据不足（2x2 需要 16 字节，只给 15）
+    let mut short = Vec::new();
+    short.extend_from_slice(&2u32.to_le_bytes());
+    short.extend_from_slice(&2u32.to_le_bytes());
+    short.extend_from_slice(&[0u8; 15]);
+    assert!(qr::parse_clipboard_payload(&short).is_none());
+    // 零尺寸
+    let mut zero = Vec::new();
+    zero.extend_from_slice(&0u32.to_le_bytes());
+    zero.extend_from_slice(&1u32.to_le_bytes());
+    assert!(qr::parse_clipboard_payload(&zero).is_none());
+}

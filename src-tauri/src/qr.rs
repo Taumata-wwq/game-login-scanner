@@ -207,6 +207,26 @@ pub fn read_clipboard_gray() -> Option<(Vec<u8>, u32, u32)> {
     Some((rgba_to_gray(&rgba, w, h), w, h))
 }
 
+/// 解析 Android 剪贴板桥载荷：`[w:u32 LE][h:u32 LE][RGBA...]` → (RGBA, 宽, 高)。
+///
+/// 纯函数（unit.rs 覆盖）：头部不足 / 零尺寸 / 像素数据不足 → None。
+/// 供 `android::clipboard` 使用；Windows 路径不经此处。
+pub fn parse_clipboard_payload(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let w = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let h = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let need = 8usize.checked_add((w as usize).checked_mul(h as usize)?.checked_mul(4)?)?;
+    if bytes.len() < need {
+        return None;
+    }
+    Some((bytes[8..need].to_vec(), w, h))
+}
+
 // ---------- 二维码生成 ----------
 
 /// 把文本编码为二维码 SVG，供前端直接内嵌展示。
