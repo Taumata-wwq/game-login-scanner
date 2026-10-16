@@ -23,7 +23,7 @@ use serde::Serialize;
 use tauri::Emitter;
 use tauri::Manager;
 
-use crate::config::{BiliToken, Channel, Game, OfficialToken};
+use crate::config::{BiliToken, Channel, ChannelAccount, Game, OfficialToken};
 use crate::duplication::MonitorKey;
 use crate::qr::{self, QrCode, QrKind};
 use crate::sdk::{hypergryph, mihoyo, official};
@@ -97,10 +97,19 @@ struct ScanContext {
     target: String,
     /// 游戏内显示的账号名（B 服 confirm 的 asterisk_name）。
     display_name: String,
+    /// 当前选中的第三方渠道账号（有则确认走渠道分支）。
+    channel: Option<ChannelAccount>,
+    /// 渠道账号的 bh_info（一次验证后缓存，确认零等待）。
+    channel_bh_info: Option<mihoyo::BhInfo>,
+    /// 渠道凭证被服务端明确拒绝：本会话内不再重试。
+    channel_broken: bool,
 }
 
 impl ScanContext {
     fn current_ready(&self) -> bool {
+        if let Some(a) = &self.channel {
+            return !a.cred.is_empty();
+        }
         match self.current {
             Channel::Bilibili => !self.bili.uid.is_empty() && !self.bili.access_key.is_empty(),
             Channel::Official => !self.official.stoken.is_empty() && !self.official.mid.is_empty(),
@@ -152,14 +161,24 @@ impl ScanContext {
         if !self.current_ready() {
             return Handled::MissingAccount;
         }
-        let ch = self.current;
-
         // 同一票据只提示一次「正在确认」；重试时静默，避免日志刷屏。
         let first_attempt = self
             .tried_tickets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(ticket.to_string());
+
+        // 第三方渠道账号：凭证 → combo 凭证 → scan_confirm（与 B 服同端点）。
+        if self.channel.is_some() {
+            return match self
+                .confirm_channel(app, ticket, biz_key, first_attempt)
+                .await
+            {
+                Ok(()) => Handled::Success,
+                Err(e) => Handled::Failed(e),
+            };
+        }
+        let ch = self.current;
 
         match self
             .confirm_with(app, ch, ticket, biz_key, first_attempt)
@@ -186,6 +205,86 @@ impl ScanContext {
             r = self.confirm_inner(app, ch, ticket, biz_key, verbose) => r,
             _ = wait_for_stop(&stop) => Err(STOP_MARKER.to_string()),
         }
+    }
+
+    /// 第三方渠道账号确认：与停止信号 `select!` 竞争（同 `confirm_with`）。
+    async fn confirm_channel(
+        &mut self,
+        app: &tauri::AppHandle,
+        ticket: &str,
+        biz_key: &str,
+        verbose: bool,
+    ) -> Result<(), String> {
+        let stop = self.stop.clone();
+        tokio::select! {
+            r = self.confirm_channel_inner(app, ticket, biz_key, verbose) => r,
+            _ = wait_for_stop(&stop) => Err(STOP_MARKER.to_string()),
+        }
+    }
+
+    async fn confirm_channel_inner(
+        &mut self,
+        app: &tauri::AppHandle,
+        ticket: &str,
+        biz_key: &str,
+        verbose: bool,
+    ) -> Result<(), String> {
+        let acct = match self.channel.clone() {
+            Some(a) => a,
+            None => return Err("未选择渠道账号".to_string()),
+        };
+        let label = crate::sdk::channel::parse(&acct.channel)
+            .map(|c| c.label)
+            .unwrap_or("渠道");
+        if self.channel_broken {
+            return Err(format!(
+                "{label}账号校验未通过（凭证可能已过期），请重新登录该账号"
+            ));
+        }
+        if self.channel_bh_info.is_none() {
+            if verbose {
+                emit(
+                    app,
+                    &self.target,
+                    "info",
+                    format!("正在校验{label}渠道账号…"),
+                );
+            }
+            match crate::sdk::channel::verify(&acct.channel, &self.device_id, &acct.cred).await {
+                Ok(info) => self.channel_bh_info = Some(info),
+                Err(e) => {
+                    // 与 B 服同策略：服务端明确拒绝则本会话不再重试；网络类错误保持可重试。
+                    if !(e.starts_with("米哈游请求失败") || e.starts_with("读取响应失败"))
+                    {
+                        self.channel_broken = true;
+                        return Err(format!(
+                            "{label}账号校验失败: {e}（请在「账号」中重新登录该账号）"
+                        ));
+                    }
+                    return Err(format!("{label}账号校验失败: {e}"));
+                }
+            }
+        }
+        let info = self.channel_bh_info.as_ref().expect("bh_info 已就绪");
+        if verbose {
+            emit(
+                app,
+                &self.target,
+                "info",
+                format!(
+                    "识别到{}登录码，正在用{label}渠道账号确认…",
+                    self.game.label()
+                ),
+            );
+        }
+        mihoyo::scan_confirm(
+            info,
+            ticket,
+            biz_key,
+            &self.display_name,
+            self.game.app_id(),
+        )
+        .await
     }
 
     async fn confirm_inner(
@@ -883,6 +982,9 @@ pub struct ScanArgs {
     pub stop: Arc<AtomicBool>,
     /// 游戏内显示的账号名（B 服 confirm 用）。
     pub display_name: String,
+    /// 当前选中的第三方渠道账号（渠道扩展；有则优先于 `current_channel`）。
+    /// 确认时以 `channel::verify` 换 combo 凭证，再走与 B 服相同的 scan_confirm。
+    pub channel_account: Option<ChannelAccount>,
     /// 扫码目标（多路并行；桌面与最多 5 个直播间各一个独立任务）。
     pub target: ScanTarget,
     /// 跨目标共享的「已尝试票据」集：同一码出现在多个房间时不重复确认。
@@ -903,6 +1005,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         display_name,
         target,
         tried_tickets,
+        channel_account,
     } = args;
     let tkey = target.key();
     // 扫码循环固定 60Hz：扫码期间无论画面是否静止，检测频率不低于 60fps。
@@ -910,6 +1013,10 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
     let interval = Duration::from_millis(16);
     let ch_desc = if current_game.is_hypergryph() {
         "鹰角".to_string()
+    } else if let Some(a) = channel_account.as_ref() {
+        crate::sdk::channel::parse(&a.channel)
+            .map(|c| c.label.to_string())
+            .unwrap_or_else(|| a.channel.clone())
     } else {
         current_channel.label().to_string()
     };
@@ -933,6 +1040,9 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         tried_tickets,
         target: tkey.clone(),
         display_name,
+        channel: channel_account,
+        channel_bh_info: None,
+        channel_broken: false,
     };
     let mut st = LoopState::new();
     // 直播取帧流水线（仅直播目标；与解码并行，随 stop 停止，函数返回时自动 join）。

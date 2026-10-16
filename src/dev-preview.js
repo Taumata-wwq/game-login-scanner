@@ -18,6 +18,7 @@
     ],
     hypergryph_accounts: [],
     channel_accounts: [],
+    active_channel: {},
     current_game: "bh3",
     active_bili: { bh3: "10001" },
     active_official: { bh3: "20001" },
@@ -206,6 +207,17 @@
           // --- 账号：选择 / 删除 / 备注 全部落盘到 mock cfg ---
           case "select_account": {
             var g = (args && args.game) || cfg.current_game;
+            // 第三方渠道账号（channel 形如 "channel:xiaomi"）：选择存 active_channel。
+            if (args && String(args.channel).indexOf("channel:") === 0) {
+              var ckey = String(args.channel).slice(8);
+              var hit2 = (cfg.channel_accounts || []).some(function (t) {
+                return t.channel === ckey && t.game === g && t.uid === args.uid;
+              });
+              if (!hit2) return reject("账号不存在");
+              cfg.active_channel = cfg.active_channel || {};
+              cfg.active_channel[g] = { channel: ckey, uid: args.uid };
+              return Promise.resolve();
+            }
             var list = acctList(args.channel);
             var key = args.uid;
             var hit = list.some(function (t) { return t.game === g && t.uid === key; });
@@ -296,6 +308,9 @@
               cred: "mock", alias: "", remark: "", last_login_succ: true, last_used_at: nowSec()
             });
             console.log("[dev-preview] 已添加渠道账号 " + cuid + "（" + cch + "）");
+            // 与真实后端一致：登录即选中该账号。
+            cfg.active_channel = cfg.active_channel || {};
+            cfg.active_channel[cg] = { channel: cch, uid: cuid };
             return Promise.resolve({ channel: cch, channel_label: "预览渠道", uid: cuid, name: "预览渠道号 " + cuid });
           }
           case "delete_channel_account": {

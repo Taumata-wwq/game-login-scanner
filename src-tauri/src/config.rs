@@ -165,6 +165,19 @@ pub struct ChannelAccount {
     pub last_used_at: i64,
 }
 
+/// 第三方渠道账号的「当前账号」选择（game → 渠道 key + uid）。
+///
+/// 与 `active_bili` / `active_official` 对位，只是标识需要两元组（渠道 + UID）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChannelSel {
+    /// 渠道 key（如 `xiaomi`）。
+    #[serde(default)]
+    pub channel: String,
+    /// 该渠道下的账号 UID。
+    #[serde(default)]
+    pub uid: String,
+}
+
 /// 官服账号令牌（一个账号一条记录）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OfficialToken {
@@ -257,6 +270,10 @@ pub struct AppConfig {
     /// 各游戏「上次使用的渠道」，切换游戏时恢复（game → channel）。
     #[serde(default)]
     pub game_channel: std::collections::HashMap<String, Option<Channel>>,
+    /// 各游戏「当前选中的第三方渠道账号」（game → 渠道 key + uid）。
+    /// 有值时优先于 `game_channel`（渠道账号一旦选中即以它确认登录码）。
+    #[serde(default)]
+    pub active_channel: std::collections::HashMap<String, ChannelSel>,
     /// 游戏内显示的账号名（B 服 combo/panda confirm 的 asterisk_name 字段）。
     /// 空则用默认「游戏扫码器用户」。
     #[serde(default)]
@@ -337,6 +354,7 @@ impl Default for AppConfig {
             active_official: std::collections::HashMap::new(),
             active_hypergryph: std::collections::HashMap::new(),
             game_channel: std::collections::HashMap::new(),
+            active_channel: std::collections::HashMap::new(),
             display_name: String::new(),
             auto_login_last: false,
             always_on_top: false,
@@ -375,6 +393,33 @@ impl AppConfig {
         self.official_accounts
             .iter()
             .find(|t| t.uid == *uid && t.game == game)
+    }
+
+    /// 某游戏当前激活的第三方渠道账号（有则优先于 B服 / 官服选择）。
+    pub fn active_channel_account(&self, game: &str) -> Option<&ChannelAccount> {
+        let sel = self.active_channel.get(game)?;
+        self.channel_accounts
+            .iter()
+            .find(|a| a.channel == sel.channel && a.uid == sel.uid && a.game == game)
+    }
+
+    /// 把某渠道账号设为该游戏的当前账号（账号必须已存在）。
+    pub fn set_current_channel(&mut self, game: &str, channel: &str, uid: &str) -> bool {
+        let exists = self
+            .channel_accounts
+            .iter()
+            .any(|a| a.channel == channel && a.uid == uid && a.game == game);
+        if !exists {
+            return false;
+        }
+        self.active_channel.insert(
+            game.to_string(),
+            ChannelSel {
+                channel: channel.to_string(),
+                uid: uid.to_string(),
+            },
+        );
+        true
     }
 
     /// 某游戏当前激活的鹰角账号。

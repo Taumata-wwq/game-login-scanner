@@ -654,6 +654,9 @@ async fn channel_login(
             ..Default::default()
         });
     }
+    // 登录即选中（与 B服 / 官服登录行为一致）：新账号直接成为该游戏的当前账号，
+    // 用户不必再点一次选中按钮。
+    cfg.set_current_channel(&game, &channel, &uid);
     cfg.save().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "channel": channel,
@@ -677,6 +680,15 @@ fn delete_channel_account(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     cfg.channel_accounts
         .retain(|a| !(a.channel == channel && a.game == game && a.uid == uid));
+    // 同步清掉「当前账号」选择，否则指向已删除账号（扫描时会找不到凭证）。
+    let stale = cfg
+        .active_channel
+        .get(&game)
+        .map(|s| s.channel == channel && s.uid == uid)
+        .unwrap_or(false);
+    if stale {
+        cfg.active_channel.remove(&game);
+    }
     let _ = cfg.save();
     Ok(())
 }
@@ -691,6 +703,19 @@ fn select_account(
     channel: String,
     uid: String,
 ) -> Result<(), String> {
+    // 第三方渠道账号：channel 形如 "channel:xiaomi"，走独立的选择存储
+    // （渠道标识是「key + uid」二元组，无法塞进 Channel 枚举）。
+    if let Some(key) = channel.strip_prefix("channel:") {
+        let mut cfg = state
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !cfg.set_current_channel(&game, key, &uid) {
+            return Err("账号不存在".to_string());
+        }
+        let _ = cfg.save();
+        return Ok(());
+    }
     let channel = Channel::parse(&channel).ok_or_else(|| "未知渠道".to_string())?;
     let mut cfg = state
         .config
@@ -699,6 +724,8 @@ fn select_account(
     if !cfg.set_current(&game, channel, &uid) {
         return Err("账号不存在".to_string());
     }
+    // 选中 B服 / 官服账号时清掉该游戏的渠道账号选择，避免两处「当前账号」并存。
+    cfg.active_channel.remove(&game);
     let _ = cfg.save();
     drop(cfg);
     // 切换到 B 服账号时立即后台预校验（扫描确认零等待；失败提前暴露）。
@@ -1999,6 +2026,8 @@ fn try_start_scan(
     let bili = cfg.active_bili(&game).cloned().unwrap_or_default();
     let official = cfg.active_official(&game).cloned().unwrap_or_default();
     let hyper = cfg.active_hypergryph(&game).cloned().unwrap_or_default();
+    // 第三方渠道账号（选中后优先于 B服/官服；确认时以其渠道凭证换 combo 凭证）。
+    let channel_account = cfg.active_channel_account(&game).cloned();
     // 鹰角游戏用鹰角账号；米哈游系用 game_channel 对应的账号。
     let current_channel = if cfg.current_game.is_hypergryph() {
         let ready = !hyper.phone.is_empty() && !hyper.token.is_empty();
@@ -2007,6 +2036,10 @@ fn try_start_scan(
         }
         // 鹰角游戏用 Official 占位（下游只对米哈游码生效，鹰角码走独立分支）。
         Channel::Official
+    } else if channel_account.is_some() {
+        // 已选中第三方渠道账号：确认走 ScanContext 的渠道分支，此处仅作占位
+        // （下游 current_ready / confirm 都以 channel_account 为准）。
+        Channel::Bilibili
     } else {
         let Some(ch) = cfg.game_channel.get(&game).copied().flatten() else {
             return Err("请先在「账号」中选择一个要使用的账号".to_string());
@@ -2065,6 +2098,7 @@ fn try_start_scan(
                 display_name,
                 target,
                 tried_tickets: tried,
+                channel_account,
             },
         )
         .await;

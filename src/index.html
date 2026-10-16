@@ -1552,7 +1552,10 @@
   function isCurrentAccount(ch, key) {
     if (!config) return false;
     // 渠道账号的「当前账号」机制待确认路由接入（后续版本）。
-    if (isChannelAcct(ch)) return false;
+    if (isChannelAcct(ch)) {
+      const sel = (config.active_channel || {})[curGameId()];
+      return !!sel && sel.channel === ch.slice(8) && sel.uid === key;
+    }
     const g = curGameId();
     if (ch === 'hypergryph') return (config.active_hypergryph || {})[g] === key;
     const curCh = (config.game_channel || {})[g];
@@ -1698,8 +1701,7 @@
       del.title = '删除该账号';
       del.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
       del.addEventListener('click', (e) => { e.stopPropagation(); deleteAccount(ch, key); });
-      if (!isChannelAcct(ch)) row.append(radio);
-      row.append(chip, nm, remark, del);
+      row.append(radio, chip, nm, remark, del);
       // 双击行（非按钮/选中点）→ 编辑备注（内部弹窗）；移动端触摸无双击：长按触发。
       row.addEventListener('dblclick', (e) => {
         if (e.target.closest('.radio') || e.target.closest('.ibtn')) return;

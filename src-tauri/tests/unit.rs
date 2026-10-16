@@ -3,7 +3,9 @@
 //! 注：本文件与 smoke.rs 随仓库入库并由 CI 运行；依赖 tests/assets 的用例
 //! 在素材缺失时自动跳过，不阻断 CI。
 
-use game_login_scanner_lib::config::{AppConfig, BiliToken, Channel, OfficialToken};
+use game_login_scanner_lib::config::{
+    AppConfig, BiliToken, Channel, ChannelAccount, OfficialToken,
+};
 use game_login_scanner_lib::constants;
 use game_login_scanner_lib::crypto;
 use game_login_scanner_lib::qr::{self, QrKind};
@@ -1701,4 +1703,40 @@ fn channel_account_cred_encrypted_on_save_roundtrip() {
     assert_eq!(back.channel_accounts.len(), 1);
     assert_eq!(back.channel_accounts[0].channel, "xiaomi");
     assert_eq!(back.channel_accounts[0].uid, "10001");
+}
+
+#[test]
+fn channel_account_current_selection_roundtrip() {
+    // 渠道账号的「当前账号」为二元组（渠道 key + uid），选中后可被扫描链路取到；
+    // 选中 B服/官服时清除渠道选择，避免两处「当前账号」并存。
+    let mut cfg = AppConfig::default();
+    cfg.channel_accounts.push(ChannelAccount {
+        channel: "vivo".into(),
+        game: "bh3".into(),
+        uid: "V-1".into(),
+        name: "vivo用户".into(),
+        cred: "{\"authtoken\":\"tk\"}".into(),
+        ..Default::default()
+    });
+    // 未选中 → 无渠道账号
+    assert!(cfg.active_channel_account("bh3").is_none());
+    // 不存在的选择（渠道/uid/game 任一不匹配）→ 失败
+    assert!(!cfg.set_current_channel("bh3", "vivo", "V-404"));
+    assert!(!cfg.set_current_channel("bh3", "xiaomi", "V-1"));
+    assert!(!cfg.set_current_channel("genshin", "vivo", "V-1"));
+    // 正常选中
+    assert!(cfg.set_current_channel("bh3", "vivo", "V-1"));
+    let act = cfg.active_channel_account("bh3").expect("已选中");
+    assert_eq!(act.channel, "vivo");
+    assert_eq!(act.cred, "{\"authtoken\":\"tk\"}");
+    // 序列化往返（`#[serde(default)]` 兼容旧配置）
+    let text = serde_json::to_string(&cfg).unwrap();
+    let back: AppConfig = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        back.active_channel_account("bh3").map(|a| a.uid.clone()),
+        Some("V-1".to_string())
+    );
+    // 选中官服后清掉渠道选择（与 lib::select_account 行为一致）
+    cfg.active_channel.remove("bh3");
+    assert!(cfg.active_channel_account("bh3").is_none());
 }
