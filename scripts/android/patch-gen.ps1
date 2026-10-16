@@ -151,6 +151,64 @@ if (Test-Path $legacyDst) {
     Write-Host "  = 无历史残留目录"
 }
 
+Write-Host "== 5b. 渠道 SDK 模块引入（mi_sdk，可选；vendor 本地材料）=="
+# 渠道 SDK 二进制不入库（再分发条款限制）：vendor/mi_sdk 存在则引入小米 SDK 模块，
+# 不存在则跳过（不影响基础构建）。模块来源：参考项目 bh3_login_simulation 的 mi_sdk。
+$miSrc = Join-Path $root "vendor/mi_sdk"
+$miDst = Join-Path $gen "mi_sdk"
+if (-not (Test-Path $miSrc)) {
+    Write-Host "  ! 未找到 vendor/mi_sdk（跳过渠道 SDK 引入；渠道登录将不可用）"
+} else {
+    # 镜像拷贝（先清后拷，保证与 vendor 一致）
+    if (Test-Path $miDst) { Remove-Item -Recurse -Force $miDst }
+    Copy-Item -Recurse -Force $miSrc $miDst
+    Write-Host "  -> mi_sdk 模块已同步（gen/android/mi_sdk）"
+
+    # settings.gradle：幂等追加 include（LF、UTF-8 无 BOM）
+    $settingsPath = Join-Path $gen "settings.gradle"
+    $sc = [System.IO.File]::ReadAllText($settingsPath)
+    if ($sc -notmatch ":mi_sdk") {
+        if (-not $sc.EndsWith("`n")) { $sc += "`n" }
+        $sc += "include ':mi_sdk'`n"
+        [System.IO.File]::WriteAllText($settingsPath, $sc, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "  + settings.gradle: include ':mi_sdk'"
+    } else {
+        Write-Host "  = settings.gradle 已含 :mi_sdk"
+    }
+
+    # app/build.gradle.kts：幂等插入模块依赖（CRLF 保持，仅替换首个 dependencies 块声明）
+    $appGradlePath = Join-Path $gen "app/build.gradle.kts"
+    $ag = [System.IO.File]::ReadAllText($appGradlePath)
+    if ($ag -notmatch [regex]::Escape('project(":mi_sdk")')) {
+        $ag = $ag.Replace("dependencies {", "dependencies {`r`n    implementation(project(`":mi_sdk`"))")
+        [System.IO.File]::WriteAllText($appGradlePath, $ag, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host '  + app/build.gradle.kts: implementation(project(":mi_sdk"))'
+    } else {
+        Write-Host "  = app/build.gradle.kts 已含 :mi_sdk 依赖"
+    }
+}
+
+Write-Host "== 5c. 渠道混淆规则（参考项目 proguard 规则，幂等刷新）=="
+# 渠道 SDK 需要整套 keep/dontwarn（含 -ignorewarnings 与 -dontwarn com.google.**，
+# 否则 R8 full mode 因小米 SDK 的 protobuf 隐式引用报 Missing class 失败）。
+# 规则在 gen/android/app/proguard-rules.pro 以标记段形式追加，每次刷新为最新。
+$chanRules = Join-Path $root "scripts/android/channel-proguard-rules.pro"
+$proguardPath = Join-Path $gen "app/proguard-rules.pro"
+if (-not (Test-Path $chanRules)) {
+    Write-Host "  ! 未找到 scripts/android/channel-proguard-rules.pro（跳过）"
+} else {
+    $marker = "# === channel proguard rules (from bh3_login_simulation) ==="
+    $pg = [System.IO.File]::ReadAllText($proguardPath)
+    if ($pg.Contains($marker)) {
+        # 移除旧段后重写（支持规则文件更新）
+        $pg = $pg.Substring(0, $pg.IndexOf($marker))
+    }
+    $rules = [System.IO.File]::ReadAllText($chanRules)
+    $pg = $pg.TrimEnd() + "`n`n" + $marker + "`n" + $rules
+    [System.IO.File]::WriteAllText($proguardPath, $pg, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  + app/proguard-rules.pro 渠道路段已刷新"
+}
+
 Write-Host "== 6. AndroidManifest：屏幕捕获权限与前台服务声明 =="
 $manifest = Join-Path $gen "app/src/main/AndroidManifest.xml"
 $c = Get-Content $manifest -Raw
