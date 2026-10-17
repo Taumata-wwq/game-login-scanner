@@ -9,9 +9,12 @@ name = "game_login_scanner_lib"
 # rlib：桌面端 bin 通过 lib 调用；
 # cdylib：Android 端 Tauri 需要 .so 动态库产物（libgame_login_scanner_lib.so）。
 crate-type = ["rlib", "cdylib"]
-# 内联测试 harness 链接 tauri 后因缺 manifest 在 Windows 启动即崩（见 build.rs），
-# 统一改为 tests/ 集成测试，故禁用 lib/bin 的默认测试目标。
-test = false
+# 历史：内联测试 harness 链接 tauri 后因缺 manifest 在 Windows 启动即崩，故曾
+# 禁用 lib/bin 的默认测试目标，把用例全迁到 tests/。build.rs 现已为测试目标补
+# 同款 manifest（embed_resource::compile_for_tests），lib 内联测试恢复可执行
+# （watch.rs 3 个协议包用例 + lib.rs 1 个版本号用例，2026-10-17 实测 4 passed）。
+# bin 仍禁用：main.rs 只有单实例守卫与 run() 调用，无独立可测逻辑。
+test = true
 
 [[bin]]
 name = "game-login-scanner"
@@ -71,8 +74,29 @@ rustls-native-certs = "0.8.4"
 # 弹幕 WS（开播/下播即时监测，watch.rs）：B站下行批次可能为 zlib（protover=2）。
 # 纯 Rust 解压，无 C 依赖；同版本已在依赖树中（tauri-codegen → png → flate2）。
 miniz_oxide = "0.8"
+
+# 仅基准使用（不进发布二进制）：zxing-cpp（C++ 参考实现，bundled 编译 C++ 内核，
+# Apache-2.0）与 zedbar（旧生产解码器）——在**真实直播帧**上做解码器对照基准
+# （docs/调研-QR解码性能-*.md）。二者由 `bench-qr` 特性开启，默认构建不引入，
+# 故不影响体积；见 [features] 中该特性与 [[test]] bench_qr_live 的说明。
+zxing-cpp = { version = "0.5", features = ["bundled"], optional = true }
+zedbar = { version = "0.7", default-features = false, features = ["qrcode"], optional = true }
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+# 二维码解码器对照基准（bench_qr_live 用 zxing-cpp 的 bundled C++ 内核）。
+# 该 C++ 库以 release CRT（/MD）构建，而 dev profile 的测试目标链接的是 debug
+# CRT（/MDd）→ 默认 `cargo test` 会在链接期报 LNK2001 `__imp__CrtDbgReport`。
+# 故把它设为可选特性：默认质量门（`cargo test`）不构建该目标，跑基准时用
+# `cargo test --profile fastbench --features bench-qr --test bench_qr_live`。
+bench-qr = ["dep:zxing-cpp", "dep:zedbar"]
+
+# 基准目标声明 required-features 后，默认 `cargo test` 不再尝试链接它
+# （此前 dev profile 下 `cargo test` 必因 LNK2001 失败，质量门形同不可用）。
+[[test]]
+name = "bench_qr_live"
+path = "tests/bench_qr_live.rs"
+required-features = ["bench-qr"]
 
 # release：体积优先（opt-level="s"，4.2MB；=3 时 5.3MB）+ strip 符号 + abort 展开。
 # 热路径（预览降采样 / 解码）在 "s" 下实测仍满足 60fps 预览与扫码节流预算
@@ -187,10 +211,6 @@ android_logger = { version = "0.15", default-features = false }
 # NDK 上下文（JNI 环境中获取 JavaVM / Context）。
 ndk-context = "0.1"
 
-# 仅测试/基准使用（不进发布二进制）：zxing-cpp（C++，bundled 构建，Apache-2.0）
-# 用于与 zedbar 在**真实直播帧**上做解码器对照基准（docs/调研-QR解码性能-*.md）。
 [dev-dependencies]
-# 对照基准用（不进发布二进制）：zxing-cpp（C++ 参考实现，需 bundled 编译 C++ 内核）、
-# zedbar（旧生产解码器，保留用于回归对照基准）
-zxing-cpp = { version = "0.5", features = ["bundled"] }
-zedbar = { version = "0.7", default-features = false, features = ["qrcode"] }
+# （二维码解码器对照基准的两个依赖在 [dependencies] 中标记 optional——dev-dependencies
+#  不允许 optional，而「默认 cargo test 不构建基准目标」必须靠 optional + required-features。）
