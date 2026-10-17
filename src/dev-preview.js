@@ -313,6 +313,13 @@
             cfg.active_channel[cg] = { channel: cch, uid: cuid };
             return Promise.resolve({ channel: cch, channel_label: "预览渠道", uid: cuid, name: "预览渠道号 " + cuid });
           }
+          // --- B 站 SDK 授权登录（Android）：预览环境直接"成功" ---
+          case "bili_sdk_login": {
+            var bg = (args && args.game) || cfg.current_game;
+            loginUpsert("bilibili", bg, "20002", "B站授权预览账号");
+            console.log("[dev-preview] B 站授权登录已 mock");
+            return Promise.resolve({ status: "ok" });
+          }
           case "delete_channel_account": {
             var dch = args && args.channel, dg = (args && args.game) || cfg.current_game, du = args && args.uid;
             cfg.channel_accounts = cfg.channel_accounts.filter(function (a) {

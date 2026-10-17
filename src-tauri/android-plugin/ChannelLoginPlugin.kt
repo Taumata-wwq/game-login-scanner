@@ -1,12 +1,18 @@
 package com.taumata.scanner.plugins
 
 import android.app.Activity
+import android.os.Bundle
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import com.bsgamesdk.android.BSGameSdk
+import com.bsgamesdk.android.callbacklistener.BSGameSdkError
+import com.bsgamesdk.android.callbacklistener.CallbackListener
+import com.bsgamesdk.android.callbacklistener.ExitCallbackListener
+import com.bsgamesdk.android.callbacklistener.InitCallbackListener
 import com.vivo.unionsdk.open.VivoAccountCallback
 import com.vivo.unionsdk.open.VivoUnionSDK
 import com.xiaomi.gamecenter.sdk.MiCommplatform
@@ -39,12 +45,18 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
     @Volatile
     private var miInit = false
 
+    /** B 站 SDK 初始化状态（`BSGameSdk.initialize` 只需一次）。 */
+    @Volatile
+    private var biliInit = false
+
     @Command
     fun login(invoke: Invoke) {
         val args = invoke.parseArgs(ChannelLoginArgs::class.java)
         when (args.channel) {
             "xiaomi" -> loginXiaomi(invoke)
             "vivo" -> loginVivo(invoke)
+            // B 站 SDK 授权登录（channel_id=14，与 B 服同一账号体系）。
+            "bilibili" -> loginBilibili(invoke)
             else -> invoke.reject("暂不支持的渠道：${args.channel}")
         }
     }
@@ -129,8 +141,85 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
         VivoUnionSDK.login(activity)
     }
 
+    // ---------- B 站 SDK 授权登录（照参考项目 login/Bilibili.java） ----------
+
+    /**
+     * B 站 SDK（BSGameSdk）授权登录。
+     *
+     * 与参考项目一致：`BSGameSdk.initialize(isDebug, activity, "590", "180", "378",
+     * BILI_APP_KEY, initCb, exitCb)` 初始化 → `getInstance().login(cb)` 弹 B 站
+     * 授权登录 UI → `onSuccess(Bundle)` 取 `uid` / `username` / `access_token`。
+     *
+     * 产出凭证沿用 B 服 combo 体系格式（`{"uid":..,"access_key":..}`，channel_id=14），
+     * 因此 Rust 侧可直接复用既有 B 服校验与账号存储（`upsert_bili`）。
+     *
+     * 注意：初始化回调发生在**子线程**，`login` 与 `invoke.resolve` 均需回主线程。
+     */
+    private fun loginBilibili(invoke: Invoke) {
+        if (biliInit) {
+            biliLogin(invoke)
+            return
+        }
+        BSGameSdk.initialize(
+            true,
+            activity,
+            "590",
+            "180",
+            "378",
+            BILI_APP_KEY,
+            object : InitCallbackListener {
+                override fun onSuccess() {
+                    biliInit = true
+                    activity.runOnUiThread { biliLogin(invoke) }
+                }
+
+                override fun onFailed() {
+                    activity.runOnUiThread { invoke.reject("B 站 SDK 初始化失败") }
+                }
+            },
+            // 退出回调：参考项目直接 System.exit(0)；本应用为常驻扫码器，
+            // 不应被 SDK 的退出流程杀死，故仅忽略（退回后台）。
+            ExitCallbackListener {
+                activity.runOnUiThread { activity.moveTaskToBack(true) }
+            }
+        )
+    }
+
+    private fun biliLogin(invoke: Invoke) {
+        BSGameSdk.getInstance().login(object : CallbackListener {
+            override fun onSuccess(p0: Bundle?) {
+                val uid = p0?.getString("uid") ?: ""
+                val token = p0?.getString("access_token") ?: ""
+                val name = p0?.getString("username") ?: ""
+                if (uid.isEmpty() || token.isEmpty()) {
+                    activity.runOnUiThread { invoke.reject("B 站登录返回空凭证") }
+                    return
+                }
+                val cred = JSONObject()
+                cred.put("uid", uid)
+                cred.put("access_key", token)
+                val obj = JSObject()
+                obj.put("cred", cred.toString())
+                obj.put("uid", uid)
+                obj.put("name", name)
+                activity.runOnUiThread { invoke.resolve(obj) }
+            }
+
+            override fun onFailed(err: BSGameSdkError?) {
+                activity.runOnUiThread { invoke.reject("B 站登录失败（${err?.errorCode}）") }
+            }
+
+            override fun onError(err: BSGameSdkError?) {
+                activity.runOnUiThread { invoke.reject("B 站登录异常（${err?.errorCode}）") }
+            }
+        })
+    }
+
     companion object {
         /** vivo 渠道 appKey（参考项目 Constant.VIVO_APP_KEY）。 */
         private const val VIVO_APP_KEY = "94c93e8ac604d1909943862f12803ac9"
+
+        /** B 站 SDK appKey（参考项目 Constant.BILI_APP_KEY）。 */
+        private const val BILI_APP_KEY = "dbf8f1b4496f430b8a3c0f436a35b931"
     }
 }

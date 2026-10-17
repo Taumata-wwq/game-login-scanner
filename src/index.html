@@ -924,6 +924,8 @@
     window.__MOBILE__ = isMobile;
     // 浏览器预览标记：非 Tauri 环境（file:// 或本地 http 服务器）。
     window.__PREVIEW__ = !(window.__TAURI__ || window.__TAURI_INTERNALS__);
+    // Android 专属能力标记（B 站 SDK 授权登录等）：预览可用 ?android 强制。
+    window.__ANDROID__ = (/Android/i.test(ua) && q.indexOf("desktop") < 0) || q.indexOf("android") >= 0;
   })();
   </script>
   <!-- 无边框窗口缩放热区：四边/四角（startResizeDragging 驱动）。 -->
@@ -1752,6 +1754,16 @@
       openLogin();
     });
     list.appendChild(add);
+    // B 服额外提供「B 站授权登录」（仅 Android：走 B 站 SDK，免账号密码）。
+    if (filter === "bilibili" && window.__ANDROID__) {
+      const addSdk = document.createElement("button");
+      addSdk.type = "button";
+      addSdk.className = "acct-add";
+      addSdk.textContent = "＋ B 站授权登录";
+      addSdk.title = "使用 B 站 SDK 授权登录（Android）";
+      addSdk.addEventListener("click", () => biliSdkLogin());
+      list.appendChild(addSdk);
+    }
   }
 
   // 拖拽排序：把 dragUid 移到 targetUid 位置并保存。
@@ -1866,6 +1878,20 @@
       renderAll();
     } catch (e) {
       log('删除账号失败: ' + e, 'error');
+    }
+  }
+
+  // B 站 SDK 授权登录（Android）：调起 B 站客户端授权 → uid+access_key → 后端校验并入库（B 服账号）。
+  async function biliSdkLogin() {
+    try {
+      const game = curGameId();
+      log("正在调起 B 站授权登录…", "info");
+      await invoke("bili_sdk_login", { game });
+      config = await invoke("get_config");
+      log("B 站授权登录成功", "ok");
+      renderAll();
+    } catch (e) {
+      log("B 站授权登录失败: " + e, "error");
     }
   }
 

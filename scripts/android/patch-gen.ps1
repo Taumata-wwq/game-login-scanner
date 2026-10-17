@@ -387,6 +387,22 @@ if ($mc -notmatch "com\.vivo\.unionsdk\.ui\.UnionActivity") {
     Write-Host "  = vivo UnionActivity 已存在"
 }
 
+# B 站 SDK（BSGameSdk）读取 meta-data BSGameSdk_PaidGame（是否付费游戏；
+# 崩坏3 为免费游戏 → false）。渠道 aar 自带的清单不含该字段，需主清单声明。
+if ($mc -notmatch 'android:name="BSGameSdk_PaidGame"') {
+    $bmeta = @(
+        '        <meta-data',
+        '            android:name="BSGameSdk_PaidGame"',
+        '            android:value="false" />',
+        '    </application>'
+    ) -join $nl2
+    $mc = $mc.Replace('    </application>', $bmeta)
+    $mChg = $true
+    Write-Host "  + B站 SDK meta-data（BSGameSdk_PaidGame=false）"
+} else {
+    Write-Host "  = B站 SDK meta-data 已存在"
+}
+
 if ($mChg) {
     [System.IO.File]::WriteAllText($mf2, $mc, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "  Manifest（渠道段）已更新"

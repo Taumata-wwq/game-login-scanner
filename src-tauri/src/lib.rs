@@ -666,6 +666,64 @@ async fn channel_login(
     }))
 }
 
+/// B 站 SDK 授权登录（Android；照参考项目 `login/Bilibili.java`）。
+///
+/// 与「渠道登录」分开：B 站属于既有 B 服账号体系（`bili_accounts`，含扫码/密码登录路径），
+/// 这里只是多一种**授权登录**入口，产出同样形态的 `uid + access_key`，因此直接复用
+/// `upsert_bili`（同时成为该游戏的当前 B 服账号 + 触发预校验）。
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn bili_sdk_login(
+    state: tauri::State<'_, AppState>,
+    game: String,
+) -> Result<serde_json::Value, String> {
+    let (cred, uid, name) = crate::channel_plugin::login("bilibili").await?;
+    let v: serde_json::Value =
+        serde_json::from_str(&cred).map_err(|e| format!("凭证解析失败：{e}"))?;
+    let uid = if uid.is_empty() {
+        v.get("uid")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        uid
+    };
+    let access_key = v
+        .get("access_key")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if uid.is_empty() || access_key.is_empty() {
+        return Err("B 站未返回 uid / access_token".to_string());
+    }
+    // 先校验（换 combo 凭证）：无效令牌不入库，避免留下不可用账号。
+    crate::sdk::mihoyo::verify(&uid, &access_key).await?;
+    let mut cfg = state
+        .config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cfg.upsert_bili(crate::config::BiliToken {
+        uid,
+        access_key,
+        uname: name,
+        game,
+        alias: String::new(),
+        remark: String::new(),
+        last_login_succ: true,
+        last_used_at: now_sec(),
+    });
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "status": "ok" }))
+}
+
+/// 非 Android：B 站 SDK 授权登录不可用（桌面走扫码 / 账号密码）。
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn bili_sdk_login(game: String) -> Result<serde_json::Value, String> {
+    let _ = game;
+    Err("B 站授权登录仅支持 Android（桌面请使用扫码 / 账号密码登录）".to_string())
+}
+
 /// 删除一个渠道账号（按 channel + game + uid）。
 #[tauri::command]
 fn delete_channel_account(
@@ -2332,6 +2390,7 @@ pub fn run() {
             reorder_accounts,
             switch_game,
             channel_login,
+            bili_sdk_login,
             delete_channel_account,
             login_qr_start,
             login_qr_poll,
