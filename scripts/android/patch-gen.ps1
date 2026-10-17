@@ -403,6 +403,24 @@ if ($mc -notmatch 'android:name="BSGameSdk_PaidGame"') {
     Write-Host "  = B站 SDK meta-data 已存在"
 }
 
+# 应用宝 / Wegame 的网页登录容器（本项目自建 Activity，源码在 android-plugin）。
+# 无 SDK 清单可合并，必须显式声明；theme 取系统无标题样式即可（全屏 WebView）。
+if ($mc -notmatch "ChannelWebLoginActivity") {
+    $webAct = @(
+        '        <activity',
+        '            android:name="com.taumata.scanner.plugins.ChannelWebLoginActivity"',
+        '            android:configChanges="orientation|keyboardHidden|navigation|screenSize"',
+        '            android:exported="false"',
+        '            android:theme="@android:style/Theme.NoTitleBar" />',
+        '    </application>'
+    ) -join $nl2
+    $mc = $mc.Replace('    </application>', $webAct)
+    $mChg = $true
+    Write-Host "  + 渠道网页登录 Activity（应用宝 / Wegame）"
+} else {
+    Write-Host "  = 渠道网页登录 Activity 已存在"
+}
+
 if ($mChg) {
     [System.IO.File]::WriteAllText($mf2, $mc, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "  Manifest（渠道段）已更新"

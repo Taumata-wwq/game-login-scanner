@@ -1,7 +1,10 @@
 package com.taumata.scanner.plugins
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
+import androidx.activity.result.ActivityResult
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -57,6 +60,9 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
             "vivo" -> loginVivo(invoke)
             // B 站 SDK 授权登录（channel_id=14，与 B 服同一账号体系）。
             "bilibili" -> loginBilibili(invoke)
+            // 网页登录型渠道（无厂商 SDK，QQ 互联登录页 + 自建凭证）。
+            "yyb" -> startWebLogin(invoke, "yyb")
+            "wegame" -> startWebLogin(invoke, "wegame")
             else -> invoke.reject("暂不支持的渠道：${args.channel}")
         }
     }
@@ -139,6 +145,125 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
             }
         })
         VivoUnionSDK.login(activity)
+    }
+
+    // ---------- 网页登录渠道：应用宝 / Wegame（照参考项目 login/Tencent.java、Wegame.java） ----------
+
+    /** 发起网页登录时暂存当前渠道 key（`@ActivityCallback` 只能拿到结果，拿不到入参）。 */
+    private var pendingWeb: String? = null
+
+    /**
+     * 打开 QQ 互联登录页（ChannelWebLoginActivity），结果经 webLoginResult 回传。
+     *
+     * 应用宝：回调 URL 片段即 `access_token` + `openid` → 直接作为渠道凭证
+     *   （`{"platform":1,"openid":..,"openkey":..,"is_teenager":false}`，channel_id=13）。
+     * Wegame：先以该令牌调 `union_login` 换 Wegame 侧令牌（参考项目同款请求），
+     *   再产出 `{"access_token":..,"openid":..,"uid":<pc_rail_id>}`（channel_id=27）。
+     */
+    private fun startWebLogin(invoke: Invoke, channel: String) {
+        pendingWeb = channel
+        val appId = if (channel == "wegame") {
+            ChannelWebLoginActivity.APPID_WEGAME
+        } else {
+            ChannelWebLoginActivity.APPID_YYB
+        }
+        val intent = Intent(activity, ChannelWebLoginActivity::class.java)
+            .putExtra(ChannelWebLoginActivity.EXTRA_APPID, appId)
+        startActivityForResult(invoke, intent, "webLoginResult")
+    }
+
+    @ActivityCallback
+    fun webLoginResult(invoke: Invoke, result: ActivityResult) {
+        val channel = pendingWeb
+        pendingWeb = null
+        val data: Intent? = result.data
+        if (result.resultCode != Activity.RESULT_OK || data == null) {
+            invoke.reject(data?.getStringExtra(ChannelWebLoginActivity.EXTRA_RESULT_ERROR) ?: "已取消网页登录")
+            return
+        }
+        val url = data.getStringExtra(ChannelWebLoginActivity.EXTRA_RESULT_URL) ?: ""
+        val uin = data.getStringExtra(ChannelWebLoginActivity.EXTRA_RESULT_UIN) ?: ""
+        val token = fragmentParam(url, "access_token")
+        val openId = fragmentParam(url, "openid")
+        if (token.isEmpty() || openId.isEmpty()) {
+            invoke.reject("网页登录未返回 access_token / openid")
+            return
+        }
+        if (channel == "wegame") {
+            // union_login 需联网：改用工作线程，结果回主线程 resolve/reject。
+            Thread {
+                try {
+                    val cred = wegameUnionLogin(openId, token)
+                    val uid = cred.optString("uid", "")
+                    if (uid.isEmpty()) {
+                        activity.runOnUiThread { invoke.reject("Wegame 未返回账号标识") }
+                    } else {
+                        resolveCred(invoke, uid, uin.ifEmpty { uid }, cred.toString())
+                    }
+                } catch (e: Exception) {
+                    val msg = e.message ?: "未知错误"
+                    activity.runOnUiThread { invoke.reject("Wegame 换取登录态失败：$msg") }
+                }
+            }.start()
+            return
+        }
+        val cred = JSONObject()
+            .put("platform", 1)
+            .put("openid", openId)
+            .put("openkey", token)
+            .put("is_teenager", false)
+        resolveCred(invoke, openId, uin.ifEmpty { openId }, cred.toString())
+    }
+
+    /** 取 URL 片段（`#` 之后）中的参数值；不存在返回空串。 */
+    private fun fragmentParam(url: String, key: String): String {
+        val frag = url.substringAfter('#', "")
+        for (kv in frag.split('&')) {
+            val i = kv.indexOf('=')
+            if (i > 0 && kv.substring(0, i) == key) return kv.substring(i + 1)
+        }
+        return ""
+    }
+
+    private fun resolveCred(invoke: Invoke, uid: String, name: String, cred: String) {
+        val obj = JSObject()
+        obj.put("cred", cred)
+        obj.put("uid", uid)
+        obj.put("name", name)
+        activity.runOnUiThread { invoke.resolve(obj) }
+    }
+
+    /**
+     * Wegame 侧登录态换取（照参考项目 Wegame.java 的 `union_login` 请求）。
+     * 返回含 `access_token` / `openid` / `uid`(pc_rail_id) 的 JSON。
+     */
+    private fun wegameUnionLogin(openId: String, token: String): JSONObject {
+        val body = JSONObject()
+            .put("appid", "40000095")
+            .put("app_key", "6dcc7197c6cec4cd050ead6262702302")
+            .put("login_type", "game_login")
+            .put("third_type", 0)
+            .put("login_state_type", 2)
+            .put("login_state_openid", openId)
+            .put("login_state_token", token)
+            .put("common_parameters", JSONObject().put("sdkversion", "3.1.1").put("plat", 0))
+        val conn = java.net.URL("https://m.wegame.com.cn/web/oauth2.0/union_login")
+            .openConnection() as java.net.HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 15000
+        conn.readTimeout = 15000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        val text = conn.inputStream.bufferedReader().use { it.readText() }
+        val resp = JSONObject(text)
+        if (resp.optInt("code", -1) != 0) {
+            throw IllegalStateException("union_login 返回 ${resp.optString("message", "code=" + resp.optInt("code"))}")
+        }
+        return JSONObject()
+            .put("access_token", resp.optString("access_token"))
+            .put("openid", resp.optString("openid"))
+            .put("uid", resp.optString("pc_rail_id"))
     }
 
     // ---------- B 站 SDK 授权登录（照参考项目 login/Bilibili.java） ----------
