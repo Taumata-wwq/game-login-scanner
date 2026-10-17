@@ -36,6 +36,10 @@ node_modules/
 /src-tauri/tests/*
 !/src-tauri/tests/unit.rs
 !/src-tauri/tests/smoke.rs
+# bench_qr_live 在 Cargo.toml 中声明为 [[test]]（required-features = "bench-qr"），
+# 文件必须入库，否则 CI 上 `cargo fmt --all` 会因目标路径不存在而失败。
+# 它只在显式启用 bench-qr 特性时编译，不参与 CI 的 cargo test。
+!/src-tauri/tests/bench_qr_live.rs
 /.workbuddy/
 
 # 临时文件
