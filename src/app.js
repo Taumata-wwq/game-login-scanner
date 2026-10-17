@@ -2020,13 +2020,17 @@
       stopPreview();
     } else {
       startPreview();
-      // 屏幕扫码切后台后用户切回：自动停止屏幕扫码（避免持续占屏幕共享）。
+      // 屏幕扫码切后台后用户切回：自动停止屏幕扫码**并释放屏幕共享**。
+      //
+      // 只停扫码循环不够：MediaProjection 仍在取帧，通知栏持续显示「正在共享屏幕」，
+      // 却没有消费者——既费电也违背用户的停止预期（真机实测：日志已写「自动停止
+      // 屏幕扫码」，设置面板的「屏幕共享」仍显示「共享中」）。
       if (screenScanAutoBg) {
         screenScanAutoBg = false;
-        if (scanningTargets.has("screen") || stoppingTargets.has("screen")) {
-          stopScanTarget("screen");
-          log("已回到应用，自动停止屏幕扫码", "info");
-        }
+        const wasScanning = scanningTargets.has("screen") || stoppingTargets.has("screen");
+        if (wasScanning) stopScanTarget("screen");
+        if (wasScanning) log("已回到应用，自动停止屏幕扫码", "info");
+        stopScreenShare({ quiet: true });
       }
     }
   });
@@ -2591,11 +2595,17 @@
   ///
   /// 停止后必须**同时**停掉正在跑的屏幕扫码循环：否则循环会继续以 60Hz 空转
   /// （拿不到帧 → 每次都走「屏幕捕获失败」分支），既费电又刷日志。
-  async function stopScreenShare() {
+  ///
+  /// `opts.quiet`：由「切回前台自动停止」等场景调用时不重复写「已停止屏幕共享」
+  /// （调用方已有自己的说明日志），避免一次操作刷两条同类记录。
+  async function stopScreenShare(opts) {
+    const quiet = !!(opts && opts.quiet);
     try {
-      if (scanningTargets.has('screen')) stopScanTarget('screen');
+      if (scanningTargets.has('screen') || stoppingTargets.has('screen')) {
+        stopScanTarget('screen');
+      }
       await invoke('stop_screen_capture');
-      log('已停止屏幕共享', 'info');
+      if (!quiet) log('已停止屏幕共享', 'info');
     } catch (e) {
       log('停止屏幕共享失败：' + String(e), 'error');
     }
@@ -2658,6 +2668,9 @@
       // 系统回收）。此时帧管道已断开，屏幕扫码循环再跑也拿不到帧——停掉它并提示
       // 重新授权，避免界面显示「共享中」却毫无反应。
       await listen('capture-stopped', () => {
+        // 共享已由系统侧（通知栏「停止共享」）或我们主动结束：清掉「切后台自动停」
+        // 的待办标记，避免下次回前台再走一遍无意义的停止流程。
+        screenScanAutoBg = false;
         refreshCaptureRow();
         if (scanningTargets.has('screen')) {
           stopScanTarget('screen');

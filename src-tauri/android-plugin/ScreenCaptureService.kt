@@ -83,6 +83,15 @@ class ScreenCaptureService : Service() {
     private var captureW: Int = 0
     private var captureH: Int = 0
 
+    /**
+     * 帧缓冲生命周期锁：串行化「帧线程 memcpy 中」与「主线程 close ImageReader」。
+     *
+     * 不加锁时二者会撞车：close 会 munmap 掉帧线程正在读的 gralloc 页，
+     * 直接 `Fatal signal 11 (SIGSEGV) code 1 (SEGV_MAPERR)` 崩在 memcpy 里
+     * （2026-10-17 真机实证，停止共享与旋转重建均可触发）。
+     */
+    private val frameLock = Any()
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -141,11 +150,15 @@ class ScreenCaptureService : Service() {
     private fun recreateCapture(w: Int, h: Int, dpi: Int) {
         val proj = projection ?: return
         // 先断开旧管道：避免旧 reader 的 surface 仍挂在 VirtualDisplay 上。
+        // close 必须在 frameLock 内做，否则会 munmap 掉帧线程正在 memcpy 的缓冲
+        // （旋转重建时同样会 SIGSEGV，见 frameLock 注释）。
         imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
         virtualDisplay = null
-        imageReader?.close()
-        imageReader = null
+        synchronized(frameLock) {
+            imageReader?.close()
+            imageReader = null
+        }
 
         val thread = frameThread ?: HandlerThread("ScreenCaptureFrames").also {
             it.start()
@@ -245,25 +258,46 @@ class ScreenCaptureService : Service() {
     }
 
     private fun onFrameAvailable(reader: ImageReader) {
-        val image = try {
-            reader.acquireLatestImage()
-        } catch (e: Exception) {
-            null
-        } ?: return
+        // 与 cleanup / recreateCapture 串行化。
+        //
+        // 为什么必须加锁（2026-10-17 真机实证 SIGSEGV）：帧回调跑在
+        // "ScreenCaptureFrames" 线程，`ScreenCaptureBridge.onFrame` 会直接 memcpy
+        // 这块 gralloc direct buffer；与此同时主线程若 `imageReader.close()`，
+        // 该缓冲被 munmap → 帧线程读已释放页 → `Fatal signal 11 (SIGSEGV),
+        // code 1 (SEGV_MAPERR)` in `memcpy`，fault addr 是页对齐地址。
+        // 「停止共享」/ 旋转重建都会触发，属必现竞态而非偶发。
+        // 取帧、拷贝、释放整段都在 frameLock 内完成：
+        // - 持锁期间 reader 不会被 close，direct buffer 的页不会被 munmap；
+        // - img.close() 也在锁内，避免「reader 已关但 image 仍持有其缓冲」的窗口。
+        // 锁粒度是一次帧拷贝（1080×2340 RGBA 约 10 MB memcpy，个位数毫秒），
+        // 主线程 close 时最多等这一帧，不会造成可感知卡顿。
         try {
-            val plane = image.planes.firstOrNull() ?: return
-            // 同步交给 Rust：拷贝 + 指纹在 native 侧完成，返回后即可 close。
-            ScreenCaptureBridge.onFrame(
-                plane.buffer,
-                image.width,
-                image.height,
-                plane.rowStride,
-                plane.pixelStride,
-            )
+            synchronized(frameLock) {
+                if (!isRunning) return
+                val img = try {
+                    reader.acquireLatestImage()
+                } catch (e: Exception) {
+                    null
+                } ?: return
+                try {
+                    val plane = img.planes.firstOrNull() ?: return
+                    // 同步交给 Rust：拷贝 + 指纹在 native 侧完成，返回后即可 close。
+                    ScreenCaptureBridge.onFrame(
+                        plane.buffer,
+                        img.width,
+                        img.height,
+                        plane.rowStride,
+                        plane.pixelStride,
+                    )
+                } finally {
+                    try {
+                        img.close()
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
         } catch (_: Throwable) {
             // 帧路径不允许异常穿透到 ImageReader 回调（否则回调被移除）。
-        } finally {
-            image.close()
         }
     }
 
@@ -273,9 +307,13 @@ class ScreenCaptureService : Service() {
         isRunning = false
         captureW = 0
         captureH = 0
+        // 先摘掉回调，再在锁内关闭 reader：确保此刻没有帧线程正持着 direct buffer
+        // 做 memcpy（否则 close 会 munmap 掉正在被读的页 → SIGSEGV）。
         imageReader?.setOnImageAvailableListener(null, null)
-        imageReader?.close()
-        imageReader = null
+        synchronized(frameLock) {
+            imageReader?.close()
+            imageReader = null
+        }
         virtualDisplay?.release()
         virtualDisplay = null
         projectionCallback?.let { cb ->
