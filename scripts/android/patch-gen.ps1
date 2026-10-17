@@ -47,6 +47,12 @@ function Add-Prop($key, $line) {
     [System.IO.File]::WriteAllText($props, $raw, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "  + $line"
 }
+# Jetifier：渠道 SDK（mi_sdk 的 MiFileProvider 继承 android.support.v4.content.FileProvider）
+# 仍是旧 support 库字节码，不转换则运行时 ClassNotFoundException →
+# 「Unable to get provider com.xiaomi.gamecenter.sdk.utils.MiFileProvider」直接崩溃
+# （2026-10-17 真机实证）。本项目其余依赖均为 androidx。
+Add-Prop "android.useAndroidX" "android.useAndroidX=true"
+Add-Prop "android.enableJetifier" "android.enableJetifier=true"
 Add-Prop "org.gradle.daemon" "org.gradle.daemon=false"
 Add-Prop "org.gradle.java.home" "org.gradle.java.home=$JavaHomeAscii"
 Add-Prop "android.overridePathCheck" "android.overridePathCheck=true"
