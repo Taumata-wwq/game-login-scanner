@@ -1,0 +1,927 @@
+  /* ===== 设计令牌：Adobe 风格专业黑白 ===== */
+  :root {
+    --bg: #1c1c1c;
+    --panel: #232323;
+    --panel-2: #2a2a2a;
+    --panel-3: #303030;
+    --hover: #323232;
+    --active: #3a3a3a;
+    --border: #3a3a3a;
+    --line: #313131;
+    --text: #e4e4e4;
+    --text-strong: #ffffff;
+    --muted: #9a9a9a;
+    --faint: #6e6e6e;
+    --primary-bg: #e8e8e8;
+    --primary-fg: #1a1a1a;
+    --ok: #5cb075;
+    --warn: #d9a94a;
+    --danger: #cf4a4a;
+    --radius: 3px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 11px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 7px;
+    height: 34px; flex: none;
+    padding: 0 0 0 9px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .logo { width: 15px; height: 15px; flex: none; display: grid; place-items: center; color: var(--text-strong); }
+  header h1 { font-size: 11px; font-weight: 600; margin: 0; padding-top: 2px; letter-spacing: 0.04em; color: var(--text-strong); }
+  header .spacer { flex: 1; height: 100%; }
+  .hbtns { display: flex; align-items: center; gap: 2px; padding-right: 5px; }
+
+  .ibtn {
+    width: 22px; height: 22px; flex: none;
+    display: inline-grid; place-items: center;
+    background: transparent; color: var(--muted);
+    border: none; border-radius: var(--radius);
+    cursor: pointer; padding: 0;
+    transition: background 0.1s, color 0.1s;
+  }
+  .ibtn:hover { background: var(--hover); color: var(--text-strong); }
+  .ibtn:active { background: var(--active); }
+  .ibtn.open { color: var(--text-strong); background: var(--panel-3); }
+  .ibtn svg { display: block; }
+  /* 窗口控制按钮复用 .ibtn 尺寸；关闭键悬停变红。 */
+  .ibtn.close:hover { background: var(--danger); color: #fff; }
+
+  main { flex: 1; overflow: hidden; padding: 10px; display: flex; flex-direction: column; gap: 9px; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .sectitle {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 9.5px; font-weight: 600; color: var(--faint);
+    letter-spacing: 0.1em; text-transform: uppercase;
+    height: 13px; flex: none; margin-top: 1px;
+  }
+  .sectitle::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  /* ===== 扫描区域（实时监视器） ===== */
+  /* canvas 尺寸由 .vp-stage（16:9）控制。 */
+  #previewCanvas.dragging { cursor: grabbing; }
+
+  /* ===== 账号区 ===== */
+  .filter-seg { display: flex; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+  .filter-seg button {
+    height: 20px; border: none; border-radius: 2px;
+    background: transparent; color: var(--muted);
+    font: 500 10px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 0 9px; cursor: pointer; transition: background 0.1s, color 0.1s;
+  }
+  .filter-seg button:hover { color: var(--text); background: var(--hover); }
+  .filter-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  /* 无边框窗口缩放热区：固定于窗口四边/四角（Tauri startResizeDragging）。 */
+  .rz { position: fixed; z-index: 9999; }
+  .rz-n  { top: 0; left: 0; right: 0; height: 6px; cursor: n-resize; }
+  .rz-s  { bottom: 0; left: 0; right: 0; height: 6px; cursor: s-resize; }
+  .rz-e  { top: 0; right: 0; bottom: 0; width: 6px; cursor: e-resize; }
+  .rz-w  { top: 0; left: 0; bottom: 0; width: 6px; cursor: w-resize; }
+  .rz-ne { top: 0; right: 0; width: 12px; height: 12px; cursor: ne-resize; }
+  .rz-nw { top: 0; left: 0; width: 12px; height: 12px; cursor: nw-resize; }
+  .rz-se { bottom: 0; right: 0; width: 12px; height: 12px; cursor: se-resize; }
+  .rz-sw { bottom: 0; left: 0; width: 12px; height: 12px; cursor: sw-resize; }
+  /* 添加账号：账号列表的末项（随列表滚动），与账号行同规格，
+     透明底 + 虚线边框以示「可添加」而非账号本体。 */
+  .acct-add {
+    width: 100%; height: 27px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: 1px dashed var(--faint); border-radius: var(--radius);
+    color: var(--faint); font: inherit; cursor: pointer;
+    transition: background 0.1s, border-color 0.1s, color 0.1s;
+  }
+  .acct-add:hover { background: var(--hover); border-color: var(--muted); color: var(--text); }
+
+  /* 账号区自身滚动：占据剩余空间、行高不压缩；滚动条只出现在账号区内部，
+     不影响上方扫描区域（overscroll-behavior 阻断滚动链，避免外层出现滚动条）。 */
+  .acct-list {
+    display: flex; flex-direction: column; gap: 2px;
+    flex: 1 1 auto; min-height: 40px;
+    overflow-y: auto; overscroll-behavior: contain;
+  }
+  .acct-item {
+    position: relative; overflow: hidden;
+    display: flex; align-items: center; gap: 7px;
+    height: 27px; flex: none; padding: 0 5px 0 8px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    cursor: pointer; transition: background 0.1s, border-color 0.1s;
+  }
+  .acct-item:hover { background: var(--hover); }
+  .acct-item.on { border-color: #555555; }
+  .radio {
+    width: 10px; height: 10px; flex: none; border-radius: 50%;
+    border: 1px solid var(--faint); background: transparent;
+  }
+  .acct-item.on .radio { border-color: var(--primary-bg); background: var(--primary-bg); box-shadow: inset 0 0 0 2px var(--panel); }
+  .chip {
+    font-size: 9.5px; font-weight: 600; flex: none;
+    padding: 1px 6px; border-radius: 2px;
+    background: var(--panel-3); color: var(--text);
+  }
+  .nm { flex: 1; min-width: 0; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .acct-item.on .nm { color: var(--text-strong); font-weight: 600; }
+  .remark { font-size: 10px; color: var(--faint); flex: none; max-width: 90px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .acct-item.dragging { opacity: 0.5; }
+  /* 删除按钮：不常驻占位，鼠标落在行上时自右侧滑出（覆盖备注区）。 */
+  .acct-item .ibtn {
+    position: absolute; right: 0; top: 0; bottom: 0;
+    width: 20px; height: auto; border-radius: var(--radius);
+    display: grid; place-items: center;
+    background: linear-gradient(90deg, rgba(35, 35, 35, 0), var(--hover) 45%);
+    transform: translateX(100%); opacity: 0;
+    transition: transform 0.13s ease, opacity 0.13s ease;
+  }
+  .acct-item:hover .ibtn { transform: translateX(0); opacity: 1; }
+  .acct-item .ibtn:hover { color: #ff8f8f; background: rgba(207, 74, 74, 0.16); }
+
+  .btn {
+    height: 24px; padding: 0 11px;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    cursor: pointer; font: 500 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    transition: background 0.1s, border-color 0.1s;
+  }
+  .btn:hover { background: var(--hover); border-color: #4a4a4a; }
+  .btn.ghost { background: transparent; }
+  .btn.ghost:hover { background: var(--panel-2); }
+  /* 块级主按钮：整行、稍高（弹窗底部操作用）。 */
+  .btn.block { width: 100%; height: 28px; }
+  /* 迷你按钮：选项区「清空」等（贴近节标题）。 */
+  .btn.tiny { height: 18px; font-size: 10px; padding: 0 7px; }
+
+  /* ===== 居中弹窗 ===== */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .overlay[hidden] { display: none; }
+  .dialog {
+    width: 100%; max-width: 293px; max-height: 100%;
+    display: flex; flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+  }
+  .dhead {
+    display: flex; align-items: center; gap: 6px;
+    height: 30px; flex: none; padding: 0 4px 0 11px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.03em; color: var(--text-strong);
+  }
+  .dhead .spacer { flex: 1; }
+  .dbody { padding: 10px 11px; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 8px; }
+  .dsec {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 9.5px; font-weight: 600; color: var(--faint);
+    letter-spacing: 0.1em; text-transform: uppercase;
+  }
+  .dsec::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .dsec .btn { margin-left: auto; }
+  .opt-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .opt-row .lbl { font-size: 11px; flex: 0 0 auto; }
+  /* 设置区内的登入名输入框：占据行内剩余空间。 */
+  .opt-row #displayName { flex: 1 1 auto; min-width: 0; max-width: 170px; height: 24px; }
+  .opt-row .lbl small { display: block; color: var(--faint); font-size: 9.5px; margin-top: 1px; }
+  .switch { position: relative; width: 30px; height: 17px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    transition: background 0.12s, border-color 0.12s; cursor: pointer;
+  }
+  .switch .track::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 11px; height: 11px; border-radius: 50%; background: var(--faint);
+    transition: transform 0.12s, background 0.12s;
+  }
+  .switch input:checked + .track { background: var(--primary-bg); border-color: var(--primary-bg); }
+  .switch input:checked + .track::after { transform: translateX(13px); background: #1a1a1a; }
+  /* 文本输入框统一样式（.txtin 与弹窗内 field-row input 共用）。
+     弹窗内输入框撑满整行。 */
+  .txtin, .field-row input {
+    width: 100%; height: 24px; padding: 0 8px;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    outline: none; font: inherit;
+  }
+  .txtin:focus, .field-row input:focus { border-color: #8a8a8a; }
+  .txtin.full { width: 100%; }
+  /* 分段控件（登录方式页签）。 */
+  .seg3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+  /* B站仅两页签（二维码 / 密码）时，改为二等分。 */
+  .seg3.two { grid-template-columns: 1fr 1fr; }
+  .seg3 button {
+    height: 22px; border: none; border-radius: 2px;
+    background: transparent; color: var(--muted);
+    font: 500 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer; transition: background 0.1s, color 0.1s;
+  }
+  .seg3 button:hover { color: var(--text); background: var(--hover); }
+  .seg3 button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  .seg3 button[hidden] { display: none; }
+  .field-row { display: flex; flex-direction: column; gap: 4px; }
+  .field-row .flbl { font-size: 10px; color: var(--faint); }
+  /* 验证码行：输入框占满剩余宽度，按钮等宽；两者等高对齐。 */
+  .code-row { display: flex; gap: 6px; align-items: stretch; }
+  .code-row input { flex: 1 1 auto; min-width: 0; height: 24px; }
+  .code-row button { flex: 0 0 76px; height: 24px; padding: 0; font-size: 10px; }
+  /* 双二维码并排 */
+  .qr-page { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 2px 0; }
+  .qr-page[hidden] { display: none; }
+  .qr-label { font-size: 9.5px; color: var(--muted); font-weight: 600; }
+  .qr-img {
+    width: 100%; aspect-ratio: 1 / 1; max-width: 176px; padding: 4px;
+    background: #fff; border-radius: var(--radius);
+  }
+  .qr-img svg { width: 100%; height: 100%; display: block; }
+  .qr-img:empty { background: var(--panel-2); }
+  .qr-status { font-size: 9.5px; color: var(--muted); text-align: center; }
+  .qr-status.scanned { color: var(--warn); }
+  .qr-status.expired { color: var(--danger); }
+  .qr-status.confirmed { color: var(--ok); }
+  /* 日志 */
+  #log {
+    min-height: 100px; max-height: 170px; overflow-y: auto; margin: 0;
+    padding: 7px 9px;
+    background: #181818;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    font: 10.5px/1.7 Consolas, "Courier New", monospace;
+    color: var(--muted);
+    user-select: text;
+  }
+  #log .success { color: var(--ok); }
+  #log .error { color: #e07a7a; }
+  #log .info { color: var(--muted); }
+  #log .time { color: #5a5a5a; margin-right: 6px; }
+
+  /* 项目信息（日志下方）：作者 / 仓库 / 参考引用 / 许可证 / 注意事项。 */
+  .proj-info {
+    margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line);
+    font-size: 9.5px; line-height: 1.75; color: var(--faint);
+  }
+  .proj-info .pi-head {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 10.5px; color: var(--text); margin-bottom: 3px;
+  }
+  .proj-info .pi-ver { color: var(--faint); font-size: 9.5px; }
+  .proj-info .pi-line { word-break: break-word; }
+  .proj-info .pi-warn { color: var(--warn); opacity: 0.85; }
+  .proj-info .pi-link { color: #7fa3d0; text-decoration: none; cursor: pointer; }
+  .proj-info .pi-link:hover { text-decoration: underline; }
+
+  /* 隐藏全部滚动条（保留滚动能力）：列表/日志区内容超出时不再显示滚动条占据宽度，
+     滚轮与拖拽滚动照常工作。scrollbar-width 覆盖标准实现，::-webkit-scrollbar
+     覆盖 Chromium 旧路径（WebView2 两套并存时任一命中即不渲染）。 */
+  * { scrollbar-width: none; }
+  ::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+  /* ===== 横版布局骨架（阶段1）===== */
+  .app { flex: 1; display: flex; min-height: 0; }
+  /* 左栏：标题（标题栏）+ 直播间/桌面列表。 */
+  .sidebar {
+    width: 208px; flex: none; min-width: 0;
+    display: flex; flex-direction: column;
+    background: var(--panel); border-right: 1px solid var(--line);
+  }
+  /* 标题栏仅在左栏上方；右栏无标题栏（可拖拽移动窗口）。 */
+  .sidebar header {
+    display: flex; align-items: center; gap: 7px;
+    height: 34px; flex: none; padding: 0 4px 0 9px;
+    border-bottom: 1px solid var(--line);
+  }
+  .sidebar header .logo { width: 15px; height: 15px; flex: none; display: grid; place-items: center; color: var(--text-strong); }
+  /* 标题可收缩（min-width:0 才能省略号），按钮不可收缩——避免窄栏时按钮被挤出。 */
+  .sidebar header h1 { font-size: 11px; font-weight: 600; margin: 0; letter-spacing: 0.04em; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
+  .sidebar header .spacer { flex: 0 1 0; min-width: 4px; height: 100%; }
+  .sidebar header .hbtns { flex: none; }
+  /* 直播间/桌面列表：滚动区。 */
+  .room-list {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    display: flex; flex-direction: column; gap: 3px; padding: 6px;
+  }
+  /* 卡片：封面缩略图 + 文本信息。 */
+  .room-card {
+    position: relative; overflow: hidden;
+    flex: none;   /* 不收缩：窗口变矮时列表滚动而不是把卡片压扁 */
+    display: flex; gap: 7px; align-items: center;
+    padding: 5px; border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--panel-2); cursor: pointer; user-select: none;
+    transition: background 0.1s, border-color 0.1s;
+  }
+  .room-card:hover { background: var(--hover); }
+  .room-card.on { border-color: var(--primary-bg); background: var(--panel-3); }
+  .room-card.dragging { opacity: 0.45; }
+  .room-card .thumb {
+    position: relative;
+    width: 48px; height: 30px; flex: none; border-radius: 2px; overflow: hidden;
+    background: #101010; display: grid; place-items: center;
+  }
+  .room-card .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .room-card .thumb .ph { color: var(--faint); }
+  .room-card .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .room-card .rname { font-size: 10.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .room-card .rsub { font-size: 9px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 状态徽标：叠在封面正中（不再占用右侧文字宽度）。
+     背景统一为「背景色系」（半透明深色），仅用文字颜色区分状态并拉大对比。 */
+  .room-card .st {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    white-space: nowrap; font-size: 9px; font-weight: 700;
+    padding: 1px 6px; border-radius: 2px;
+    background: rgba(22, 22, 22, 0.82);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  }
+  .st.live { color: #6ff0a2; }   /* 直播中：亮绿 */
+  .st.off  { color: #8f8f8f; }   /* 未开播：中灰 */
+  .st.scan { color: #ffd44d; }   /* 识别中：亮琥珀 */
+  .st.done { color: #5fd8ff; }   /* 已确认：亮青 */
+  /* 移除直播间：不常驻占位，鼠标落在卡片上时自右侧滑出。 */
+  .room-card .x {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 22px;
+    display: grid; place-items: center;
+    background: linear-gradient(90deg, rgba(50, 50, 50, 0), var(--hover) 45%);
+    color: var(--muted); cursor: pointer;
+    transform: translateX(100%); opacity: 0;
+    transition: transform 0.13s ease, opacity 0.13s ease;
+  }
+  .room-card:hover .x { transform: translateX(0); opacity: 1; }
+  .room-card .x:hover { color: #ff8f8f; background: rgba(207, 74, 74, 0.18); }
+  .room-add {
+    display: flex; align-items: center; justify-content: center; gap: 4px;
+    height: 28px; flex: none; margin-top: 2px;
+    background: transparent; border: 1px dashed var(--faint); border-radius: var(--radius);
+    color: var(--faint); font: inherit; font-size: 10.5px; cursor: pointer;
+  }
+  .room-add:hover { background: var(--hover); color: var(--text); border-color: var(--muted); }
+
+  /* 右栏：上视窗 + 下账号区。 */
+  .main-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+  /* 视窗区：占上部，含信息栏 + canvas + 底部操作条。 */
+  /* 视窗区：高度由 JS 按 16:9 适配计算（不 grow/shrink，避免与账号区争抢）。 */
+  .viewport { flex: 0 0 auto; display: flex; flex-direction: column; background: #101010; }
+  .vp-info {
+    display: flex; align-items: center; gap: 8px; flex: none;
+    height: 34px; padding: 0 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    font-size: 10px; color: var(--muted);
+  }
+  .vp-info .ttl { color: var(--text-strong); font-weight: 600; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vp-info .sep { color: var(--faint); }
+  .vp-info .spacer { flex: 1; }
+  /* 「开始扫码」常驻在信息栏右端（原状态徽标位置）。 */
+  .vp-info #btnStart { flex: none; }
+  /* 视窗适配容器：尺寸由 JS 设置（16:9 适配结果），居中放置 stage。 */
+  .vp-fit { flex: 0 0 auto; width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  /* 16:9 视窗：尺寸由 JS 按 16:9 在容器内等比适配（letterbox），不变形。 */
+  .vp-stage { position: relative; background: #0c0c0c; overflow: hidden; }
+  .vp-stage canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+  .vp-stage canvas.dragging { cursor: grabbing; }
+  /* 封面占位：切换直播间/进入未开播房间（暂无画面）时盖在画布上，首帧到达即揭除。 */
+  .vp-cover {
+    position: absolute; inset: 0; z-index: 4;
+    background: #0c0c0c; display: flex; align-items: center; justify-content: center;
+  }
+  /* `[hidden]` 兜底：类选择器的 display:flex 会压过 UA 的 [hidden]{display:none}，
+     必须显式声明（与 .overlay 同一坑；2026-10-14 实锤：缺此规则导致封面"隐藏"
+     无效 —— 桌面黑屏 / 直播卡在"等待画面" / 切换时旧封面不消失）。 */
+  .vp-cover[hidden] { display: none; }
+  .vp-cover img {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; opacity: 0.55;
+  }
+  .vp-cover-tip {
+    position: relative; max-width: 82%; text-align: center;
+    font-size: 10.5px; color: var(--text); line-height: 1.7;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  }
+  /* 画面上浮控件：fps 左上、重置右上。 */
+  /* 预览区即时提示：解释「拖拽/滚轮没反应」的原因（无画面 / 已是完整视图）。 */
+  .vp-toast {
+    position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+    padding: 5px 10px; border-radius: 999px; background: rgba(8, 10, 14, 0.74);
+    color: #e6edf5; font-size: 11px; white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity var(--m-dur-2, 240ms) var(--m-ease, ease);
+    z-index: 6;
+  }
+  .vp-toast.on { opacity: 1; }
+  .vp-stage .fps {
+    position: absolute; left: 6px; top: 6px; z-index: 5;
+    height: 20px; padding: 0 6px; display: grid; place-items: center;
+    background: rgba(20,20,20,0.75); border: 1px solid var(--border); border-radius: var(--radius);
+    font: 10px/1 Consolas, monospace; color: #9fe0a0; cursor: pointer; user-select: none;
+  }
+  .vp-stage .fps.paused { color: #e0a09f; }
+  .vp-stage .region-reset {
+    position: absolute; right: 6px; top: 6px; z-index: 5;
+    width: 20px; height: 20px; display: grid; place-items: center;
+    background: rgba(20,20,20,0.75); color: #cfcfcf; border: 1px solid var(--border);
+    border-radius: var(--radius); cursor: pointer; padding: 0;
+  }
+  .vp-stage .region-reset:hover { background: var(--hover); color: var(--text-strong); }
+  /* 账号区：占剩余空间。 */
+  /* 账号区：保最小高度（窗口变小时由上方视窗压缩让位）。 */
+  .acct-area { flex: 1 1 auto; min-height: 120px; display: flex; padding: 8px 10px 10px; }
+  /* 右列：渠道切换（官服/B 服，拉伸对齐）+ 游戏列表；整列宽度由分界条调整。 */
+  .game-wrap {
+    width: 110px; flex: none; min-width: 0;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  /* 渠道切换段：两列等宽拉伸；「鹰角」为独立整行按钮。 */
+  .chan-seg {
+    flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 2px;
+  }
+  .chan-seg button {
+    height: 22px; border: none; border-radius: 2px; padding: 0 2px;
+    background: transparent; color: var(--muted);
+    font: 500 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    white-space: nowrap; overflow: hidden; cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+  }
+  .chan-seg button:hover { color: var(--text); background: var(--hover); }
+  .chan-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+  .chan-seg button[hidden] { display: none; }
+  /* 鹰角账号：独占一行。 */
+  .chan-seg button.wide { grid-column: 1 / -1; }
+  /* 列宽不足时降级为「官 / B」（见 updateChanLabels）。 */
+  .chan-seg .t-short { display: none; }
+  .chan-seg.narrow .t-full { display: none; }
+  .chan-seg.narrow .t-short { display: inline; }
+  /* 游戏列 / 账号列 分界拖拽条：拖动调整左列宽度（70–140px）。 */
+  .gsplit {
+    flex: none; width: 7px; cursor: col-resize; background: transparent;
+    position: relative; z-index: 10;
+  }
+  .gsplit:hover, .gsplit.dragging { background: rgba(138,138,138,0.25); }
+  .game-col {
+    flex: 1 1 auto; min-height: 0;
+    display: flex; flex-direction: column; gap: 3px;
+    overflow-y: auto; overscroll-behavior: contain;
+  }
+  .game-col .gitem span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .game-col .gitem {
+    height: 27px; padding: 0 9px; border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--panel); cursor: pointer; font-size: 11px; color: var(--muted);
+    display: flex; align-items: center; gap: 4px; flex: none;
+  }
+  .game-col .gitem:hover { background: var(--hover); color: var(--text); }
+  .game-col .gitem.on { border-color: var(--primary-bg); color: var(--text-strong); font-weight: 600; }
+  /* 右列账号列表（开始扫码按钮已移到视窗信息栏右端）。 */
+  .acct-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+  #btnStart {
+    height: 24px; padding: 0 12px;
+    background: var(--primary-bg); color: var(--primary-fg);
+    border: none; border-radius: var(--radius);
+    font: 600 10.5px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    cursor: pointer; transition: background 0.1s;
+  }
+  #btnStart:hover { background: #ffffff; }
+  #btnStart.running { background: var(--panel-2); color: #ff8f8f; box-shadow: inset 0 0 0 1px rgba(207, 74, 74, 0.55); }
+  #btnStart.running:hover { background: var(--panel-3); }
+  #btnStart.running::after {
+    content: ""; width: 9px; height: 9px; border-radius: 50%;
+    border: 2px solid rgba(207, 74, 74, 0.3); border-top-color: #ff8f8f;
+    animation: spin 0.8s linear infinite;
+  }
+
+  /* 侧栏 / 右侧 分界拖拽条：拖动调整左右占比。 */
+  .vsplit {
+    flex: none; width: 5px; cursor: col-resize; background: transparent;
+    position: relative; margin: 0 -2px; z-index: 10;
+  }
+  .vsplit:hover, .vsplit.dragging { background: rgba(138,138,138,0.25); }
+  /* 添加直播间弹窗内平台选择。 */
+  .plat-seg { display: flex; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
+  .plat-seg button {
+    flex: 1; height: 24px; border: none; border-radius: 2px; background: transparent; color: var(--muted);
+    font: 500 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif; cursor: pointer;
+  }
+  .plat-seg button.on { background: var(--primary-bg); color: var(--primary-fg); font-weight: 600; }
+
+  /* ===================== 移动端（html.mobile 生效；桌面完全不受影响） ===================== */
+  .m-topbar, .m-bottombar, .m-gamerow { display: none; }
+
+  /* -------------------------------------------------------------------------
+     移动端设计 tokens（2026-10-15 统一化）
+     参考成熟移动设计体系的通用做法：Material 3 的分层/状态层（state layer）、
+     iOS 的连续圆角与按压反馈、现代 app 的胶囊主按钮。
+     数值阶梯（圆角/字号/动效）集中定义，组件只引用，避免散落硬编码。
+     ------------------------------------------------------------------------- */
+  html.mobile {
+    /* 圆角阶梯：随组件体量递增（小 → 大） */
+    --m-r-xs: 6px;    /* 微元素：chip / 角标 */
+    --m-r-sm: 10px;   /* 小件：图标按钮 / switch */
+    --m-r-md: 14px;   /* 中件：列表卡 / 输入 / 次级按钮 */
+    --m-r-lg: 18px;   /* 大件：面板 / 缩略图 */
+    --m-r-xl: 22px;   /* 弹层 dialog */
+    /* 字号阶梯：移动可读（最小 11.5px） */
+    --m-fs-xs: 11.5px;
+    --m-fs-sm: 12.5px;
+    --m-fs-md: 14px;
+    --m-fs-lg: 15px;
+    --m-fs-xl: 17px;
+    --m-fs-title: 20px;
+    /* 动效时长与缓动（统一节奏：微反馈 → 常规 → 抽屉/弹层） */
+    --m-dur-1: 150ms;
+    --m-dur-2: 240ms;
+    --m-dur-3: 320ms;
+    --m-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+    /* 状态层（半透明白叠加，随底色自适应——M3 手法，替代写死的灰） */
+    --m-layer-1: rgba(255, 255, 255, 0.055);
+    --m-layer-2: rgba(255, 255, 255, 0.1);
+  }
+  /* 组件尺寸规范（移动端统一语言）：
+     列表卡片 54px 高 / 间距 8px / 圆角 14px（账号 · 房间 · 弹层项同一规格）；
+     主按钮 50px 胶囊；方形按钮 48px / 圆角 14px；工具小按钮 32px / 圆角 6px；
+     输入框 40~42px / 圆角 10px；抽屉与弹层标题行 52px / 17px 居中；
+     抽屉宽度 80vw（左右一致）、直角无阴影（拼接模型）。 */
+
+  html.mobile body {
+    display: flex; flex-direction: column; height: 100vh;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    font-size: 15px;
+  }
+  /* 隐藏桌面专有元素 */
+  html.mobile .rz, html.mobile .vsplit, html.mobile .gsplit,
+  html.mobile .game-wrap, html.mobile .sidebar header .hbtns { display: none !important; }
+  html.mobile .app { flex: 1 1 auto; min-height: 0; }
+  html.mobile .main-col { width: 100%; }
+
+  /* 顶栏（52px；图标按钮 44px 触控目标 + 统一按压反馈） */
+  html.mobile .m-topbar {
+    display: flex; align-items: center; gap: 4px;
+    height: 52px; flex: none; padding: 0 6px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  .m-iconbtn {
+    width: 44px; height: 44px; flex: none; display: grid; place-items: center;
+    background: transparent; color: var(--text); border: none;
+    border-radius: var(--m-r-sm); cursor: pointer; padding: 0;
+    transition: background var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
+  }
+  .m-iconbtn:active { background: var(--m-layer-2); transform: scale(0.94); }
+  .m-titlewrap { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; }
+  .m-titlewrap.inline { flex-direction: row; gap: 7px; align-items: baseline; }
+  .m-title { font-size: var(--m-fs-xl); font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; letter-spacing: 0.01em; }
+  .m-sub { font-size: var(--m-fs-sm); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+  /* 3:2 视口 */
+  html.mobile .viewport { flex: none; background: #000; }
+  html.mobile .vp-info { height: 36px; padding: 0 14px; font-size: var(--m-fs-sm); }
+  html.mobile .vp-info #btnStart { display: none; }
+  html.mobile .vp-fit { width: 100%; height: auto; }
+  /* 3:2 视口：用 vw 高度（100vw * 2/3）比 aspect-ratio 更可靠。
+     但**必须同时受视口高度约束**：横屏时 100vw 可达 2340px，2/3 即 1560px，
+     远超 1080px 屏高——纯 vw 会把账号区整个挤出屏幕（真机旋转后实测）。
+     取 min(66.67vw, 52vh)：竖屏仍由宽度决定（比例不变），横屏改由高度决定，
+     预览缩小居中、账号区与底部栏都留在屏内。 */
+  html.mobile .vp-stage { width: 100% !important; height: min(66.6667vw, 52vh) !important; }
+  /* 移动端空闲（无预览）时隐藏 fps / 重置浮标。 */
+  html.mobile .vp-stage .fps, html.mobile .vp-stage .region-reset { display: none; }
+  /* 移动端隐藏"窗口置顶"设置项（无意义）。 */
+  html.mobile #alwaysOnTop { display: none; }
+  html.mobile .opt-row:has(#alwaysOnTop) { display: none; }
+  /* 「屏幕共享」行仅移动端可见（桌面端没有 MediaProjection）。 */
+  .opt-row.mb-only-row { display: none; }
+  html.mobile .opt-row.mb-only-row { display: flex; }
+
+  /* ---- 摄像头扫码模式：中间显示区平滑扩展，覆盖账号 / 游戏区服区 ----
+     保留顶栏（52px）与底部操作栏（64px），其余高度全部让给取景区。
+     .acct-area 的高度由 JS 写入具体像素值驱动过渡（flex-basis 不能平滑动画）。 */
+  html.mobile.m-camera .acct-area {
+    flex: none; overflow: hidden; opacity: 0; pointer-events: none;
+    padding-top: 0; padding-bottom: 0;
+    transition: height var(--m-dur-3) var(--m-ease),
+                opacity var(--m-dur-2) var(--m-ease),
+                padding var(--m-dur-3) var(--m-ease);
+  }
+  html.mobile.m-camera .viewport { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  html.mobile.m-camera .vp-fit { flex: 1 1 auto; min-height: 0; display: flex; }
+  html.mobile.m-camera .vp-stage { height: 100% !important; }
+  html.mobile.m-camera #mBtnCameraScan { color: var(--primary-bg); background: var(--m-layer-1); }
+  .m-camera-view {
+    position: absolute; inset: 0; z-index: 5; display: flex;
+    flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+    background: #0c0c0c; pointer-events: none;
+  }
+  .m-camera-view[hidden] { display: none; }
+  .mc-canvas {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  }
+  .mc-frame {
+    position: relative; width: 58%; max-width: 250px; aspect-ratio: 1 / 1;
+    border: 1.5px solid rgba(150, 180, 210, 0.4); border-radius: var(--m-r-md);
+    overflow: hidden;
+  }
+  .mc-frame::before, .mc-frame::after {
+    content: ""; position: absolute; width: 22px; height: 22px;
+    border: 2.5px solid var(--primary-bg);
+  }
+  .mc-frame::before { left: -1px; top: -1px; border-right: 0; border-bottom: 0; border-radius: var(--m-r-md) 0 0 0; }
+  .mc-frame::after { right: -1px; bottom: -1px; border-left: 0; border-top: 0; border-radius: 0 0 var(--m-r-md) 0; }
+  .mc-scan {
+    position: absolute; left: 6%; right: 6%; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--primary-bg), transparent);
+    animation: mc-scan 1.9s var(--m-ease) infinite;
+  }
+  @keyframes mc-scan {
+    0% { top: 6%; opacity: 0; } 12% { opacity: 1; }
+    88% { opacity: 1; } 100% { top: 94%; opacity: 0; }
+  }
+  .mc-tip { font-size: var(--m-fs-md); color: var(--muted); text-align: center; line-height: 1.7; }
+  .mc-tip span { display: block; font-size: var(--m-fs-xs); color: var(--faint); margin-top: 5px; }
+
+  /* 账号区（54px 行高 + 统一圆角；按压反馈与选中过渡） */
+  html.mobile .acct-area { flex: 1 1 auto; min-height: 0; flex-direction: column; padding: 10px; }
+  html.mobile .acct-col { flex: 1 1 auto; min-height: 0; }
+  html.mobile .acct-item {
+    height: 54px; border-radius: var(--m-r-md);
+    transition: background var(--m-dur-1) var(--m-ease), border-color var(--m-dur-2) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
+  }
+  html.mobile .acct-item:active { background: var(--m-layer-1); transform: scale(0.985); }
+  html.mobile .acct-list { gap: 8px; }
+  /* 添加账号按钮：移动端放大到触摸友好高度。 */
+  html.mobile .acct-add { height: 54px; font-size: var(--m-fs-lg); border-radius: var(--m-r-md); }
+  /* 账号行内文字放大（桌面端为紧凑的 11px）。 */
+  html.mobile .acct-item .nm { font-size: var(--m-fs-lg); }
+  html.mobile .acct-item .chip { font-size: 12px; }
+  html.mobile .acct-item .remark { font-size: 12.5px; max-width: 120px; }
+  html.mobile .acct-item .radio { width: 18px; height: 18px; }
+  /* 移动端无 hover：删除按钮常驻显示，触摸目标放大。 */
+  html.mobile .acct-item .ibtn {
+    position: static; width: 36px; height: 100%;
+    transform: none; opacity: 1; background: transparent;
+  }
+  html.mobile .acct-item .ibtn svg { width: 15px; height: 15px; }
+
+  /* 游戏/区服选择行（48px 高；双按钮均分同规格） */
+  html.mobile .m-gamerow { display: flex; gap: 8px; flex: none; margin-bottom: 8px; }
+  .m-game {
+    flex: 1 1 0; min-width: 0; height: 48px; padding: 0 16px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--panel-2); color: var(--text-strong);
+    font-family: inherit; font-size: var(--m-fs-lg); font-weight: 600; line-height: 1;
+    border: 1px solid var(--border); border-radius: var(--m-r-md); cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: background var(--m-dur-1) var(--m-ease), border-color var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
+  }
+  .m-chan {
+    flex: 1 1 0; min-width: 0; height: 48px; padding: 0 16px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--panel-2); color: var(--text);
+    font-family: inherit; font-size: var(--m-fs-lg); font-weight: 500; line-height: 1;
+    border: 1px solid var(--border); border-radius: var(--m-r-md); cursor: pointer;
+    transition: background var(--m-dur-1) var(--m-ease), border-color var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
+  }
+  .m-game:active, .m-chan:active { background: var(--m-layer-1); transform: scale(0.97); }
+
+  /* 底部操作栏（64px；主按钮胶囊化——现代移动 CTA 手法） */
+  html.mobile .m-bottombar {
+    display: flex; align-items: center; gap: 12px;
+    height: 64px; flex: none; padding: 0 16px;
+    background: var(--panel); border-top: 1px solid var(--line);
+  }
+  .m-sqbtn {
+    width: 48px; height: 48px; flex: none; display: grid; place-items: center;
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--m-r-md); cursor: pointer; padding: 0;
+    transition: background var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
+  }
+  .m-sqbtn:active { background: var(--m-layer-2); transform: scale(0.94); }
+  .m-scanbtn {
+    flex: 1 1 auto; height: 50px; display: flex; align-items: center; justify-content: center; gap: 8px;
+    background: var(--primary-bg); color: var(--primary-fg); border: none;
+    border-radius: 999px; cursor: pointer;
+    font-family: inherit; font-size: var(--m-fs-xl); font-weight: 600; line-height: 1;
+    letter-spacing: 0.01em;
+    transition: background var(--m-dur-2) var(--m-ease), color var(--m-dur-2) var(--m-ease),
+                box-shadow var(--m-dur-2) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
+  }
+  .m-scanbtn:active { transform: scale(0.975); }
+  .m-scanbtn.running { background: var(--panel-2); color: #ff9090; box-shadow: inset 0 0 0 1.5px rgba(207, 74, 74, 0.6); }
+
+  /* 左抽屉：侧栏（拼接模型；全视口高——定位基准为 .app 顶部（顶栏下 52px），故上移 52px 消除顶/底黑缝） */
+  html.mobile .sidebar {
+    position: fixed; top: -52px; left: 0;
+    height: 100vh;
+    width: 80vw; max-width: none; z-index: 200;
+    background: var(--panel); border-right: 1px solid var(--line);
+    transform: translateX(-80vw);
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  /* 房间卡：62px 行高、统一圆角；移动端无 hover——删除按钮常驻（32px 触控目标）。 */
+  html.mobile .room-card { height: 54px; border-radius: var(--m-r-md); }
+  html.mobile .room-card .thumb { width: 58px; height: 36px; border-radius: var(--m-r-xs); }
+  html.mobile .room-card .rname { font-size: var(--m-fs-md); }
+  html.mobile .room-card .rsub { font-size: var(--m-fs-xs); color: var(--muted); }
+  html.mobile .room-card .st { font-size: var(--m-fs-xs); padding: 2px 8px; border-radius: 999px; }
+  html.mobile .room-card .x {
+    position: static; width: 32px; height: 100%; flex: none;
+    background: transparent; border-radius: var(--m-r-sm);
+    transform: none; opacity: 1; font-size: var(--m-fs-sm);
+  }
+  html.mobile .room-card .x:active { background: rgba(207, 74, 74, 0.18); color: #ff8f8f; }
+  html.mobile .room-list { gap: 8px; padding: 10px; }
+  html.mobile .room-add { height: 54px; font-size: var(--m-fs-md); border-radius: var(--m-r-md); }
+
+  /* 右抽屉：设置（同一拼接模型；位移 = 自身宽 + --m-swipe；容器穿透仅 dialog 可交互） */
+  html.mobile #toolsOverlay {
+    justify-content: flex-end; align-items: stretch; padding: 0; z-index: 200;
+    background: transparent;
+    pointer-events: none;
+  }
+  html.mobile #toolsOverlay .dialog {
+    width: 80vw; max-width: none; height: 100%; max-height: none;
+    transform: translateX(calc(80vw + var(--m-swipe)));
+    transition: transform var(--m-dur-3) var(--m-ease);
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    animation: none; /* 抽屉由 transform 过渡驱动，不套弹层入场动画 */
+    pointer-events: auto;
+    border-radius: 0; /* 拼接模型：直角与主界面接壤 */
+    box-shadow: none;
+  }
+  html.mobile #toolsOverlay .dbody { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+
+  html.mobile .m-idle-art {
+    position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; display: block;
+  }
+  html.mobile .m-idle-art[hidden] { display: none; }
+
+  /* 移动端弹层：更高铺满度 + 统一大圆角 + 入场动效（淡入 + 轻微上浮，重开时自动重播） */
+  html.mobile .overlay { padding: 12px; }
+  html.mobile .dialog { max-width: 92vw; border-radius: var(--m-r-xl); }
+  html.mobile .overlay:not([hidden]) { animation: m-fade-in var(--m-dur-2) var(--m-ease); }
+  html.mobile .overlay:not([hidden]) .dialog { animation: m-dialog-pop var(--m-dur-2) var(--m-ease); }
+  @keyframes m-fade-in {
+    from { opacity: 0; }
+  }
+  @keyframes m-dialog-pop {
+    from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  }
+
+  /* 设置开关：移动端放大到 M3 规格（48x28，滑块 22px） */
+  html.mobile .switch { width: 48px; height: 28px; }
+  html.mobile .switch .track::after { top: 2px; left: 2px; width: 22px; height: 22px; }
+  html.mobile .switch input:checked + .track::after { transform: translateX(20px); }
+
+  /* 交互反馈补充：列表空态按钮（+ 添加账号 / + 添加直播间）的按压 */
+  html.mobile .acct-add, html.mobile .room-add {
+    transition: background var(--m-dur-1) var(--m-ease), border-color var(--m-dur-1) var(--m-ease), transform var(--m-dur-1) var(--m-ease);
+  }
+  html.mobile .acct-add:active, html.mobile .room-add:active {
+    transform: scale(0.98); background: var(--m-layer-1);
+  }
+
+  /* ---------------------------------------------------------------
+     布局一致性调整（2026-10-15 晚）
+     1) 游戏/渠道按钮文字居中（两按钮统一对齐）；
+     2) 弹层标题栏与主界面顶栏同规格：52px 高、17px、居中，× 绝对定位右侧；
+     3) 登录模式分段：移动端规格 + [hidden] 兜底。
+     --------------------------------------------------------------- */
+  html.mobile .dialog .dhead {
+    position: relative; height: 52px; justify-content: center;
+    padding: 0 52px; font-size: var(--m-fs-xl); letter-spacing: 0;
+  }
+  html.mobile .dialog .dhead .spacer { display: none; }
+  html.mobile .dialog .dhead .ibtn {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    width: 36px; height: 36px;
+  }
+  /* 右抽屉（工具面板）移动端移除右上角关闭按钮：用滑动 / 点残部 / 顶栏按钮收回 */
+  html.mobile #toolsOverlay .dhead .ibtn { display: none; }
+  html.mobile .dialog .dhead .ibtn svg { width: 16px; height: 16px; }
+  html.mobile #loginModeSeg { border-radius: var(--m-r-sm); padding: 3px; }
+  html.mobile #loginModeSeg[hidden] { display: none; }
+  html.mobile #loginModeSeg button { height: 34px; border-radius: var(--m-r-xs); font-size: var(--m-fs-sm); }
+  /* 登录表单（移动端）：输入框/标签/主按钮放大到可点规格 */
+  html.mobile .flbl { font-size: var(--m-fs-xs); }
+  html.mobile .field-row { gap: 6px; }
+  html.mobile .field-row input { height: 42px; font-size: var(--m-fs-md); border-radius: var(--m-r-sm); }
+  html.mobile .code-row input { height: 42px; }
+  html.mobile .code-row button { height: 42px; font-size: var(--m-fs-sm); }
+  html.mobile .dialog .btn.block { height: 46px; font-size: var(--m-fs-lg); border-radius: var(--m-r-md); }
+
+  /* ---------------------------------------------------------------
+     第二批调整（2026-10-15 夜）
+     1) 移除预览区信息行（顶栏已承载标题/状态）；
+     2) 左抽屉 header 对齐顶栏规格（52px / 17px）；
+     3) 移动端弹层置于抽屉之上（修复从侧栏打开弹层被遮挡）；
+     4) 字重/圆角/按钮右对齐等细节统一；
+     5) 右抽屉：设置项顶部、日志填充中部、应用信息置底。
+     --------------------------------------------------------------- */
+  html.mobile .vp-info { display: none; }
+  html.mobile .sidebar header { height: 52px; padding: 0 10px 0 14px; gap: 9px; }
+  html.mobile .sidebar header .logo { width: 18px; height: 18px; }
+  html.mobile .sidebar header h1 { font-size: var(--m-fs-xl); letter-spacing: 0.01em; text-align: center; }
+  html.mobile .overlay { z-index: 300; }
+  html.mobile .m-game, html.mobile .m-chan { font-weight: 600; }
+  html.mobile #fpsSeg { border-radius: var(--m-r-sm); padding: 3px; }
+  html.mobile #fpsSeg button { border-radius: var(--m-r-xs); }
+  html.mobile #toolsOverlay .btn.tiny {
+    height: 30px; padding: 0 12px; border-radius: var(--m-r-xs);
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+  }
+  html.mobile #toolsOverlay .dsec { justify-content: space-between; }
+  html.mobile #toolsOverlay .dsec::after { display: none; }
+  html.mobile #toolsOverlay .dbody { display: flex; flex-direction: column; overflow-y: hidden; }
+  html.mobile #toolsOverlay #log { flex: 1 1 auto; min-height: 140px; max-height: none; overflow-y: auto; }
+  html.mobile #toolsOverlay .proj-info { flex: none; margin-top: 10px; }
+
+  /* ---------------------------------------------------------------
+     抽屉滑动模型（三面板拼接：主界面 1 + 左右侧栏各 0.8 视口宽）
+     --m-swipe 为主界面位移（+ 露左抽屉 / - 露右抽屉），由 JS 跟手更新；
+     松手按位置与速度吸附三档。跟手期间 .m-swiping 关闭过渡。
+     --------------------------------------------------------------- */
+  html.mobile { --m-swipe: 0px; }
+  html.mobile body { touch-action: pan-y; }
+  html.mobile .m-topbar, html.mobile .app, html.mobile .m-bottombar {
+    transform: translateX(var(--m-swipe));
+    transition: transform var(--m-dur-3) var(--m-ease);
+  }
+  html.mobile.m-swiping .m-topbar, html.mobile.m-swiping .app, html.mobile.m-swiping .m-bottombar,
+  html.mobile.m-swiping #toolsOverlay .dialog { transition: none; }
+
+  /* ---------------------------------------------------------------
+     第三批调整（2026-10-16 凌晨）
+     1) 标题行：取消图标、居中、移动端文案「直播间选择」；
+     2) 检查更新右对齐（pi-head spacer 撑开）；
+     3) 工具按钮高度统一 32px（帧率分段与清空/检查更新一致）；
+     4) 页边距微调（账号区 12、弹层内容水平 14）。
+     --------------------------------------------------------------- */
+  .mb-only { display: none; }
+  html.mobile .sidebar header { justify-content: center; padding: 0 14px; }
+  html.mobile .sidebar header .logo { display: none; }
+  html.mobile .sidebar header .spacer { display: none; }
+  html.mobile .sidebar header .dt-only { display: none; }
+  html.mobile .sidebar header .mb-only { display: inline; }
+  .proj-info .pi-head .spacer { flex: 1 1 auto; }
+  html.mobile #toolsOverlay .btn.tiny { height: 32px; }
+  html.mobile .acct-area { padding: 12px; }
+  /* 列表本体：浏览器层面禁横向手势（防御任何"左右滑动趋势"） */
+  html.mobile .room-list, html.mobile .acct-list, html.mobile #log { touch-action: pan-y; }
+  html.mobile .dialog .dbody { padding-left: 14px; padding-right: 14px; }
+  /* 长按编辑防御：卡片不选中文本 / 不弹系统长按菜单 */
+  html.mobile .room-card, html.mobile .acct-item {
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  /* 设置面板（移动端）：内部控件与文字提升到移动规格（桌面为紧凑小号） */
+  html.mobile #toolsOverlay .lbl { font-size: var(--m-fs-md); }
+  html.mobile #toolsOverlay .lbl small { font-size: var(--m-fs-xs); }
+  html.mobile #toolsOverlay #displayName {
+    height: 40px; max-width: none; flex: 1 1 auto;
+    font-size: var(--m-fs-md); border-radius: var(--m-r-sm);
+  }
+  html.mobile #toolsOverlay .dsec { font-size: var(--m-fs-md); }
+  html.mobile #toolsOverlay #log { font-size: var(--m-fs-xs); }
+  html.mobile #toolsOverlay .proj-info { font-size: var(--m-fs-xs); }
+  html.mobile #toolsOverlay .pi-head > span:first-child { font-size: var(--m-fs-md); }
+  html.mobile #toolsOverlay .btn { font-size: var(--m-fs-sm); }
+  html.mobile #toolsOverlay [data-fps] { height: 32px; min-width: 46px; font-size: var(--m-fs-sm); }
+
+  /* ---- 横屏适配（手机横置 / 折叠屏展开 / 平板分屏） ----
+     竖屏的尺寸都按 vw 推导，横屏下 vw 变成屏幕**长边**，全部失准：抽屉宽到
+     80vw≈1872px、预览高到 1560px（远超 1080px 屏高），账号区被整个挤出屏幕。
+     这里在长边出现时按实际可用空间重新定档，保证「预览 + 账号区 + 底部栏」
+     三者在横屏高度内共存。 */
+  @media (orientation: landscape) {
+    /* 抽屉收窄到可用宽度（不超过屏宽 80%，也不超过 420px），留出主界面。 */
+    html.mobile .sidebar,
+    html.mobile #toolsOverlay .dialog { width: min(80vw, 420px); }
+    html.mobile .sidebar { transform: translateX(calc(-1 * min(80vw, 420px))); }
+    html.mobile #toolsOverlay .dialog {
+      transform: translateX(calc(min(80vw, 420px) + var(--m-swipe)));
+    }
+    /* 预览再收一档：横屏屏高只有竖屏的 1/2.17，52vh 仍偏大。 */
+    html.mobile .vp-stage { height: min(66.6667vw, 44vh) !important; }
+    /* 横屏压扁顶栏与底部栏，把高度让给内容。 */
+    html.mobile .m-topbar { height: 44px; }
+    html.mobile .m-bottombar { height: 56px; }
+    html.mobile .m-sqbtn { width: 44px; height: 44px; }
+    html.mobile .m-scanbtn { height: 44px; }
+    /* 账号列表横屏可双列，避免矮高度里只排得下一两张卡。
+       空态「＋ 添加账号」是整行 CTA，跨两列铺满（否则只剩半宽很难点）。 */
+    html.mobile .acct-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    html.mobile .acct-list .acct-add { grid-column: 1 / -1; }
+  }
+

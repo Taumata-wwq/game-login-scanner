@@ -70,7 +70,9 @@ cargo build --release     # 产物：target\release\game-login-scanner.exe（约
 代码结构：
 
 ```
-src/index.html          主界面（原生 HTML/CSS/JS，无前端构建链）
+src/index.html          主界面骨架（DOM + 平台探测，无前端构建链）
+src/app.css             主界面样式
+src/app.js              主界面逻辑（IIFE，经 <script src> 直接加载）
 src/verify.html         人机验证窗口
 src-tauri/src/
   lib.rs                Tauri 命令接线与运行时状态
