@@ -79,6 +79,36 @@ if ((Get-Content $appGradle -Raw) -notmatch "buildToolsVersion") {
     Write-Host "  = buildToolsVersion 已存在"
 }
 
+Write-Host "== 3b. 资源裁剪（release 体积） =="
+# 两个开关都是「不给就浪费」的类型，实测合计 -1.13MB（17.24MB -> 16.12MB）：
+#  - isShrinkResources：R8 已删除代码，但资源仍全量打包（华为 SDK 的 dimen/string/
+#    drawable 未被引用也照进 arsc）。开启后按 R8 产出的资源引用图裁剪，-0.10MB。
+#  - resourceConfigurations：AGP 默认打包依赖库里全部 85+ 种 locale（华为/小米/vivo
+#    SDK 自带），而本应用 UI 全中文、只在 zh/en 环境使用。裁到 zh/en 后 -1.03MB，
+#    主要是 strings/drawable 的多语言副本。
+# 幂等：按标记行判断，已存在则跳过。
+$agRc = [System.IO.File]::ReadAllText($appGradle)
+$nlRc = if ($agRc.Contains("`r`n")) { "`r`n" } else { "`n" }
+if ($agRc -notmatch 'isShrinkResources') {
+    $agRc = $agRc.Replace(
+        'isMinifyEnabled = true',
+        'isMinifyEnabled = true' + $nlRc + '            isShrinkResources = true'
+    )
+    Write-Host "  + isShrinkResources = true（release）"
+} else {
+    Write-Host "  = isShrinkResources 已存在"
+}
+if ($agRc -notmatch 'resourceConfigurations') {
+    $agRc = $agRc.Replace(
+        'minSdk = 24',
+        'minSdk = 24' + $nlRc + '        resourceConfigurations += listOf("zh", "en")'
+    )
+    Write-Host '  + resourceConfigurations = ["zh", "en"]'
+} else {
+    Write-Host "  = resourceConfigurations 已存在"
+}
+[System.IO.File]::WriteAllText($appGradle, $agRc, (New-Object System.Text.UTF8Encoding($false)))
+
 Write-Host "== 4. BuildTask.kt（cmd 包装 cargo + 注入 PATH）=="
 $buildTask = Join-Path $gen "buildSrc/src/main/java/com/taumata/game_scanner/kotlin/BuildTask.kt"
 $cargoDir = $CargoBin.Substring(0, $CargoBin.LastIndexOf("/"))

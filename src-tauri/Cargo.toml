@@ -107,7 +107,7 @@ required-features = ["bench-qr"]
 [profile.release]
 opt-level = "s"
 panic = "abort"
-strip = true
+strip = "symbols"
 # fat LTO + 单 codegen 单元：让链接器跨 crate 做死代码消除（体积优先）。
 # 构建耗时增加可接受（release 非高频）。
 lto = true
@@ -117,6 +117,10 @@ codegen-units = 1
 # QR 解码在 rxing（独立 crate），Rust 侧主要是 IPC 与整数转换。
 [profile.release.package.game-login-scanner]
 opt-level = "z"
+# 必须在此重复声明 strip：Cargo 对「存在 package 覆写块」的包不继承父 profile 的
+# strip，会静默退回 debuginfo（保留 .symtab/.strtab）。Android release .so 因此曾
+# 从 6.8MB 膨胀到 13.6MB（.strtab 一项就 4.7MB）。此处显式声明后 strip=symbols 生效。
+strip = "symbols"
 
 # 体积再裁剪：事件驱动 / 低频路径的 crate 用 "z"（性能不敏感）。
 [profile.release.package.tauri]
