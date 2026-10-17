@@ -263,6 +263,75 @@ if (-not (Test-Path $sdkSrc)) {
     }
 }
 
+Write-Host "== 5e. 华为渠道（条件启用：需 vendor/huawei/agconnect-services.json）=="
+# 华为联运（HMS 游戏服务）依赖**应用级** AGC 配置：包名 + 签名指纹 + app_id 都由
+# 华为开发者项目决定，无法随仓库分发。因此这里做成条件启用——文件不存在则完全不动
+# 工程（主构建对 HMS 零依赖）；存在时才引入 maven 仓库 / agconnect 插件 / HMS SDK /
+# 配置文件 / 华为登录源码。凭据放置处见 vendor/huawei/ 下的说明。
+$huaweiJson = Join-Path $root "vendor/huawei/agconnect-services.json"
+if (-not (Test-Path $huaweiJson)) {
+    Write-Host "  ! 未找到 vendor/huawei/agconnect-services.json（跳过华为渠道；其余渠道不受影响）"
+} else {
+    # 1) 配置文件：AGC 插件要求放在 **app 模块根目录**
+    $appJsonDst = Join-Path $gen "app/agconnect-services.json"
+    Copy-Item $huaweiJson $appJsonDst -Force
+    Write-Host "  -> app/agconnect-services.json 已同步"
+
+    # 2) 根 build.gradle.kts：华为 maven 仓库 + agconnect 插件 classpath
+    $rootGradle = Join-Path $gen "build.gradle.kts"
+    $rg = [System.IO.File]::ReadAllText($rootGradle)
+    if ($rg -notmatch "developer\.huawei\.com/repo") {
+        $rg = [regex]::Replace(
+            $rg,
+            '(?m)^([ \t]*)mavenCentral\(\)(\r?\n)([ \t]*)\}',
+            "`${1}mavenCentral()`${2}`${1}maven { url = uri(`"https://developer.huawei.com/repo/`") }`${2}`${3}}"
+        )
+        $rg = [regex]::Replace(
+            $rg,
+            '(?m)^([ \t]*)classpath\("org\.jetbrains\.kotlin:kotlin-gradle-plugin:[^"]+"\)(\r?\n)',
+            "`${0}`${1}classpath(`"com.huawei.agconnect:agcp:1.9.1.301`")`${2}"
+        )
+        [System.IO.File]::WriteAllText($rootGradle, $rg, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "  + 根 build.gradle.kts: 华为 maven 仓库 + agcp 1.9.1.301"
+    } else {
+        Write-Host "  = 根 build.gradle.kts 已含华为仓库/插件"
+    }
+
+    # 3) app/build.gradle.kts：应用 agconnect 插件 + HMS 依赖（hwid 登录 / game 取角色）
+    $appGradle2 = Join-Path $gen "app/build.gradle.kts"
+    $ag3 = [System.IO.File]::ReadAllText($appGradle2)
+    $nl3 = if ($ag3.Contains("`r`n")) { "`r`n" } else { "`n" }
+    if ($ag3 -notmatch 'id\("com\.huawei\.agconnect"\)') {
+        $ag3 = $ag3.Replace(
+            '    id("rust")' + $nl3 + '}',
+            '    id("rust")' + $nl3 + '    id("com.huawei.agconnect")' + $nl3 + '}'
+        )
+    }
+    foreach ($dep in @(
+        'implementation("com.huawei.hms:hwid:6.8.0.300")',
+        'implementation("com.huawei.hms:game:6.8.0.300")'
+    )) {
+        # 判断必须比对**整条**依赖串：只比版本号会把同版本的另一条依赖误判为已存在
+        # （实测 hwid 先插入后，game 因共享 "6.8.0.300" 被跳过）。
+        if ($ag3 -notmatch [regex]::Escape($dep)) {
+            $ag3 = $ag3.Replace("dependencies {", "dependencies {" + $nl3 + "    " + $dep)
+        }
+    }
+    [System.IO.File]::WriteAllText($appGradle2, $ag3, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  + app/build.gradle.kts: agconnect 插件 + hwid/game 6.8.0.300"
+
+    # 4) 华为登录源码（独立目录；不参与常规构建，仅在此处同步）
+    $huaweiSrc = Join-Path $root "src-tauri/android-plugin-huawei"
+    $pluginDst2 = Join-Path $gen "app/src/main/java/com/taumata/scanner/plugins"
+    if (Test-Path $huaweiSrc) {
+        New-Item -ItemType Directory -Force -Path $pluginDst2 | Out-Null
+        Get-ChildItem -Path $huaweiSrc -Filter *.kt | ForEach-Object {
+            Copy-Item $_.FullName -Destination $pluginDst2 -Force
+            Write-Host "  -> $($_.Name)"
+        }
+    }
+}
+
 Write-Host "== 6. AndroidManifest：屏幕捕获权限与前台服务声明 =="
 $manifest = Join-Path $gen "app/src/main/AndroidManifest.xml"
 $c = Get-Content $manifest -Raw

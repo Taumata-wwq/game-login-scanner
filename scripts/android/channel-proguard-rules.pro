@@ -318,3 +318,14 @@ void onEvent*(**);
 -keep interface com.hihonor.ads.** {*; }
 -keep class repeackage.com.qiku.id.** { *; }
 -keep interface repeackage.com.qiku.id.* { *; }
+
+# === 本工程插件类：反射调用，必须保留原名与全部成员 ===
+# ChannelLoginPlugin 用 Class.forName("...HuaweiLogin") + getMethod 反射调用，
+# R8 看不到字符串引用会改名（实测被改成 z2.m）并裁剪方法，导致
+# "华为渠道尚未启用（缺少 AGC 配置或 HMS 依赖）：init [class android.app.Activity, class z2.j]"。
+# HuaweiLoginSink 作为反射方法的形参类型同样不能改名。
+-keep class com.taumata.scanner.plugins.HuaweiLogin { *; }
+-keep interface com.taumata.scanner.plugins.HuaweiLoginSink { *; }
+-keep class com.taumata.scanner.plugins.ChannelLoginPlugin { *; }
+-keep class com.taumata.scanner.plugins.ChannelLoginArgs { *; }
+-keep class com.taumata.scanner.plugins.EmptyArgs { *; }

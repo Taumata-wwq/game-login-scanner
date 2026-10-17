@@ -30,6 +30,24 @@ class ChannelLoginArgs {
 }
 
 /**
+ * 华为登录回调。
+ *
+ * 华为链路依赖 HMS SDK + 应用级 AGC 配置（自有华为开发者项目），因此其实现
+ * （`HuaweiLogin`）只在凭据就位时才被同步进工程；主插件用**反射**调用它，
+ * 这样"没有凭据"时本模块对 HMS 零编译期依赖。
+ */
+interface HuaweiLoginSink {
+    /** 华为游戏服务已初始化，插件侧可发起授权 Intent。 */
+    fun onReady()
+
+    /** 成功：渠道凭证 JSON + 渠道 UID + 昵称。 */
+    fun onDone(cred: String, uid: String, name: String)
+
+    /** 失败原因。 */
+    fun onError(message: String)
+}
+
+/**
  * 渠道登录插件（控制面）：Rust 经 PluginHandle::run_mobile_plugin 调用 `login`。
  *
  * 与参考项目 login/LoginInstanceManager 的「按 server_type 分发」对位——本插件为
@@ -63,6 +81,8 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
             // 网页登录型渠道（无厂商 SDK，QQ 互联登录页 + 自建凭证）。
             "yyb" -> startWebLogin(invoke, "yyb")
             "wegame" -> startWebLogin(invoke, "wegame")
+            // 华为：条件启用（HMS SDK + 自有 AGC 配置），内部反射调用 HuaweiLogin。
+            "huawei" -> loginHuawei(invoke)
             else -> invoke.reject("暂不支持的渠道：${args.channel}")
         }
     }
@@ -264,6 +284,75 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
             .put("access_token", resp.optString("access_token"))
             .put("openid", resp.optString("openid"))
             .put("uid", resp.optString("pc_rail_id"))
+    }
+
+    // ---------- 华为（条件启用：HMS SDK + 自有 AGC 配置） ----------
+
+    /**
+     * 华为渠道登录（照参考项目 login/Huawei.java）。
+     *
+     * 反射调用 `HuaweiLogin`：该类由 patch-gen 步骤 5e 在
+     * `vendor/huawei/agconnect-services.json` 存在时才同步进工程。未启用时这里
+     * 给出明确错误提示，而不是崩溃或让主模块在编译期依赖 HMS SDK。
+     */
+    private fun loginHuawei(invoke: Invoke) {
+        val sink = huaweiSink(invoke)
+        try {
+            huaweiCall(
+                "init",
+                arrayOf(Activity::class.java, HuaweiLoginSink::class.java),
+                arrayOf(activity, sink)
+            )
+        } catch (e: Exception) {
+            invoke.reject("华为渠道尚未启用（缺少 AGC 配置或 HMS 依赖）：${e.message}")
+        }
+    }
+
+    @ActivityCallback
+    fun huaweiSignIn(invoke: Invoke, result: ActivityResult) {
+        val sink = huaweiSink(invoke)
+        try {
+            huaweiCall(
+                "finish",
+                arrayOf(Activity::class.java, Intent::class.java, HuaweiLoginSink::class.java),
+                arrayOf(activity, result.data, sink)
+            )
+        } catch (e: Exception) {
+            invoke.reject("华为登录处理失败：${e.message}")
+        }
+    }
+
+    /** 华为链路的回调实现：`onReady` 拉起授权页，`onDone` 回传凭证。 */
+    private fun huaweiSink(invoke: Invoke): HuaweiLoginSink = object : HuaweiLoginSink {
+        override fun onReady() {
+            activity.runOnUiThread {
+                val intent = try {
+                    huaweiCall(
+                        "signInIntent",
+                        arrayOf(Activity::class.java),
+                        arrayOf(activity)
+                    ) as Intent
+                } catch (e: Exception) {
+                    invoke.reject("华为授权页拉起失败：${e.message}")
+                    return@runOnUiThread
+                }
+                startActivityForResult(invoke, intent, "huaweiSignIn")
+            }
+        }
+
+        override fun onDone(cred: String, uid: String, name: String) {
+            resolveCred(invoke, uid, name, cred)
+        }
+
+        override fun onError(message: String) {
+            activity.runOnUiThread { invoke.reject(message) }
+        }
+    }
+
+    /** 反射调用 HuaweiLogin 的静态方法（该类仅在华为凭据就位时才存在）。 */
+    private fun huaweiCall(name: String, types: Array<Class<*>>, args: Array<Any?>): Any? {
+        val cls = Class.forName("com.taumata.scanner.plugins.HuaweiLogin")
+        return cls.getMethod(name, *types).invoke(null, *args)
     }
 
     // ---------- B 站 SDK 授权登录（照参考项目 login/Bilibili.java） ----------
