@@ -72,6 +72,9 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_ScreenCaptureBridge_onSc
 /// `ScreenCaptureBridge.onCaptureStopped()`
 ///
 /// 捕获停止（用户从系统状态栏停止共享 / 服务销毁）：清空帧槽与去重状态。
+/// Android 14 起 MediaProjection 授权是**一次性令牌**，停止后必须重新弹授权框；
+/// 这里同时向前端广播 `capture-stopped`，让界面把「共享中」改回「未开启」并提示
+/// 重新授权（否则用户会看到按钮仍写着共享中、扫码却毫无反应）。
 #[no_mangle]
 pub extern "system" fn Java_com_taumata_scanner_plugins_ScreenCaptureBridge_onCaptureStopped<
     'local,
@@ -81,6 +84,7 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_ScreenCaptureBridge_onCa
 ) {
     let outcome = unowned_env.with_env(|_env| -> Result<(), jni::errors::Error> {
         capture::on_capture_stopped();
+        crate::screen_capture_plugin::notify_capture_stopped();
         Ok(())
     });
     outcome.resolve::<ThrowRuntimeExAndDefault>()

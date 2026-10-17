@@ -602,13 +602,20 @@
   html.mobile .vp-info { height: 36px; padding: 0 14px; font-size: var(--m-fs-sm); }
   html.mobile .vp-info #btnStart { display: none; }
   html.mobile .vp-fit { width: 100%; height: auto; }
-  /* 3:2 视口：用 vw 高度（100vw * 2/3）比 aspect-ratio 更可靠。 */
-  html.mobile .vp-stage { width: 100% !important; height: 66.6667vw !important; }
+  /* 3:2 视口：用 vw 高度（100vw * 2/3）比 aspect-ratio 更可靠。
+     但**必须同时受视口高度约束**：横屏时 100vw 可达 2340px，2/3 即 1560px，
+     远超 1080px 屏高——纯 vw 会把账号区整个挤出屏幕（真机旋转后实测）。
+     取 min(66.67vw, 52vh)：竖屏仍由宽度决定（比例不变），横屏改由高度决定，
+     预览缩小居中、账号区与底部栏都留在屏内。 */
+  html.mobile .vp-stage { width: 100% !important; height: min(66.6667vw, 52vh) !important; }
   /* 移动端空闲（无预览）时隐藏 fps / 重置浮标。 */
   html.mobile .vp-stage .fps, html.mobile .vp-stage .region-reset { display: none; }
   /* 移动端隐藏"窗口置顶"设置项（无意义）。 */
   html.mobile #alwaysOnTop { display: none; }
   html.mobile .opt-row:has(#alwaysOnTop) { display: none; }
+  /* 「屏幕共享」行仅移动端可见（桌面端没有 MediaProjection）。 */
+  .opt-row.mb-only-row { display: none; }
+  html.mobile .opt-row.mb-only-row { display: flex; }
 
   /* ---- 摄像头扫码模式：中间显示区平滑扩展，覆盖账号 / 游戏区服区 ----
      保留顶栏（52px）与底部操作栏（64px），其余高度全部让给取景区。
@@ -906,6 +913,32 @@
   html.mobile #toolsOverlay .pi-head > span:first-child { font-size: var(--m-fs-md); }
   html.mobile #toolsOverlay .btn { font-size: var(--m-fs-sm); }
   html.mobile #toolsOverlay [data-fps] { height: 32px; min-width: 46px; font-size: var(--m-fs-sm); }
+
+  /* ---- 横屏适配（手机横置 / 折叠屏展开 / 平板分屏） ----
+     竖屏的尺寸都按 vw 推导，横屏下 vw 变成屏幕**长边**，全部失准：抽屉宽到
+     80vw≈1872px、预览高到 1560px（远超 1080px 屏高），账号区被整个挤出屏幕。
+     这里在长边出现时按实际可用空间重新定档，保证「预览 + 账号区 + 底部栏」
+     三者在横屏高度内共存。 */
+  @media (orientation: landscape) {
+    /* 抽屉收窄到可用宽度（不超过屏宽 80%，也不超过 420px），留出主界面。 */
+    html.mobile .sidebar,
+    html.mobile #toolsOverlay .dialog { width: min(80vw, 420px); }
+    html.mobile .sidebar { transform: translateX(calc(-1 * min(80vw, 420px))); }
+    html.mobile #toolsOverlay .dialog {
+      transform: translateX(calc(min(80vw, 420px) + var(--m-swipe)));
+    }
+    /* 预览再收一档：横屏屏高只有竖屏的 1/2.17，52vh 仍偏大。 */
+    html.mobile .vp-stage { height: min(66.6667vw, 44vh) !important; }
+    /* 横屏压扁顶栏与底部栏，把高度让给内容。 */
+    html.mobile .m-topbar { height: 44px; }
+    html.mobile .m-bottombar { height: 56px; }
+    html.mobile .m-sqbtn { width: 44px; height: 44px; }
+    html.mobile .m-scanbtn { height: 44px; }
+    /* 账号列表横屏可双列，避免矮高度里只排得下一两张卡。
+       空态「＋ 添加账号」是整行 CTA，跨两列铺满（否则只剩半宽很难点）。 */
+    html.mobile .acct-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    html.mobile .acct-list .acct-add { grid-column: 1 / -1; }
+  }
 
 </style>
 </head>
@@ -1285,6 +1318,15 @@
             <button data-fps="120">120</button>
           </div>
         </div>
+        <!-- 屏幕共享控制（仅移动端）：Android 的 MediaProjection 一旦授权会一直
+             挂着前台服务与常驻通知，系统只在状态栏提供「停止共享」。应用内补一个
+             等价入口，避免用户必须下拉状态栏才能释放。 -->
+        <div class="opt-row mb-only-row" id="rowCapture">
+          <span class="lbl">屏幕共享
+            <small id="capState">未开启</small>
+          </span>
+          <button class="btn ghost tiny" id="btnStopCapture">停止共享</button>
+        </div>
 
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
@@ -1414,12 +1456,19 @@
   });
 
   // ---------- 日志 ----------
+  // 时间戳手工补零：`toLocaleTimeString` 在 0 点会给出「24:00:00」
+  // （hour12:false 的 h24 行为，且 hourCycle 会被 hour12 覆盖），日志里读着
+  // 像次日。这里直接按 24 小时制拼，跨浏览器/WebView 完全确定。
+  function logTime(d) {
+    const p = (n) => (n < 10 ? '0' + n : '' + n);
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
   function log(msg, type) {
     const line = document.createElement('div');
     line.className = type || 'info';
     const t = document.createElement('span');
     t.className = 'time';
-    t.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    t.textContent = logTime(new Date());
     line.appendChild(t);
     line.appendChild(document.createTextNode(msg));
     logEl.appendChild(line);
@@ -3884,6 +3933,36 @@
     const dn = $('displayName');
     dn.addEventListener('change', () => saveCfg({ display_name: dn.value.trim() }));
     dn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dn.blur(); } });
+    // 屏幕共享：停止入口 + 状态显示（仅移动端有意义；桌面端该行被 CSS 隐藏）。
+    const btnStopCap = $('btnStopCapture');
+    if (btnStopCap) btnStopCap.addEventListener('click', () => stopScreenShare());
+    refreshCaptureRow();
+  }
+
+  /// 刷新「屏幕共享」行的状态文字（未开启 / 共享中）。
+  async function refreshCaptureRow() {
+    const el = $('capState');
+    const btn = $('btnStopCapture');
+    if (!el || !btn) return;
+    let on = false;
+    try { on = await invoke('screen_capture_state'); } catch (_) { on = false; }
+    el.textContent = on ? '共享中' : '未开启';
+    btn.disabled = !on;
+  }
+
+  /// 应用内停止屏幕共享（等价于系统状态栏的「停止共享」）。
+  ///
+  /// 停止后必须**同时**停掉正在跑的屏幕扫码循环：否则循环会继续以 60Hz 空转
+  /// （拿不到帧 → 每次都走「屏幕捕获失败」分支），既费电又刷日志。
+  async function stopScreenShare() {
+    try {
+      if (scanningTargets.has('screen')) stopScanTarget('screen');
+      await invoke('stop_screen_capture');
+      log('已停止屏幕共享', 'info');
+    } catch (e) {
+      log('停止屏幕共享失败：' + String(e), 'error');
+    }
+    refreshCaptureRow();
   }
 
   async function init() {
@@ -3931,9 +4010,22 @@
         if (!quiet) log(p.message || '', p.type === 'started' ? 'info' : (p.type || 'info'));
       });
       // 更新检查结果（自动检查/手动检查共用：把结果写进日志面板）。
+      // Android 的「发现新版本」不带安装包，只带 Release 页面 url——手动检查时
+      // 直接交给系统浏览器（桌面端后端会自行下载安装，不会带 url）。
       await listen('update-status', (ev) => {
         const p = ev.payload || {};
         log(p.message || '', p.kind === 'error' ? 'error' : 'info');
+        if (p.url) invoke('open_url', { url: p.url }).catch((e) => log(String(e), 'error'));
+      });
+      // 屏幕共享被系统/用户停止（状态栏「停止共享」/ Android 14 一次性令牌到期 /
+      // 系统回收）。此时帧管道已断开，屏幕扫码循环再跑也拿不到帧——停掉它并提示
+      // 重新授权，避免界面显示「共享中」却毫无反应。
+      await listen('capture-stopped', () => {
+        refreshCaptureRow();
+        if (scanningTargets.has('screen')) {
+          stopScanTarget('screen');
+          log('屏幕共享已停止，如需继续屏幕扫码请重新授权', 'warn');
+        }
       });
     }
     try { config = await invoke('get_config'); } catch (e) { config = null; log('加载配置失败: ' + e, 'error'); }
@@ -4045,7 +4137,11 @@
       try { invoke("frontend_log", { level: "info", msg: "移动端：打开直播间抽屉" }); } catch (e) {}
     }
     function closeLeft() { settleSwipe(0); }
-    function openRight() { settleSwipe(-drawerW()); }
+    function openRight() {
+      settleSwipe(-drawerW());
+      // 抽屉每次展开都刷新一次屏幕共享状态（面板常驻，不能用 hidden 事件）。
+      if (typeof refreshCaptureRow === "function") refreshCaptureRow();
+    }
     function closeRight() { settleSwipe(0); }
     window.closeLeft = closeLeft;
     window.closeRight = closeRight;

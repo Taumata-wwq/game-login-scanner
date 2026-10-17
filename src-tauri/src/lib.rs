@@ -286,16 +286,30 @@ fn probe_http(url: String) -> String {
 }
 
 /// 用系统默认程序打开 https 链接（项目信息 / 更新页用；仅允许 https）。
+///
+/// Android 走屏幕插件新增的 `openUrl` 命令（ACTION_VIEW）；桌面端走
+/// `rundll32 url.dll,FileProtocolHandler`。
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
+async fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://") {
         return Err("仅支持 https 链接".to_string());
     }
-    std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("打开链接失败: {e}"))
+    #[cfg(target_os = "android")]
+    {
+        let h = screen_capture_plugin::handle().ok_or("屏幕捕获插件未注册")?;
+        h.run_mobile_plugin_async::<serde_json::Value>("openUrl", serde_json::json!({ "url": url }))
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("打开链接失败：{e}"))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开链接失败: {e}"))
+    }
 }
 
 /// 解析语义化版本号为数值三元组（接受 "v1.2.3" / "1.2" / "1.2.3-rc1" 等）。
@@ -408,56 +422,93 @@ fn check_update(app: tauri::AppHandle, manual: bool) {
             }
             return;
         }
+        // ---- Android：无「下载安装包 → 启动安装器」路径 ----
+        //
+        // 桌面端下载的是 `*-setup.exe` 并 `Command::new(&path).spawn()` 拉起安装程序；
+        // Android 既不能执行 exe，也无法静默安装 APK（需用户逐次确认 + 未知来源授权）。
+        // 因此这里只做「告知 + 打开下载页」：把 Release 页面交给系统浏览器，
+        // 用户在网页上取 APK 自行安装（避免应用内下载 APK 被渠道判为自更新风险）。
+        //
+        // **自动检查不弹浏览器**（启动即跳转是骚扰）：只在日志里提示有新版本；
+        // 手动检查才把 `url` 交给前端，由前端调 `open_url` 打开（与项目信息链接同一条
+        // 路径，复用 Android 侧 ACTION_VIEW 实现）。
+        #[cfg(target_os = "android")]
+        {
+            let page = v["html_url"]
+                .as_str()
+                .unwrap_or("https://github.com/Taumata-wwq/game-login-scanner/releases/latest")
+                .to_string();
+            if manual {
+                let _ = app.emit(
+                    "update-status",
+                    serde_json::json!({
+                        "kind": "info",
+                        "message": format!("发现新版本 {tag}，正在打开下载页（当前 v{current}）…"),
+                        "url": page,
+                    }),
+                );
+            } else {
+                emit(
+                    "info",
+                    format!("发现新版本 {tag}（当前 v{current}），可在「检查更新」中获取"),
+                );
+            }
+            return;
+        }
+        // ---- 桌面端：下载安装包 → 启动安装程序 → 关闭当前程序 ----
         // 新版本：定位安装包资源（历史命名含 `*-setup.exe` 与 `*_x64-setup.exe`
         // 两种形态 → 统一按「以 setup.exe 结尾」匹配，避免漏选）。
-        let asset = v["assets"].as_array().and_then(|a| {
-            a.iter()
-                .find(|x| {
-                    x["name"]
-                        .as_str()
-                        .map(|n| n.to_ascii_lowercase().ends_with("setup.exe"))
-                        .unwrap_or(false)
-                })
-                .and_then(|x| {
-                    Some((
-                        x["name"].as_str().unwrap_or("setup.exe").to_string(),
-                        x["browser_download_url"].as_str()?.to_string(),
-                    ))
-                })
-        });
-        let Some((_, url)) = asset else {
-            emit(
-                "error",
-                format!("发现新版本 {tag}，但 Release 中没有安装包资源"),
-            );
-            return;
-        };
-        emit("info", format!("发现新版本 {tag}，正在下载安装包…"));
-        let bytes = match crate::http::request_bytes_sync("GET", &url, &headers, None) {
-            Ok((_, _, b)) => b,
-            Err(e) => {
-                emit("error", format!("下载安装包失败：{e}"));
+        #[cfg(not(target_os = "android"))]
+        {
+            let asset = v["assets"].as_array().and_then(|a| {
+                a.iter()
+                    .find(|x| {
+                        x["name"]
+                            .as_str()
+                            .map(|n| n.to_ascii_lowercase().ends_with("setup.exe"))
+                            .unwrap_or(false)
+                    })
+                    .and_then(|x| {
+                        Some((
+                            x["name"].as_str().unwrap_or("setup.exe").to_string(),
+                            x["browser_download_url"].as_str()?.to_string(),
+                        ))
+                    })
+            });
+            let Some((_, url)) = asset else {
+                emit(
+                    "error",
+                    format!("发现新版本 {tag}，但 Release 中没有安装包资源"),
+                );
+                return;
+            };
+            emit("info", format!("发现新版本 {tag}，正在下载安装包…"));
+            let bytes = match crate::http::request_bytes_sync("GET", &url, &headers, None) {
+                Ok((_, _, b)) => b,
+                Err(e) => {
+                    emit("error", format!("下载安装包失败：{e}"));
+                    return;
+                }
+            };
+            let path = std::env::temp_dir().join(format!("game-login-scanner-{tag}-setup.exe"));
+            if let Err(e) = std::fs::write(&path, &bytes) {
+                emit("error", format!("保存安装包失败：{e}"));
                 return;
             }
-        };
-        let path = std::env::temp_dir().join(format!("game-login-scanner-{tag}-setup.exe"));
-        if let Err(e) = std::fs::write(&path, &bytes) {
-            emit("error", format!("保存安装包失败：{e}"));
-            return;
-        }
-        emit("info", "下载完成，正在启动安装程序…".to_string());
-        if let Err(e) = std::process::Command::new(&path).spawn() {
-            emit("error", format!("启动安装包失败：{e}"));
-            return;
-        }
-        // 给安装器一点启动时间，随后关闭当前窗口（关闭路径会保存窗口几何并退出）。
-        std::thread::sleep(std::time::Duration::from_millis(800));
-        let handle = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            if let Some(w) = handle.get_webview_window("main") {
-                let _ = w.close();
+            emit("info", "下载完成，正在启动安装程序…".to_string());
+            if let Err(e) = std::process::Command::new(&path).spawn() {
+                emit("error", format!("启动安装包失败：{e}"));
+                return;
             }
-        });
+            // 给安装器一点启动时间，随后关闭当前窗口（关闭路径会保存窗口几何并退出）。
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(w) = handle.get_webview_window("main") {
+                    let _ = w.close();
+                }
+            });
+        }
     });
 }
 
@@ -1574,6 +1625,17 @@ async fn capture_preview(
         .map_err(|e| format!("预览任务失败: {e}"))?
 }
 
+/// 「显示器列表为空」是否属于正常瞬态。
+///
+/// Android 上屏幕尺寸要等 MediaProjection 授权成功、`ScreenCaptureBridge.onScreenInfo`
+/// 上报之后才可知，而预览轮询在应用启动瞬间就开始跑 → 首帧前 `screen_rects()`
+/// 必然为空。把它当错误会让每次冷启动都在日志里留一条假的
+/// 「预览失败: 未找到可用显示器」（真机实测）。桌面端空列表则是真实故障。
+#[cfg(target_os = "android")]
+const DISPLAY_PENDING_IS_BENIGN: bool = true;
+#[cfg(not(target_os = "android"))]
+const DISPLAY_PENDING_IS_BENIGN: bool = false;
+
 /// `capture_preview` 的同步实现（在 blocking 池执行）。
 fn capture_preview_sync(
     app: &tauri::AppHandle,
@@ -1586,6 +1648,11 @@ fn capture_preview_sync(
     // 用带 1 秒缓存的 screen_rects() 枚举显示器（每帧实时枚举是预览帧率上不去的瓶颈之一）。
     let screens = crate::screenshot::screen_rects();
     if screens.is_empty() {
+        // 移动端：屏幕尺寸尚未上报（未授权 / 首帧未到）→ 返回「无变化」空帧，
+        // 前端静默跳过本帧，等下一次轮询。
+        if DISPLAY_PENDING_IS_BENIGN {
+            return Ok(tauri::ipc::Response::new(vec![0u8; 24]));
+        }
         return Err("未找到可用显示器".to_string());
     }
     // 主窗口中心点所在显示器（找不到则第一块屏）；预览始终取该屏，
@@ -1718,6 +1785,10 @@ fn capture_tiles_sync(
 ) -> Result<tauri::ipc::Response, String> {
     let screens = crate::screenshot::screen_rects();
     if screens.is_empty() {
+        // 同 capture_preview_sync：移动端未授权/首帧前属正常瞬态，返回「无瓦片」。
+        if DISPLAY_PENDING_IS_BENIGN {
+            return Ok(tauri::ipc::Response::new(vec![0u8; 8]));
+        }
         return Err("未找到可用显示器".to_string());
     }
     let center = app
@@ -2474,6 +2545,11 @@ pub fn run() {
             _ => {}
         })
         .setup(move |app| {
+            // 记录应用句柄：JNI 帧桥的「捕获被系统停止」回调需要它向前端广播事件。
+            #[cfg(target_os = "android")]
+            {
+                crate::screen_capture_plugin::set_app_handle(app.handle().clone());
+            }
             // Android：配置落点必须用应用私有目录（%APPDATA% 不存在、当前目录不可写）。
             // 用 Tauri 的跨平台路径解析器（app_data_dir），此处 app 句柄已就绪。
             // 注入后**重载配置**到 state（run() 阶段的加载用的是默认路径 → 恒默认值）。

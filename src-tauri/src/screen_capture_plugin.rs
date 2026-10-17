@@ -50,6 +50,33 @@ pub fn handle() -> Option<&'static PluginHandle<Wry>> {
     HANDLE.get()
 }
 
+/// 应用句柄（启动时写入；供 JNI 回调线程向前端广播事件）。
+#[cfg(target_os = "android")]
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// 记录应用句柄（lib.rs 的 `setup` 中调用）。
+#[cfg(target_os = "android")]
+pub fn set_app_handle(app: tauri::AppHandle) {
+    let _ = APP.set(app);
+}
+
+/// 广播「屏幕共享已被系统/用户停止」。
+///
+/// 由 JNI 帧桥的 `onCaptureStopped` 调用（Kotlin `MediaProjection.Callback.onStop`）。
+/// 用途：Android 14 起每次授权都是一次性令牌，停止后必须重新弹授权框；前端据此
+/// 把设置面板状态改回「未开启」并提示，避免界面显示「共享中」却扫不到任何东西。
+#[cfg(target_os = "android")]
+pub fn notify_capture_stopped() {
+    use tauri::Emitter;
+    if let Some(app) = APP.get() {
+        let _ = app.emit("capture-stopped", ());
+    }
+}
+
+/// 非 Android 平台：无 MediaProjection，空实现（保持调用点跨平台可编译）。
+#[cfg(not(target_os = "android"))]
+pub fn notify_capture_stopped() {}
+
 /// 请求屏幕捕获授权（Android）：拉起系统 MediaProjection 对话框，授权成功后
 /// 由前台服务建立帧管道。用户取消或拒绝时返回错误。
 #[tauri::command]

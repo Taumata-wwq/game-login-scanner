@@ -79,6 +79,10 @@ class ScreenCaptureService : Service() {
     private var frameThread: HandlerThread? = null
     private var projectionCallback: MediaProjection.Callback? = null
 
+    /** 当前 VirtualDisplay 的像素尺寸（用于判断旋转后是否需要重建）。 */
+    private var captureW: Int = 0
+    private var captureH: Int = 0
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -112,6 +116,65 @@ class ScreenCaptureService : Service() {
         super.onDestroy()
     }
 
+    /**
+     * 横竖屏 / 折叠屏展开收起 / 分屏尺寸变化：重建 VirtualDisplay 与 ImageReader。
+     *
+     * 为什么必须重建：`createVirtualDisplay` 的宽高在创建时固化，Activity 又因
+     * `configChanges` 声明了 orientation|screenSize 而不会重建，MediaProjection
+     * 本身也不会跟随分辨率。不重建的话旋转后画面会被裁切/拉伸（真机旋转 90°
+     * 后只有左上角一块内容）。这里按新的 realMetrics 重建，并把新尺寸回报给
+     * Rust（`onScreenInfo`），让扫码区域与预览坐标系同步更新。
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (!isRunning) return
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(metrics)
+        val w = metrics.widthPixels
+        val h = metrics.heightPixels
+        if (w == captureW && h == captureH) return
+        recreateCapture(w, h, metrics.densityDpi)
+    }
+
+    /** 按新尺寸重建 VirtualDisplay + ImageReader（复用同一个 MediaProjection）。 */
+    private fun recreateCapture(w: Int, h: Int, dpi: Int) {
+        val proj = projection ?: return
+        // 先断开旧管道：避免旧 reader 的 surface 仍挂在 VirtualDisplay 上。
+        imageReader?.setOnImageAvailableListener(null, null)
+        virtualDisplay?.release()
+        virtualDisplay = null
+        imageReader?.close()
+        imageReader = null
+
+        val thread = frameThread ?: HandlerThread("ScreenCaptureFrames").also {
+            it.start()
+            frameThread = it
+        }
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3).apply {
+            setOnImageAvailableListener({ r -> onFrameAvailable(r) }, Handler(thread.looper))
+        }
+        val vd = try {
+            proj.createVirtualDisplay(
+                "game-scanner-capture",
+                w, h, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface,
+                null,
+                null,
+            )
+        } catch (e: Exception) {
+            reader.close()
+            return
+        }
+        imageReader = reader
+        virtualDisplay = vd
+        captureW = w
+        captureH = h
+        // 新尺寸回报 Rust：扫码 rect 与预览坐标系都以此为准。
+        ScreenCaptureBridge.onScreenInfo(w, h)
+    }
+
     // ---------- 捕获建立 ----------
 
     private fun startCapture(resultCode: Int, data: Intent): Boolean {
@@ -130,22 +193,15 @@ class ScreenCaptureService : Service() {
         val h = metrics.heightPixels
         val dpi = metrics.densityDpi
 
-        val thread = HandlerThread("ScreenCaptureFrames").also { it.start() }
-        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3).apply {
-            setOnImageAvailableListener({ r -> onFrameAvailable(r) }, Handler(thread.looper))
-        }
-        val vd = proj.createVirtualDisplay(
-            "game-scanner-capture",
-            w, h, dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader.surface,
-            null,
-            null,
-        )
-
+        // **顺序关键**：Android 14（API 34）起，`createVirtualDisplay` 之前必须先
+        // `registerCallback`，否则抛 IllegalStateException（"Must register a
+        // callback before starting capture"）→ 授权框点「开始」后直接失败。
+        // 旧代码把 registerCallback 放在 createVirtualDisplay 之后，在 API 34+
+        // 设备上必然拿不到帧。
         val callback = object : MediaProjection.Callback() {
             override fun onStop() {
-                // 用户从系统状态栏停止共享 / 系统回收。
+                // 用户从系统状态栏停止共享 / 系统回收（Android 14 起每次授权为一次性
+                // 令牌，应用再次请求时必须重新弹授权框——由插件 requestCapture 负责）。
                 isRunning = false
                 ScreenCaptureBridge.onCaptureStopped()
                 cleanup()
@@ -153,12 +209,34 @@ class ScreenCaptureService : Service() {
             }
         }
         proj.registerCallback(callback, Handler(mainLooper))
-
+        projectionCallback = callback
         projection = proj
+
+        val thread = HandlerThread("ScreenCaptureFrames").also { it.start() }
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3).apply {
+            setOnImageAvailableListener({ r -> onFrameAvailable(r) }, Handler(thread.looper))
+        }
+        val vd = try {
+            proj.createVirtualDisplay(
+                "game-scanner-capture",
+                w, h, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface,
+                null,
+                null,
+            )
+        } catch (e: Exception) {
+            reader.close()
+            thread.quitSafely()
+            cleanup()
+            return false
+        }
+
         virtualDisplay = vd
         imageReader = reader
         frameThread = thread
-        projectionCallback = callback
+        captureW = w
+        captureH = h
 
         // 供取帧侧在首帧到达前查询屏幕尺寸（scan loop 启动即需要 rects）。
         ScreenCaptureBridge.onScreenInfo(w, h)
@@ -193,6 +271,8 @@ class ScreenCaptureService : Service() {
 
     private fun cleanup() {
         isRunning = false
+        captureW = 0
+        captureH = 0
         imageReader?.setOnImageAvailableListener(null, null)
         imageReader?.close()
         imageReader = null

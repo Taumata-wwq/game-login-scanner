@@ -2,10 +2,13 @@ package com.taumata.scanner.plugins
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
+import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -77,4 +80,35 @@ class ScreenCapturePlugin(private val activity: Activity) : Plugin(activity) {
         activity.moveTaskToBack(true)
         invoke.resolve()
     }
+
+    /**
+     * 用系统浏览器打开链接（设置面板的项目信息 / 更新页；仅 https）。
+     *
+     * 桌面端对应 `open_url` 走 `rundll32 url.dll,FileProtocolHandler`；Android 无
+     * 该命令，改用 ACTION_VIEW。加 NEW_TASK 是因为这里可能从非 Activity 上下文
+     * 之外的场景触发，避免 "Calling startActivity() from outside of an
+     * Activity context requires the FLAG_ACTIVITY_NEW_TASK flag" 崩溃。
+     */
+    @Command
+    fun openUrl(invoke: Invoke) {
+        val url = invoke.parseArgs(OpenUrlArgs::class.java).url
+        if (url.isNullOrBlank() || !url.startsWith("https://")) {
+            invoke.reject("仅支持 https 链接")
+            return
+        }
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(intent)
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("打开链接失败：${e.message}")
+        }
+    }
+}
+
+/** `openUrl` 的参数（Tauri 移动插件以 JSON 传参）。 */
+@InvokeArg
+class OpenUrlArgs {
+    var url: String? = null
 }

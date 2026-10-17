@@ -450,6 +450,10 @@ struct LoopState {
     backoff_until: tokio::time::Instant,
     reported_tickets: HashSet<String>,
     screens_empty_reported: bool,
+    /// 本轮扫码启动时刻：Android 上「还没有帧」在启动瞬间是正常瞬态
+    /// （MediaProjection 授权 + 首帧到达前 `screen_rects()` 必然为空），
+    /// 用启动后的一段宽限期把这类误报挡掉（见 [`Self::screen_pending_benign`]）。
+    started_at: tokio::time::Instant,
     /// 各显示器上一帧的抽样指纹（用于跳过未变化的屏幕）。
     last_thumbs: Vec<Option<Vec<u8>>>,
     /// 各显示器上次二维码命中位置（像素包围盒）——下轮先解此 ROI，命中则跳过全屏。
@@ -479,6 +483,12 @@ struct LoopState {
 
 /// 同一票据确认失败的上限：达到后不再尝试该票据。
 const MAX_FAILS_PER_TICKET: u32 = 3;
+/// 扫码启动后的「屏幕帧待就绪」宽限期。
+///
+/// 移动端点「开始扫码」到 MediaProjection 授权完成 + 首帧回调通常 < 2s，
+/// 取 3s 既覆盖授权框的点击延迟，又不会把真正的权限故障（用户拒绝）
+/// 永久藏起来——宽限期一过仍无帧就照常报错。
+const SCREEN_PENDING_GRACE: Duration = Duration::from_secs(3);
 /// failed_count 软上限：超过后丢弃最旧记录（去重提示为弱语义，丢弃不影响正确性）。
 const FAILED_COUNT_MAX: usize = 256;
 /// reported_tickets 软上限：超过后整批清空。
@@ -491,6 +501,7 @@ impl LoopState {
             backoff_until: tokio::time::Instant::now(),
             reported_tickets: HashSet::new(),
             screens_empty_reported: false,
+            started_at: tokio::time::Instant::now(),
             last_thumbs: Vec::new(),
             last_hits: Vec::new(),
             roi_misses: Vec::new(),
@@ -517,6 +528,19 @@ impl LoopState {
         if self.reported_tickets.len() > REPORTED_TICKETS_MAX {
             self.reported_tickets.clear();
         }
+    }
+
+    /// 「暂时拿不到屏幕帧」是否属于正常瞬态、不该报错。
+    ///
+    /// 两个场景都是启动期的正常过程，误报成「屏幕捕获失败」会让用户以为坏了：
+    /// 1. **移动端宽限期内**：Android 的 `screen_rects()` 依赖 MediaProjection
+    ///    授权后 `ScreenCaptureBridge.onScreenInfo` 上报尺寸 + 首帧到达，而扫码
+    ///    循环可能在授权框还没点「开始」时就被拉起（启动自动扫码 / 点按竞态）。
+    /// 2. **桌面端启动宽限期内**：DXGI 首次枚举 + GDI 初始化需要几十毫秒。
+    ///
+    /// 宽限期过后仍无帧 = 真实故障（未授权 / 权限被系统回收），照常报错。
+    fn screen_pending_benign(&self) -> bool {
+        self.started_at.elapsed() < SCREEN_PENDING_GRACE
     }
 }
 
@@ -1198,7 +1222,8 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                     None => {
                         let rects = crate::screenshot::screen_rects();
                         if rects.is_empty() {
-                            if !st.screens_empty_reported {
+                            // 启动宽限期内无帧 = 授权/首帧尚未就绪，静默等待。
+                            if !st.screens_empty_reported && !st.screen_pending_benign() {
                                 emit(&app, tkey.as_str(), "error", "屏幕捕获失败，请检查显示设置");
                                 st.screens_empty_reported = true;
                             }
@@ -1259,7 +1284,7 @@ async fn process_screen(
                 (g, w2, h2)
             }
             None => {
-                if !st.screens_empty_reported {
+                if !st.screens_empty_reported && !st.screen_pending_benign() {
                     emit(app, &ctx.target, "error", "屏幕捕获失败，请检查显示设置");
                     st.screens_empty_reported = true;
                 }
