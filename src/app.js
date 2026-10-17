@@ -3007,17 +3007,32 @@
     // Android 返回键在 WebView 中触发 history back。用 pushState 垫一层「哨兵」，
     // popstate 时若处于抽屉或取景态则只做界面复位并补回哨兵（不退出应用）。
     (function bindBackHandler() {
+      // 是否消费本次返回：取景态 / 抽屉打开 / 有弹窗时先做界面复位。
+      // Android 侧 MainActivity 拦截返回键后同步调用本函数（见 patch-gen.ps1 步骤 5a），
+      // 返回 false 时由原生层 moveTaskToBack（回桌面保活），不再走 Activity.finish。
+      function consumeBack() {
+        if (cameraMode) { window.exitCameraMode(); return true; }
+        if (swipeTarget !== 0) { settleSwipe(0); return true; }
+        if (window.__anyModalOpen && window.__anyModalOpen()) {
+          // 关掉当前打开的所有弹窗（含登录弹窗需取消二维码轮询）。
+          document.querySelectorAll(".overlay").forEach((o) => {
+            if (o.hidden || o.id === "toolsOverlay") return;
+            o.hidden = true;
+            if (o.id === "loginOverlay") cancelQr();
+          });
+          return true;
+        }
+        return false;
+      }
+      window.__gsHandleBack = consumeBack;
+
       try { history.pushState({ gsGuard: 1 }, ""); } catch (e) {}
       window.addEventListener("popstate", () => {
-        let handled = false;
-        if (cameraMode) { window.exitCameraMode(); handled = true; }
-        else if (swipeTarget !== 0) { settleSwipe(0); handled = true; }
-        else if (window.__anyModalOpen && window.__anyModalOpen()) { handled = true; }
-        if (handled) {
+        if (consumeBack()) {
           // 补回哨兵：下一次返回继续由本处理器接管。
           try { history.pushState({ gsGuard: 1 }, ""); } catch (e) {}
         }
-        // handled=false：哨兵已弹出且无界面可退 → 交给系统（退出应用）。
+        // false：哨兵已弹出且无界面可退 → 交给系统（退出应用）。
       });
     })();
 

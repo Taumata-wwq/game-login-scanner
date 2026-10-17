@@ -187,6 +187,60 @@ if (Test-Path $legacyDst) {
     Write-Host "  = 无历史残留目录"
 }
 
+Write-Host "== 5a. MainActivity 返回键接管（修复 BACK 键 SIGABRT）=="
+# 崩溃机制（2026-10-17 真机实证）：TauriActivity 把 handleBackNavigation 关成 false，
+# 于是 wry 不注册 OnBackPressedCallback，BACK 直接走系统 finish() →
+# onStop → Rust.stop() → tao Event::Stop → 事件循环退出 →
+# tao::platform_impl::android::run 里 ::std::process::exit(exit_code) →
+# __cxa_finalize 析构某个 joinable std::thread → std::terminate → SIGABRT
+# （Abort message: 'terminating'，栈含 std::__1::thread::~thread+20）。
+#
+# 修法：本 Activity 独占返回键，先问前端是否消费（取景态 / 抽屉 / 弹窗），
+# 未消费则 moveTaskToBack（回桌面保活），永不 finish，从而绕开 process::exit。
+$mainActivity = Join-Path $gen "app/src/main/java/com/taumata/game_scanner/MainActivity.kt"
+$mainKt = @"
+package com.taumata.game_scanner
+
+import android.os.Bundle
+import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.enableEdgeToEdge
+
+class MainActivity : TauriActivity() {
+    private var web: WebView? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+
+        // 返回键全权由本 Activity 接管。绝不调用 Activity.finish()：
+        // 那会触发 onStop -> Rust.stop() -> tao 事件循环退出 -> std::process::exit，
+        // 而 exit 时静态析构 joinable std::thread 会 std::terminate（SIGABRT）。
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                val w = web
+                if (w == null) {
+                    moveTaskToBack(true)
+                    return
+                }
+                // 前端消费优先（关闭取景 / 收起抽屉 / 关弹窗），未消费则退到桌面。
+                w.evaluateJavascript("(window.__gsHandleBack?window.__gsHandleBack():false)===true") { r ->
+                    if (r != null && r.trim('"') == "true") return@evaluateJavascript
+                    moveTaskToBack(true)
+                }
+            }
+        })
+    }
+
+    override fun onWebViewCreate(webView: WebView) {
+        super.onWebViewCreate(webView)
+        web = webView
+    }
+}
+"@
+[System.IO.File]::WriteAllText($mainActivity, $mainKt, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "  MainActivity.kt 已重写（返回键 -> 前端消费 / moveTaskToBack）"
+
 Write-Host "== 5b. 渠道 SDK 模块引入（mi_sdk，可选；vendor 本地材料）=="
 # 渠道 SDK 二进制不入库（再分发条款限制）：vendor/mi_sdk 存在则引入小米 SDK 模块，
 # 不存在则跳过（不影响基础构建）。模块来源：参考项目 bh3_login_simulation 的 mi_sdk。
