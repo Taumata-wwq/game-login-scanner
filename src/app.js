@@ -220,8 +220,10 @@
     (config.bili_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'bilibili', t }); });
     (config.official_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'official', t }); });
     (config.hypergryph_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'hypergryph', t }); });
-    // 第三方渠道账号（渠道扩展；按游戏独立显示）。
-    (config.channel_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'channel:' + t.channel, t }); });
+    // 第三方渠道账号（渠道扩展；**仅崩坏3** 显示——其它游戏无渠道服）。
+    if (g === 'bh3') {
+      (config.channel_accounts || []).forEach((t) => { if (acctGame(t) === g) out.push({ ch: 'channel:' + t.channel, t }); });
+    }
     return out;
   }
   // 当前游戏下某渠道的激活账号标识（active_* 现为 { game: id } 映射）。
@@ -339,6 +341,8 @@
     const g = gameMeta(config ? (config.current_game || 'bh3') : 'bh3');
     // 先回退 filter 到该游戏支持的渠道，再渲染高亮——否则切换游戏时高亮会先投给
     // 即将被隐藏的旧渠道，导致当前无任何按钮高亮（直到下次渲染）。
+    // 渠道服（channel:*）仅崩坏3有；切到其它游戏时一律回退到官服。
+    if (isChannelAcct(filter) && g.id !== 'bh3') filter = 'official';
     if (g.hyper) {
       if (filter !== 'hypergryph') filter = 'hypergryph';
     } else {
@@ -2273,12 +2277,9 @@
 
   function drawView() {
     if (!preview) return;
-    // 移动端：一旦有画面实际绘制，即停用「空闲态测试图」——否则直播/屏幕预览的
-    // 首帧揭除封面（vpCover）后，测试图会重新盖上画面（浏览器实测确认的遮挡）。
+    // 移动端：一旦有画面实际绘制即置位 __hadFrame（供封面/标题逻辑判断是否已出画面）。
     if (window.__MOBILE__ && !window.__hadFrame) {
       window.__hadFrame = true;
-      const ia = document.getElementById("mIdleArt");
-      if (ia) ia.setAttribute("hidden", "");
     }
     // 拖拽/缩放刚启动、新底图刷新中：冻结当前画面，不重绘。
     // 旧底图已作废（可能还停留在上一轮会话的内容），此时若强行取帧会闪现
@@ -2549,20 +2550,34 @@
       saveCfg({ stop_others_on_scan_success: e.target.checked });
     });
     $('autoCheckUpdate').addEventListener('change', (e) => saveCfg({ auto_check_update: e.target.checked }));
-    // 项目信息：链接用系统默认浏览器打开；「检查更新」手动触发一次检查。
-    const pi = $('projInfo') || document.querySelector('.proj-info');
-    if (pi) {
-      pi.addEventListener('click', (e) => {
+    // 关于弹窗：链接用系统默认浏览器打开；「检查更新」手动触发一次检查。
+    const aboutOverlay = $('aboutOverlay');
+    document.querySelectorAll('.about-line, .about-head').forEach((el) => {
+      el.addEventListener('click', (e) => {
         const a = e.target.closest('a[data-url]');
         if (!a) return;
         e.preventDefault();
         invoke('open_url', { url: a.dataset.url }).catch(() => {});
       });
-    }
-    $('btnCheckUpdate').addEventListener('click', () => {
-      log('正在检查更新…', 'info');
-      invoke('check_update', { manual: true }).catch((e) => log(String(e), 'error'));
     });
+    $('btnAbout').addEventListener('click', () => {
+      if (!aboutOverlay) return;
+      aboutOverlay.hidden = false;
+      syncAboutVersion();
+    });
+    // 关于弹窗内的「检查更新」。
+    document.querySelectorAll('[data-close]').forEach((b) => {
+      if (b.dataset.close === 'aboutOverlay') {
+        b.addEventListener('click', () => { aboutOverlay.hidden = true; });
+      }
+    });
+    const btnAboutUpdate = aboutOverlay && aboutOverlay.querySelector('#btnCheckUpdate');
+    if (btnAboutUpdate) {
+      btnAboutUpdate.addEventListener('click', () => {
+        log('正在检查更新…', 'info');
+        invoke('check_update', { manual: true }).catch((e) => log(String(e), 'error'));
+      });
+    }
     document.querySelectorAll('#fpsSeg button').forEach((b) => {
       b.addEventListener('click', () => {
         fpsSetting = Number(b.dataset.fps) || 60;
@@ -2578,6 +2593,16 @@
     const btnStopCap = $('btnStopCapture');
     if (btnStopCap) btnStopCap.addEventListener('click', () => stopScreenShare());
     refreshCaptureRow();
+  }
+
+  /// 版本号单一来源：Cargo.toml（get_app_version）；注入关于弹窗与底部栏迷你版。
+  function syncAboutVersion() {
+    invoke('get_app_version').then((v) => {
+      ['piVer', 'piVerMini'].forEach((id) => {
+        const el = $(id);
+        if (el) el.textContent = 'v' + v;
+      });
+    }).catch(() => {});
   }
 
   /// 刷新「屏幕共享」行的状态文字（未开启 / 共享中）。
@@ -2706,15 +2731,15 @@
     pollMetaRound();
     startMetaPoll();
     // 恢复上次观看的直播间（离线显示封面、开播则自动连接）。
-    // #8：列表非空时必选中一个——优先上次观看，否则第一个（不管是否开播）。
+    // 仅恢复 `last_live_id` 记录过的直播间；未设定过则中间黑屏（不自动选第一个，
+    // 也不显示占位），等待用户主动点击直播间。
     {
       const lastLive = (config && config.last_live_id) || '';
+      // 桌面端初始进入底层循环也基于 activeLiveId 决定扫屏幕还是直播；
+      // 未恢复时保持 null（黑屏），让用户自己选。
       const has = (id) => liveRooms.some((r) => (r.platform + ':' + r.room) === id);
       if (lastLive && has(lastLive)) {
         switchLive(lastLive);
-      } else if (liveRooms.length > 0) {
-        const first = liveRooms[0];
-        switchLive(first.platform + ':' + first.room);
       }
     }
     // 移动端：初始化标题栏（未恢复直播间时显示屏幕预览；有恢复的话切换流程会更新标题）。
@@ -2722,10 +2747,8 @@
       window.updateMobileTitle('屏幕预览', '未连接直播');
     }
     log('应用就绪。添加账号后点击「开始扫码」即可自动识别并登录', 'info');
-    // 版本号（单一来源：Cargo.toml）。
-    invoke('get_app_version').then((v) => {
-      if ($('piVer')) $('piVer').textContent = 'v' + v;
-    }).catch(() => {});
+    // 版本号（单一来源：Cargo.toml）：注入关于弹窗与底部栏迷你版。
+    syncAboutVersion();
     // 自动检查更新：延迟 5 秒（让启动期资源先就位）；无更新/失败时后端静默。
     if (config && config.auto_check_update !== false) {
       setTimeout(() => invoke('check_update', { manual: false }).catch(() => {}), 5000);
@@ -2919,8 +2942,9 @@
       if (g.official) opts.push(["official", "官服"]);
       if (g.bili) opts.push(["bilibili", "B 服"]);
       if (g.hyper) opts.push(["hypergryph", "鹰角账号"]);
-      // 第三方渠道（渠道登录；仅米哈游系游戏——鹰角无渠道服）。
-      if (g.vendor === "mihoyo") {
+      // 第三方渠道（渠道登录）：**仅崩坏3** 有渠道服（小米/华为/应用宝等）。
+      // 其它米哈游游戏与鹰角游戏都没有渠道服，只上官服 / B服 / 鹰角账号。
+      if (g.id === "bh3") {
         for (const c of CHANNELS_UI) opts.push(["channel:" + c.key, c.label]);
       }
       for (const [f, label] of opts) {
@@ -3142,22 +3166,6 @@
     }
 
 
-
-    // --- 空闲态测试图（无直播/屏幕预览时显示，便于验证缩放） ---
-    (function () {
-      const art = $("mIdleArt");
-      if (!art) return;
-      const cover = $("vpCover");
-      // 注意：SVG 元素不是 HTMLElement，无 .hidden 属性，必须用 setAttribute/removeAttribute。
-      const upd = () => {
-        // 有实际画面后（window.__hadFrame 由 drawView 首帧绘制置位）不再显示测试图。
-        const show = (cover ? cover.hasAttribute("hidden") : true) && !window.__hadFrame;
-        if (show) art.removeAttribute("hidden");
-        else art.setAttribute("hidden", "");
-      };
-      if (cover) { new MutationObserver(upd).observe(cover, { attributes: true, attributeFilter: ["hidden"] }); }
-      upd();
-    })();
 
     // --- 3:2 视口：双击切换 contain/cover + 触摸手势 ---
     (function bindViewportTouch() {

@@ -104,15 +104,6 @@
         <div class="vp-fit" id="vpFit">
           <div class="vp-stage" id="vpStage">
             <canvas id="previewCanvas" width="384" height="216"></canvas>
-            <svg class="m-idle-art" id="mIdleArt" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid meet" hidden>
-              <rect width="600" height="400" fill="#101418"/>
-              <g stroke="#3a4a5a" stroke-width="1">
-                <line x1="0" y1="0" x2="0" y2="400"/><line x1="50" y1="0" x2="50" y2="400"/><line x1="100" y1="0" x2="100" y2="400"/><line x1="150" y1="0" x2="150" y2="400"/><line x1="200" y1="0" x2="200" y2="400"/><line x1="250" y1="0" x2="250" y2="400"/><line x1="300" y1="0" x2="300" y2="400"/><line x1="350" y1="0" x2="350" y2="400"/><line x1="400" y1="0" x2="400" y2="400"/><line x1="450" y1="0" x2="450" y2="400"/><line x1="500" y1="0" x2="500" y2="400"/><line x1="550" y1="0" x2="550" y2="400"/><line x1="600" y1="0" x2="600" y2="400"/>
-                <line x1="0" y1="0" x2="600" y2="0"/><line x1="0" y1="50" x2="600" y2="50"/><line x1="0" y1="100" x2="600" y2="100"/><line x1="0" y1="150" x2="600" y2="150"/><line x1="0" y1="200" x2="600" y2="200"/><line x1="0" y1="250" x2="600" y2="250"/><line x1="0" y1="300" x2="600" y2="300"/><line x1="0" y1="350" x2="600" y2="350"/><line x1="0" y1="400" x2="600" y2="400"/>
-              </g>
-              <circle cx="300" cy="200" r="90" fill="none" stroke="#6a8aaa" stroke-width="2"/>
-              <text x="300" y="208" fill="#8aaaca" font-family="sans-serif" font-size="24" text-anchor="middle">测试图 3:2</text>
-            </svg>
             <div class="vp-cover" id="vpCover" hidden>
               <img id="vpCoverImg" alt="" referrerpolicy="no-referrer">
               <div class="vp-cover-tip" id="vpCoverTip"></div>
@@ -404,29 +395,48 @@
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
         </div>
         <div id="log"></div>
-        <div class="proj-info">
-          <div class="pi-head">
-            <span>游戏扫码器</span>
-            <span class="pi-ver" id="piVer">v…</span>
-            <span class="spacer"></span>
-            <button class="btn ghost tiny" id="btnCheckUpdate">检查更新</button>
-          </div>
-          <div class="pi-line">
-            作者 <a class="pi-link" data-url="https://github.com/Taumata-wwq">Taumata-wwq</a> ·
-            仓库 <a class="pi-link" data-url="https://github.com/Taumata-wwq/game-login-scanner">GitHub</a> ·
-            许可证 MIT（第三方依赖许可见 THIRD-PARTY-NOTICES）
-          </div>
-          <div class="pi-line">
-            参考与引用：
-            <a class="pi-link" data-url="https://github.com/SocialSisterYi/bilibili-API-collect">bilibili-API-collect</a> ·
-            <a class="pi-link" data-url="https://github.com/UIGF-org/mihoyo-api-collect">mihoyo-api-collect</a> ·
-            <a class="pi-link" data-url="https://github.com/DSVVA/MHY_Scanner">MHY_Scanner</a> ·
-            <a class="pi-link" data-url="https://github.com/rxing-core/rxing">rxing</a> ·
-            <a class="pi-link" data-url="https://learn.microsoft.com/windows/win32/medfound/h-264-video-decoder">Media Foundation</a>
-          </div>
-          <div class="pi-line pi-warn">
-            注意事项：仅用于登录本人游戏账号，请勿用于非授权用途；「操作过于频繁」等提示为服务端正常限流，稍后重试。
-          </div>
+        <div class="tools-about-bar">
+          <span class="tools-about-name">游戏扫码器</span>
+          <span class="tools-about-ver" id="piVerMini">v…</span>
+          <span class="spacer"></span>
+          <button class="btn ghost tiny" id="btnAbout">关于</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 关于弹窗：集中展示版本 / 检查更新 / 作者 / 仓库 / 许可 / 参考引用 / 注意事项 -->
+  <div class="overlay" id="aboutOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        关于游戏扫码器
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="aboutOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="about-head">
+          <div class="about-title">游戏扫码器</div>
+          <div class="about-ver" id="piVer">v…</div>
+          <button class="btn ghost tiny" id="btnCheckUpdate">检查更新</button>
+        </div>
+        <div class="about-line">
+          作者 <a class="pi-link" data-url="https://github.com/Taumata-wwq">Taumata-wwq</a> ·
+          仓库 <a class="pi-link" data-url="https://github.com/Taumata-wwq/game-login-scanner">GitHub</a> ·
+          许可证 MIT（第三方依赖许可见 THIRD-PARTY-NOTICES）
+        </div>
+        <div class="about-sec">参考与引用</div>
+        <div class="about-line about-refs">
+          <a class="pi-link" data-url="https://github.com/SocialSisterYi/bilibili-API-collect">bilibili-API-collect</a> ·
+          <a class="pi-link" data-url="https://github.com/UIGF-org/mihoyo-api-collect">mihoyo-api-collect</a> ·
+          <a class="pi-link" data-url="https://github.com/DSVVA/MHY_Scanner">MHY_Scanner</a> ·
+          <a class="pi-link" data-url="https://github.com/rxing-core/rxing">rxing</a> ·
+          <a class="pi-link" data-url="https://learn.microsoft.com/windows/win32/medfound/h-264-video-decoder">Media Foundation</a>
+        </div>
+        <div class="about-sec">注意事项</div>
+        <div class="about-line pi-warn">
+          仅用于登录本人游戏账号，请勿用于非授权用途；「操作过于频繁」等提示为服务端正常限流，稍后重试。
         </div>
       </div>
     </div>

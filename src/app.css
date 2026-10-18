@@ -269,20 +269,31 @@
   #log .info { color: var(--muted); }
   #log .time { color: #5a5a5a; margin-right: 6px; }
 
-  /* 项目信息（日志下方）：作者 / 仓库 / 参考引用 / 许可证 / 注意事项。 */
-  .proj-info {
-    margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line);
-    font-size: 9.5px; line-height: 1.75; color: var(--faint);
-  }
-  .proj-info .pi-head {
+  /* 工具面板底部「关于」入口条（版本 + 关于按钮）。 */
+  .tools-about-bar {
     display: flex; align-items: center; gap: 6px;
-    font-size: 10.5px; color: var(--text); margin-bottom: 3px;
+    margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line);
+    font-size: 10.5px; color: var(--text);
   }
-  .proj-info .pi-ver { color: var(--faint); font-size: 9.5px; }
-  .proj-info .pi-line { word-break: break-word; }
-  .proj-info .pi-warn { color: var(--warn); opacity: 0.85; }
-  .proj-info .pi-link { color: #7fa3d0; text-decoration: none; cursor: pointer; }
-  .proj-info .pi-link:hover { text-decoration: underline; }
+  .tools-about-name { font-weight: 600; }
+  .tools-about-ver { color: var(--faint); font-size: 9.5px; }
+
+  /* 关于弹窗内容排版。 */
+  .about-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px;
+  }
+  .about-title { font-size: 15px; font-weight: 700; color: var(--text); }
+  .about-ver { color: var(--faint); font-size: 11px; }
+  .about-head .spacer { flex: 1 1 auto; }
+  .about-sec {
+    margin: 8px 0 3px; font-size: 10px; color: var(--muted);
+    text-transform: none; letter-spacing: 0.02em;
+  }
+  .about-line { word-break: break-word; font-size: 11px; line-height: 1.8; color: var(--text); }
+  .about-line.pi-warn { color: var(--warn); opacity: 0.85; font-size: 10.5px; }
+  .pi-link { color: #7fa3d0; text-decoration: none; cursor: pointer; }
+  .pi-link:hover { text-decoration: underline; }
 
   /* 隐藏全部滚动条（保留滚动能力）：列表/日志区内容超出时不再显示滚动条占据宽度，
      滚轮与拖拽滚动照常工作。scrollbar-width 覆盖标准实现，::-webkit-scrollbar
@@ -761,11 +772,6 @@
   }
   html.mobile #toolsOverlay .dbody { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 
-  html.mobile .m-idle-art {
-    position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; display: block;
-  }
-  html.mobile .m-idle-art[hidden] { display: none; }
-
   /* 移动端弹层：更高铺满度 + 统一大圆角 + 入场动效（淡入 + 轻微上浮，重开时自动重播） */
   html.mobile .overlay { padding: 12px; }
   html.mobile .dialog { max-width: 92vw; border-radius: var(--m-r-xl); }
@@ -844,7 +850,7 @@
   html.mobile #toolsOverlay .dsec::after { display: none; }
   html.mobile #toolsOverlay .dbody { display: flex; flex-direction: column; overflow-y: hidden; }
   html.mobile #toolsOverlay #log { flex: 1 1 auto; min-height: 140px; max-height: none; overflow-y: auto; }
-  html.mobile #toolsOverlay .proj-info { flex: none; margin-top: 10px; }
+  html.mobile #toolsOverlay .tools-about-bar { flex: none; margin-top: 10px; }
 
   /* ---------------------------------------------------------------
      抽屉滑动模型（三面板拼接：主界面 1 + 左右侧栏各 0.8 视口宽）
@@ -863,7 +869,7 @@
   /* ---------------------------------------------------------------
      第三批调整（2026-10-16 凌晨）
      1) 标题行：取消图标、居中、移动端文案「直播间选择」；
-     2) 检查更新右对齐（pi-head spacer 撑开）；
+     2) 「关于」按钮右对齐（about-head / tools-about-bar 的 spacer 撑开）；
      3) 工具按钮高度统一 32px（帧率分段与清空/检查更新一致）；
      4) 页边距微调（账号区 12、弹层内容水平 14）。
      --------------------------------------------------------------- */
@@ -873,7 +879,7 @@
   html.mobile .sidebar header .spacer { display: none; }
   html.mobile .sidebar header .dt-only { display: none; }
   html.mobile .sidebar header .mb-only { display: inline; }
-  .proj-info .pi-head .spacer { flex: 1 1 auto; }
+  .about-head .spacer { flex: 1 1 auto; }
   html.mobile #toolsOverlay .btn.tiny { height: 32px; }
   html.mobile .acct-area { padding: 12px; }
   /* 列表本体：浏览器层面禁横向手势（防御任何"左右滑动趋势"） */
@@ -894,8 +900,7 @@
   }
   html.mobile #toolsOverlay .dsec { font-size: var(--m-fs-md); }
   html.mobile #toolsOverlay #log { font-size: var(--m-fs-xs); }
-  html.mobile #toolsOverlay .proj-info { font-size: var(--m-fs-xs); }
-  html.mobile #toolsOverlay .pi-head > span:first-child { font-size: var(--m-fs-md); }
+  html.mobile #toolsOverlay .about-title { font-size: var(--m-fs-md); }
   html.mobile #toolsOverlay .btn { font-size: var(--m-fs-sm); }
   html.mobile #toolsOverlay [data-fps] { height: 32px; min-width: 46px; font-size: var(--m-fs-sm); }
 
