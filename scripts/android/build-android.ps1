@@ -41,6 +41,18 @@ if (-not $env:JAVA_HOME) { $env:JAVA_HOME = "G:\Java21" }
 $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
 $env:PATH = "$cargoBin;$env:JAVA_HOME\bin;$sdk\platform-tools;$env:PATH"
 
+# ---- 构建产物目录钉在工作区外（2026-10-18 实测教训）----
+# src-tauri/target 曾涨到 70 GB / 10 万文件。DSH 的 workspace preparation 按
+# **文件数**建立沙箱与索引，10 万文件会把准备阶段拖到超时，报
+#   "DSH workspace preparation failed (not a user permission denial):"（原因字段为空）
+# 于是 run_code 及全部工具不可用——即"构建缓存拖垮了整个 IDE"。
+# 把 target 钉到工作区外后，工作区可长期保持在数千文件量级。
+# 未设置时才补默认值，尊重使用者已有配置。
+if (-not $env:CARGO_TARGET_DIR) {
+    $env:CARGO_TARGET_DIR = "G:\cargo-target"
+}
+Write-Host "  CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR"
+
 Write-Host "== Android 构建 ==" -ForegroundColor Cyan
 Write-Host "  ANDROID_HOME = $sdk"
 Write-Host "  NDK          = $ndk"
