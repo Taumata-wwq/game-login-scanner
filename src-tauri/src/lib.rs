@@ -84,8 +84,6 @@ pub struct AppState {
     pub region: Mutex<Option<(i32, i32, i32, i32)>>,
     /// 最近扫码成功的时刻（秒），用于 2 分钟内最多 10 次的频率限制。
     scan_success_times: Mutex<Vec<i64>>,
-    /// 独立人机验证窗口返回的结果（aigis 字符串）。
-    captcha_result: Mutex<Option<String>>,
 }
 
 fn now_sec() -> i64 {
@@ -1990,6 +1988,12 @@ fn live_history_reorder(
 }
 
 /// 刷新单个直播间的元数据并持久化缓存；返回最新元数据。
+///
+/// 失败时**返回 Err**（而非空默认值）：前端据此区分「正在获取」与「房间不存在」，
+/// 若在这里吞掉错误，坏房间永远只会渲染成空标题，用户无从判断自己填错了房间号。
+/// 抖音侧无严格元数据链路（`fetch_meta_strict` 对其直接转发宽松版），故其失败
+/// 仍视为瞬时问题——前端只在错误文本命中「未找到该房间 / 房间不存在」时才判为
+/// 终态，其余按普通失败处理。
 #[tauri::command]
 async fn live_refresh_meta(
     platform: String,
@@ -2000,10 +2004,13 @@ async fn live_refresh_meta(
     let (tx, rx) = std::sync::mpsc::channel();
     let room_for_fetch = room.clone();
     std::thread::spawn(move || {
-        let m = crate::live::fetch_meta(plat, &room_for_fetch);
+        let m = crate::live::fetch_meta_strict(plat, &room_for_fetch);
         let _ = tx.send(m);
     });
-    let meta = rx.recv().map_err(|_| "元数据获取失败".to_string())?;
+    let meta = rx
+        .recv()
+        .map_err(|_| "元数据获取失败".to_string())?
+        .map_err(|e| format!("直播间 {room} 元数据获取失败：{e}"))?;
     let plat_key = plat.key();
     {
         let mut cfg = state
@@ -2279,73 +2286,11 @@ fn stop_scan(state: tauri::State<'_, AppState>, target: String) {
     }
 }
 
-// ---------- 独立人机验证窗口 ----------
-
-/// 打开独立的人机验证窗口（加载 verify.html，GT4 在完整窗口内渲染）。
-#[tauri::command]
-async fn open_captcha_window(
-    app: tauri::AppHandle,
-    captcha_id: String,
-    session_id: String,
-    risk_type: Option<String>,
-    challenge: Option<String>,
-    gt3: Option<bool>,
-) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-    let risk = risk_type.unwrap_or_default();
-    let ch = challenge.unwrap_or_default();
-    let g3 = if gt3.unwrap_or(false) { "1" } else { "0" };
-    let url = WebviewUrl::App(
-        format!(
-            "verify.html?captcha_id={captcha_id}&session_id={session_id}&risk_type={risk}&challenge={ch}&gt3={g3}"
-        )
-        .into(),
-    );
-    // 已存在则先关闭，避免重复。
-    if let Some(w) = app.get_webview_window("captcha") {
-        let _ = w.close();
-    }
-    let builder = WebviewWindowBuilder::new(&app, "captcha", url)
-        .title("人机验证")
-        .inner_size(600.0, 640.0)
-        .resizable(true);
-    // center() 为桌面专有方法（Android 无独立窗口居中概念）。
-    #[cfg(not(target_os = "android"))]
-    let builder = builder.center();
-    builder
-        .build()
-        .map_err(|e| format!("打开验证窗口失败: {e}"))?;
-    Ok(())
-}
-
-/// 验证窗口回传结果：aigis 非空 = 成功；空 = 用户关闭/失败。
-#[tauri::command]
-fn captcha_result(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    aigis: String,
-) -> Result<(), String> {
-    *state
-        .captcha_result
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(aigis);
-    // 关闭验证窗口。
-    if let Some(w) = app.get_webview_window("captcha") {
-        let _ = w.close();
-    }
-    let _ = app.emit("captcha-done", ());
-    Ok(())
-}
-
-/// 前端轮询取验证结果（取走并清空）。
-#[tauri::command]
-fn take_captcha_result(state: tauri::State<'_, AppState>) -> Option<String> {
-    state
-        .captcha_result
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-}
+// 人机验证（极验 GT3/GT4）在主 webview 内的 #captchaOverlay 里直接渲染。
+// 早期版本另开一个 WebviewWindow（标签 "captcha"）加载 src/verify.html，Android 上
+// wry 只有单个 Activity/WebView，第二窗口既渲染不出内容也无法关闭——故整套
+// open_captcha_window / captcha_result / take_captcha_result 与 AppState.captcha_result
+// 一并移除，src/verify.html 同时删除（逻辑已并入 src/app.js 的 showCaptcha）。
 
 // ---------- 运行入口 ----------
 
@@ -2431,7 +2376,6 @@ pub fn run() {
         login_qr_seq: Mutex::new(0),
         region: Mutex::new(None),
         scan_success_times: Mutex::new(Vec::new()),
-        captcha_result: Mutex::new(None),
     };
 
     tauri::Builder::default()
@@ -2477,9 +2421,6 @@ pub fn run() {
             hypergryph_reorder,
             start_scan,
             stop_scan,
-            open_captcha_window,
-            captcha_result,
-            take_captcha_result,
             capture_preview,
             capture_tiles,
             capture_live_frame,
@@ -2524,19 +2465,6 @@ pub fn run() {
             //（表现为标题栏按钮/拖拽一时失灵）。窗口获得焦点时主动回焦 webview。
             tauri::WindowEvent::Focused(true) if window.label() == "main" => {
                 let _ = window.set_focus();
-            }
-            // 验证窗口被用户直接关闭（未通过 captcha_result 回传）时写入空结果，
-            // 否则前端轮询 take_captcha_result 永远拿不到值。正常提交已先写结果，
-            // 此处仅在仍为空时补写，不覆盖。
-            tauri::WindowEvent::CloseRequested { .. } if window.label() == "captcha" => {
-                let st = window.app_handle().state::<AppState>();
-                let mut r = st
-                    .captcha_result
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if r.is_none() {
-                    *r = Some(String::new());
-                }
             }
             // 宽度锁定已移除（多直播间阶段1）：宽度可自由调节，尺寸约束由
             // tauri.conf.json 的 min/max（300×500 ~ 720×980）统一控制。旧逻辑每次

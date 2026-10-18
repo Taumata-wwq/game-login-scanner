@@ -87,7 +87,9 @@ pub fn request_bytes(
     let v: serde_json::Value =
         serde_json::from_str(&json).map_err(|e| format!("HttpBridge 返回非 JSON: {e}"))?;
     if let Some(err) = v.get("error").and_then(|x| x.as_str()) {
-        return Err(format!("系统 TLS 请求失败: {err}"));
+        // 带上 URL：同一句话可能来自米哈游 / 抖音 / B站游戏 SDK 等多个域名，
+        // 没有 URL 就无法判断是哪条链路失败（真机排障必需）。
+        return Err(format!("系统 TLS 请求失败: {err}（{method} {url}）"));
     }
     let status = v.get("status").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
     let mut headers = Vec::new();

@@ -329,7 +329,6 @@
           }
           case "live_watch_sync": case "set_last_live": case "set_preview_active": case "set_scan_region":
           case "set_tile_mode": case "set_ui_widths": case "open_url":
-          case "open_captcha_window": case "take_captcha_result":
             return Promise.resolve();
           default: return Promise.resolve(null);
         }

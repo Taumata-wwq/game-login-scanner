@@ -394,6 +394,23 @@ pub async fn bili_login_pwd(
             });
         }
     }
+    // 未拿到 access_key：先判断服务端是否**真的**在要验证码。
+    //
+    // 这里此前是无条件 `bili_sdk_captcha()` —— 于是任何「响应里没有 access_key」的
+    // 情况都被当成「需要人机验证」：网络/TLS 失败、密码错误、风控拒绝……用户看到的
+    // 就是「弹了个验证窗，填完还是登不进去」，而错误原因被彻底掩盖（真机反馈）。
+    // 现在只有服务端给出验证码信号（业务码/字段，见 bili::bili_login_needs_captcha）
+    // 才走极验；否则如实抛出服务端的 code/message。
+    if !crate::sdk::bili::bili_login_needs_captcha(&resp) {
+        let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+        let msg = resp
+            .get("message")
+            .or_else(|| resp.get("msg"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("登录被拒绝");
+        // 如实抛出服务端结论（账号密码错 / 风控 / 频繁等），让用户看到真实原因。
+        return Err(format!("B站登录失败（{code}）：{msg}"));
+    }
     // 需要验证码：申请极验任务返回前端。
     let cap_data = crate::sdk::bili::bili_sdk_captcha().await?;
     let gt = cap_data

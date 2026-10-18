@@ -994,6 +994,20 @@ impl ScanTarget {
     }
 }
 
+/// 开始搜索二维码的提示文案（按目标与游戏生成）。
+///
+/// 直播目标搜索的是**该直播间画面**里的登录二维码，说「全屏」会误导用户以为在扫
+/// 他自己的手机屏幕；桌面目标才是真正的整屏搜索。游戏名带上后多路并行时能一眼看出
+/// 哪一路在找哪款游戏的码。
+fn search_hint(target: &ScanTarget, game: Game) -> String {
+    let name = game.label();
+    match target {
+        ScanTarget::Live(_) => format!("正在搜索直播间中{name}二维码…"),
+        ScanTarget::Screen => format!("正在全屏搜索{name}登录二维码…"),
+        ScanTarget::Camera => format!("正在摄像头画面中搜索{name}二维码…"),
+    }
+}
+
 /// 扫码主流程入参（打包传入，避免参数过多）。
 pub struct ScanArgs {
     pub current_channel: Channel,
@@ -1087,7 +1101,7 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
                     &app,
                     tkey.as_str(),
                     "info",
-                    "剪贴板读取超时，跳过（直接全屏搜索）",
+                    "剪贴板读取超时，跳过（直接搜索画面）",
                 );
                 None
             }
@@ -1108,11 +1122,16 @@ pub async fn run_scan(app: tauri::AppHandle, args: ScanArgs) {
         }
     }
 
-    emit(&app, tkey.as_str(), "info", "全屏搜索登录二维码中…");
-
     // 2) 检测循环：
     //    直播目标只扫**本会话**的帧（多路并行各扫各的，互不干扰）；
     //    桌面目标只扫屏幕（桌面复制「无新帧即零成本跳过」→ 指纹去重 → 整屏解码）。
+    //    文案按目标区分：直播目标说明「哪个直播间 · 哪个游戏」，桌面目标才说「屏幕」。
+    emit(
+        &app,
+        tkey.as_str(),
+        "info",
+        search_hint(&target, current_game),
+    );
     loop {
         if stop.load(Ordering::SeqCst) {
             emit(&app, tkey.as_str(), "stopped", "已停止扫描");

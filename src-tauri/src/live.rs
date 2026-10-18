@@ -868,7 +868,14 @@ fn fetch_bili_meta_strict(room: &str) -> Result<RoomMeta, String> {
         serde_json::from_str(&body).map_err(|e| format!("get_info 响应解析失败: {e}"))?;
     let code = v["code"].as_i64().unwrap_or(-1);
     if code != 0 {
-        return Err(format!("get_info code={code}（房间号无效或触发风控）"));
+        let msg = v["msg"]
+            .as_str()
+            .or_else(|| v["message"].as_str())
+            .unwrap_or("");
+        // code=1 =「未找到该房间」——房间号确实不存在，属**终态**；
+        // 其余非 0 多为风控/参数问题，属**可重试**的瞬时失败。
+        // 两者必须可区分：前者要如实告诉用户「房间不存在」，后者不该误报。
+        return Err(format!("get_info code={code}（{msg}）"));
     }
     let d = &v["data"];
     let room_id = d["room_id"]

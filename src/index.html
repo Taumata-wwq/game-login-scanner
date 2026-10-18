@@ -337,6 +337,23 @@
     </div>
   </div>
 
+  <!-- 人机验证弹窗（极验 GT3 / GT4，应用内渲染） -->
+  <div class="overlay" id="captchaOverlay" hidden>
+    <div class="dialog">
+      <div class="dhead">
+        <span id="captchaTitle">人机验证</span>
+        <span class="spacer"></span>
+        <button class="ibtn" data-close="captchaOverlay" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="dbody">
+        <div class="captcha-hint" id="captchaHint">请完成下方验证…</div>
+        <div class="captcha-box" id="captchaBox"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- 选项 + 日志 弹窗 -->
   <div class="overlay" id="toolsOverlay" hidden>
     <div class="dialog">
@@ -381,15 +398,10 @@
             <button data-fps="120">120</button>
           </div>
         </div>
-        <!-- 屏幕共享控制（仅移动端）：Android 的 MediaProjection 一旦授权会一直
-             挂着前台服务与常驻通知，系统只在状态栏提供「停止共享」。应用内补一个
-             等价入口，避免用户必须下拉状态栏才能释放。 -->
-        <div class="opt-row mb-only-row" id="rowCapture">
-          <span class="lbl">屏幕共享
-            <small id="capState">未开启</small>
-          </span>
-          <button class="btn ghost tiny" id="btnStopCapture">停止共享</button>
-        </div>
+        <!-- 屏幕共享控制已移除：移动端「屏幕扫码」是先授权再自动切后台，回前台时
+             会自动停止扫码并释放共享（见 app.js screenScanAutoBg 分支），系统状态栏
+             通知本身也带「停止共享」入口——应用内这一行既是重复入口，又因需先回前台
+             才能点到而常常是灰的，故删除。 -->
 
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>
@@ -419,7 +431,6 @@
         <div class="about-head">
           <div class="about-title">游戏扫码器</div>
           <div class="about-ver" id="piVer">v…</div>
-          <button class="btn ghost tiny" id="btnCheckUpdate">检查更新</button>
         </div>
         <div class="about-line">
           作者 <a class="pi-link" data-url="https://github.com/Taumata-wwq">Taumata-wwq</a> ·
@@ -437,6 +448,11 @@
         <div class="about-sec">注意事项</div>
         <div class="about-line pi-warn">
           仅用于登录本人游戏账号，请勿用于非授权用途；「操作过于频繁」等提示为服务端正常限流，稍后重试。
+        </div>
+        <!-- 底部操作行：检查更新右对齐、置于最下面一行（与设置里的按钮同规格）。 -->
+        <div class="about-foot">
+          <span class="spacer"></span>
+          <button class="btn ghost" id="btnCheckUpdate">检查更新</button>
         </div>
       </div>
     </div>

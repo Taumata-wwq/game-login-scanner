@@ -286,6 +286,20 @@
   .about-title { font-size: 15px; font-weight: 700; color: var(--text); }
   .about-ver { color: var(--faint); font-size: 11px; }
   .about-head .spacer { flex: 1 1 auto; }
+  /* 关于底部操作行：检查更新按钮右对齐、置底（与设置里的按钮同规格）。
+     此前它挤在标题行且用的是 .tiny（桌面 18px、移动端因选择器只覆盖 #toolsOverlay
+     而仍是 18px），在手机上小到几乎点不到——故改用独立规格，不再复用 .tiny。 */
+  .about-foot {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 12px; padding-top: 10px;
+    border-top: 1px solid var(--line);
+  }
+  .about-foot .spacer { flex: 1 1 auto; }
+  .about-foot .btn { height: 26px; padding: 0 12px; }
+  /* 「关于」按钮右对齐：底栏的 spacer 负责撑开。.spacer 只有 header/.dhead/vp-info
+     等处的专属规则，没有全局通用规则——此前 .tools-about-bar 里的 spacer 拿不到
+     flex:1，「关于」就紧跟在版本号后面，看起来是左对齐。 */
+  .tools-about-bar .spacer { flex: 1 1 auto; }
   .about-sec {
     margin: 8px 0 3px; font-size: 10px; color: var(--muted);
     text-transform: none; letter-spacing: 0.02em;
@@ -294,6 +308,20 @@
   .about-line.pi-warn { color: var(--warn); opacity: 0.85; font-size: 10.5px; }
   .pi-link { color: #7fa3d0; text-decoration: none; cursor: pointer; }
   .pi-link:hover { text-decoration: underline; }
+
+  /* 人机验证弹窗：极验内部按像素排版，故给一块居中的固定宽度舞台，不参与
+     .dbody 的 flex 拉伸（否则滑块会被拉成整行宽度、按钮溢出）。
+     min-height 预留滑块高度，避免 SDK 挂载前弹窗高度塌成一条线。 */
+  .captcha-hint { font-size: 11px; color: var(--muted); text-align: center; }
+  /* 极验 GT4 的 bind 模式是固定 320px 宽的嵌入组件，桌面默认的
+     .dialog max-width:293px 会把它横向压扁（滑块被裁掉右半），故单独放宽。
+     box 不裁剪：GT3 的 popup 面板定位在 body 上，容器裁切会影响它。 */
+  #captchaOverlay .dialog { max-width: 380px; }
+  .captcha-box {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 220px; overflow: visible;
+  }
+  .captcha-box > div { max-width: 100%; }
 
   /* 隐藏全部滚动条（保留滚动能力）：列表/日志区内容超出时不再显示滚动条占据宽度，
      滚轮与拖拽滚动照常工作。scrollbar-width 覆盖标准实现，::-webkit-scrollbar
@@ -728,9 +756,15 @@
   .m-scanbtn:active { transform: scale(0.975); }
   .m-scanbtn.running { background: var(--panel-2); color: #ff9090; box-shadow: inset 0 0 0 1.5px rgba(207, 74, 74, 0.6); }
 
-  /* 左抽屉：侧栏（拼接模型；全视口高——定位基准为 .app 顶部（顶栏下 52px），故上移 52px 消除顶/底黑缝） */
+  /* 左抽屉：侧栏（拼接模型；全视口高）。
+     定位基准不是视口而是 .app：`.app` 上有 transform（抽屉跟手位移），
+     fixed 后代因此以 .app 的 padding box 为包含块。.app 顶边 = 安全区 + 顶栏 52px，
+     故上移 52px 后侧栏顶边正好落在安全区下沿（status bar 之下）。
+     这里必须把安全区一并减掉，否则侧栏顶边被顶到「安全区下沿」而内容又保留同值
+     padding-top → 顶部出现一条 30px 级的空白（真机实测 30dp，v0.3.2 反馈）。
+     减掉后侧栏铺满 0..视口底，padding-top 恰好把标题压回状态栏之下。 */
   html.mobile .sidebar {
-    position: fixed; top: -52px; left: 0;
+    position: fixed; top: calc(-1 * (52px + env(safe-area-inset-top, 0px))); left: 0;
     height: 100vh;
     width: 80vw; max-width: none; z-index: 200;
     background: var(--panel); border-right: 1px solid var(--line);
@@ -903,6 +937,21 @@
   html.mobile #toolsOverlay .about-title { font-size: var(--m-fs-md); }
   html.mobile #toolsOverlay .btn { font-size: var(--m-fs-sm); }
   html.mobile #toolsOverlay [data-fps] { height: 32px; min-width: 46px; font-size: var(--m-fs-sm); }
+  /* 关于弹窗（移动端）：正文与标题抬到移动规格；底部「检查更新」与设置里的
+     小工具按钮同档（32px 高），右对齐不变。 */
+  html.mobile #aboutOverlay .about-title { font-size: var(--m-fs-md); }
+  html.mobile #aboutOverlay .about-line { font-size: var(--m-fs-sm); }
+  html.mobile #aboutOverlay .about-sec { font-size: var(--m-fs-xs); }
+  html.mobile #aboutOverlay .about-foot .btn {
+    height: 32px; padding: 0 14px;
+    font-size: var(--m-fs-sm); border-radius: var(--m-r-xs);
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+  }
+  /* 人机验证弹窗（移动端）：给极验足够宽度，滑块才不会被压成一条缝。
+     宽度用 min() 收口，窄屏不会溢出，宽屏也不至于拉得过分宽。 */
+  html.mobile #captchaOverlay .dialog { width: min(100%, 360px); }
+  html.mobile #captchaOverlay .captcha-hint { font-size: var(--m-fs-xs); }
+  html.mobile #captchaOverlay .captcha-box { min-height: 260px; }
 
   /* ---- 横屏适配（手机横置 / 折叠屏展开 / 平板分屏） ----
      竖屏的尺寸都按 vw 推导，横屏下 vw 变成屏幕**长边**，全部失准：抽屉宽到

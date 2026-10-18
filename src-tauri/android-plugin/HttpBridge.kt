@@ -1,6 +1,7 @@
 package com.taumata.scanner.plugins
 
 import android.util.Base64
+import android.util.Log
 import androidx.annotation.Keep
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -19,6 +20,8 @@ import java.net.URL
  */
 @Keep
 object HttpBridge {
+
+    private const val TAG = "GameScanner"
 
     init {
         System.loadLibrary("game_login_scanner_lib")
@@ -69,6 +72,10 @@ object HttpBridge {
             out.put("bodyBase64", Base64.encodeToString(bytes, Base64.NO_WRAP))
             out.toString()
         } catch (e: Exception) {
+            // 写 logcat：Rust 侧只把 error 串成文案回传前端，而**异常类名**（如
+            // SSLHandshakeException / UnknownHostException / SocketTimeoutException）
+            // 是区分「TLS 指纹被拒 / DNS / 超时 / 代理」的唯一线索——必须留在设备日志里。
+            Log.w(TAG, "HttpBridge 请求失败: $method $url -> ${e.javaClass.name}: ${e.message}", e)
             val out = JSONObject()
             out.put("error", e.toString())
             out.toString()

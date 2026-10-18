@@ -201,16 +201,29 @@ $mainActivity = Join-Path $gen "app/src/main/java/com/taumata/game_scanner/MainA
 $mainKt = @"
 package com.taumata.game_scanner
 
+import android.graphics.Color
 import android.os.Bundle
 import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 
 class MainActivity : TauriActivity() {
     private var web: WebView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
+        // 状态栏/导航栏图标恒为浅色。
+        //
+        // enableEdgeToEdge() 的默认参数是 SystemBarStyle.auto(...)，它按**系统**
+        // 深浅色模式决定图标明暗：系统处于浅色模式时置 isAppearanceLightStatusBars
+        // = true（深色图标）。而本应用界面恒为深色，于是状态栏的时间/电量等图标
+        // 变成深色、压在同为深色的背景上看不清（真机截图实证）。
+        // SystemBarStyle.dark() 的 detectDarkMode 恒为 true → isAppearanceLight-
+        // StatusBars = false → 图标恒为浅色，与是否浅色模式无关。
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         super.onCreate(savedInstanceState)
 
         // 返回键全权由本 Activity 接管。绝不调用 Activity.finish()：
@@ -239,7 +252,7 @@ class MainActivity : TauriActivity() {
 }
 "@
 [System.IO.File]::WriteAllText($mainActivity, $mainKt, (New-Object System.Text.UTF8Encoding($false)))
-Write-Host "  MainActivity.kt 已重写（返回键 -> 前端消费 / moveTaskToBack）"
+Write-Host "  MainActivity.kt 已重写（返回键 -> 前端消费 / moveTaskToBack；系统栏图标恒为浅色）"
 
 Write-Host "== 5b. 渠道 SDK 模块引入（mi_sdk，可选；vendor 本地材料）=="
 # 渠道 SDK 二进制不入库（再分发条款限制）：vendor/mi_sdk 存在则引入小米 SDK 模块，

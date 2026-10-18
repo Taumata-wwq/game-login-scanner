@@ -284,6 +284,47 @@ pub async fn bili_sdk_captcha() -> Result<Value, String> {
     .await
 }
 
+/// 判断账密登录响应是否**确实**在要求人机验证。
+///
+/// B站游戏 SDK（`api/client/login`）的成功判定是 body 里出现非空 `access_key`；
+/// 但「没有 access_key」并不等于「需要验证码」——账号密码错误、风控拒绝、字段缺失
+/// 都会走到这里。此前调用方无条件转入极验，于是**任何**失败都表现为「弹验证窗，
+/// 填完仍登不进去」，把真正的失败原因彻底盖掉（真机反馈）。
+///
+/// 这里只在响应里出现验证码信号时才判定为需要极验：
+///   - `code` 为已知的验证码业务码（-105 / -6620 等）；
+///   - 或 body 直接带 `gt` / `challenge`（服务端把极验参数塞进了登录响应）；
+///   - 或 `validate` / `seccode` 被回显要求补交。
+///
+/// 说明：B站该接口的验证码业务码**没有权威文档**（项目内 `docs/API协议.md` 对
+/// B站账密登录一节自述「未真机验证」）。因此判定取保守策略：只有明确信号才转极验，
+/// 其余一律如实抛错——宁可让用户看到服务端的真实 message，也不要伪造一个验证窗。
+pub fn bili_login_needs_captcha(resp: &Value) -> bool {
+    /// 已知「需要验证码」的业务码（B站游戏 SDK 域）。
+    const CAPTCHA_CODES: &[i64] = &[-105, -6620, -6621];
+    let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
+    if CAPTCHA_CODES.contains(&code) {
+        return true;
+    }
+    // 服务端把极验参数直接带在响应里（有的网关就是这么回的）。
+    let has_gt = resp
+        .get("gt")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    let has_challenge = resp
+        .get("challenge")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if has_gt || has_challenge {
+        return true;
+    }
+    // 要求补交极验结果：`validate`（或 `seccode`）非空即服务端在等它。
+    resp.get("validate")
+        .or_else(|| resp.get("seccode"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
 /// B站游戏 SDK：账密登录。返回 access_key / uid，或需验证码（含 gt/challenge/userid）。
 /// `cap` 非空时为二次登录（携带极验结果）。
 pub async fn bili_sdk_login(
@@ -315,4 +356,43 @@ pub async fn bili_sdk_login(
         &form,
     )
     .await
+}
+
+#[cfg(test)]
+mod captcha_gate_tests {
+    use super::bili_login_needs_captcha;
+    use serde_json::json;
+
+    /// 常见失败一律**不得**被当成「需要验证码」——否则用户会看到一个假的验证窗，
+    /// 填完仍登不进去，且真实原因被掩盖（真机反馈的核心问题）。
+    #[test]
+    fn plain_failures_are_not_captcha() {
+        // 账号密码错误：非验证码业务码 + message。
+        assert!(!bili_login_needs_captcha(&json!({
+            "code": 200000, "message": "trigger account secondary verify"
+        })));
+        // 完全空响应 / 只有 code=0 但没有 access_key（异常网关）。
+        assert!(!bili_login_needs_captcha(&json!({})));
+        assert!(!bili_login_needs_captcha(&json!({ "code": 0 })));
+        // 风控 / 限流类。
+        assert!(!bili_login_needs_captcha(&json!({ "code": -3101 })));
+        // 字段存在但为空串：不算验证码信号。
+        assert!(!bili_login_needs_captcha(&json!({
+            "code": 0, "gt": "", "challenge": "", "validate": ""
+        })));
+    }
+
+    /// 真实验证码信号必须被识别，否则会退化成「永远不弹验证窗」。
+    #[test]
+    fn real_captcha_signals_are_detected() {
+        // 已知验证码业务码。
+        assert!(bili_login_needs_captcha(&json!({ "code": -105 })));
+        assert!(bili_login_needs_captcha(&json!({ "code": -6620 })));
+        // 服务端把极验参数直接带在响应里。
+        assert!(bili_login_needs_captcha(&json!({ "gt": "abc123" })));
+        assert!(bili_login_needs_captcha(&json!({ "challenge": "xyz" })));
+        // 要求补交极验结果。
+        assert!(bili_login_needs_captcha(&json!({ "validate": "v1" })));
+        assert!(bili_login_needs_captcha(&json!({ "seccode": "v1|jordan" })));
+    }
 }

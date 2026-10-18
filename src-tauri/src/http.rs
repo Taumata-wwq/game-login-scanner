@@ -599,10 +599,17 @@ pub(crate) fn request_sync(
 #[cfg(target_os = "android")]
 fn needs_system_tls(host: &str) -> bool {
     // 米哈游系 + 字节系（抖音）均按 TLS 指纹拒绝 rustls（真机实测 ProtocolVersion
-    // alert）；B站对 rustls 正常。这些域名改走系统 TLS 桥（Conscrypt）。
+    // alert）；B站主站对 rustls 正常。这些域名改走系统 TLS 桥（Conscrypt）。
+    //
+    // `biligame.net`/`biligame.com`（B站**游戏** SDK，constants::BILI_SDK_LOGIN）
+    // 与 B站主站不同源：实测同样按指纹拒绝 rustls，且它承载账密登录与
+    // start_captcha（cred_login::bili_login_pwd），一旦握手失败就会把「网络失败」
+    // 误报成「需要人机验证」。故一并纳入。
     const SUFFIXES: &[&str] = &[
         "mihoyo.com",
         "hoyoverse.com",
+        "biligame.net",
+        "biligame.com",
         "douyin.com",
         "douyincdn.com",
         "byteimg.com",

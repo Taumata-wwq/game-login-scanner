@@ -847,12 +847,29 @@
     });
   }
 
-  // ---------- 人机验证（极验 GT3，独立弹窗） ----------
+  // ---------- 人机验证（极验 GT3 / GT4，应用内弹窗） ----------
   // 米哈游极验：aigis = { session_id, data: { gt, risk_type, ... } }。
-  // 打开独立验证窗口（verify.html），窗口完成后经 captcha_result 命令写回，
-  // 前端轮询 take_captcha_result 取回 "session_id;base64(getValidate())" 并重试。
-  let captchaRetry = null;   // 验证完成后重试的回调
-  let captchaTimer = null;   // 轮询验证结果的 interval（模块级：防重复叠加）
+  // B站游戏 SDK 极验：{gt, challenge, userid}（无 session_id）。
+  //
+  // 早期实现开独立 WebviewWindow 加载 verify.html —— 在 Android 上 wry 只有单个
+  // Activity/WebView，第二窗口既渲染不出内容也关不掉（用户看到的就是「空白且
+  // 无法返回」）。现改为与其它弹窗同构的 #captchaOverlay，在主 webview 内直接
+  // 挂载极验 SDK；关闭走通用的 data-close / 点背景 / Esc / 返回键四条路径。
+  let captchaRetry = null;    // 验证完成后重试的回调
+  const captchaBox = () => $('captchaBox');
+  function setCaptchaHint(msg) {
+    const h = $('captchaHint');
+    if (h) h.textContent = msg;
+  }
+  // 极验 SDK 动态加载（GT3 与 GT4 是两套互不相同的入口，按需加载其一）。
+  function loadGeetestScript(src, ready, cb) {
+    if (ready()) { cb(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onerror = () => { setCaptchaHint('极验 SDK 加载失败，请检查网络后重试'); };
+    s.onload = cb;
+    document.head.appendChild(s);
+  }
   async function showCaptcha(aigis, retryFn) {
     let data = aigis && aigis.data !== undefined ? aigis.data : aigis;
     if (typeof data === 'string') {
@@ -862,67 +879,157 @@
     const sid = aigis && aigis.session_id ? aigis.session_id : '';
     const gt = data.gt || '';
     const challenge = data.challenge || '';
-    // B站游戏 SDK 极验：{gt, challenge, userid}（无 session_id）；
-    // 米哈游 GT4：{captcha_id/session_id}。
     const isGt3 = !!(gt && challenge && !sid);
-    // B站把 userid 放在 session_id 通道传给窗口；GT3 完成后回传
-    // JSON {challenge, userid, validate}。
+    // B站把 userid 放在 session_id 通道；GT3 完成后回传 JSON
+    // {challenge, userid, validate}。
     const biliUserId = data.userid || data.gt_user_id || '';
     const captchaId = data.captcha_id || data.captchaId || gt;
     const riskType = data.risk_type || data.riskType || '';
     if (!captchaId) {
-      if (retryFn) retryFn(''); else setCredStatus('验证参数缺失');
+      setCredStatus('验证参数缺失');
+      if (retryFn) retryFn('');
       return;
     }
     captchaRetry = retryFn;
-    // 清理可能残留的旧轮询（重复调用时防止叠加多个 interval 与结果串扰）。
-    if (captchaTimer !== null) { clearInterval(captchaTimer); captchaTimer = null; }
-    setCredStatus('请在弹出的验证窗口中完成验证…');
-    try {
-      await invoke('open_captcha_window', {
-        captchaId,
-        sessionId: isGt3 ? biliUserId : sid,
-        riskType,
-        challenge: isGt3 ? challenge : '',
-        gt3: isGt3,
-      });
-    } catch (e) {
-      setCredStatus('打开验证窗口失败: ' + e);
-      return;
-    }
-    // 轮询取回验证结果（窗口通过 captcha_result 命令写回）。
-    // 注意：后端持续报错或用户直接关窗（不触发 captcha_result）时也必须终止轮询，
-    // 故 catch 分支累计失败次数、超上限即停止（此前 catch return 会永久轮询）。
-    let pollFails = 0;
-    captchaTimer = setInterval(async () => {
-      let res;
-      try {
-        res = await invoke('take_captcha_result');
-        pollFails = 0;
-      } catch (e) {
-        pollFails += 1;
-        if (pollFails >= 25) { // ~10s 无响应：视为窗口已关闭，停止轮询
-          clearInterval(captchaTimer);
-          captchaTimer = null;
-          captchaRetry = null;
-          setCredStatus('验证窗口无响应，已取消');
-        }
-        return;
-      }
-      if (res === null || res === undefined) return;
-      clearInterval(captchaTimer);
-      captchaTimer = null;
+    // 上一轮的残影（同一次登录可能连续触发两次验证）——先清空舞台。
+    const box = captchaBox();
+    box.innerHTML = '';
+    setCaptchaHint(isGt3 ? '请完成下方验证…' : '正在加载验证组件…');
+    $('captchaOverlay').hidden = false;
+    // 本次验证是否已有结论（成功交付 or 被用户关闭）。极验 SDK 的事件迟于弹窗
+    // 关闭才到达是常态，故统一用 settled 闸门挡住「关窗后仍继续登录」。
+    let settled = false;
+    // 完成后统一出口：交给调用方的重试回调，并收起弹窗。
+    function finish(result) {
+      if (settled) return;
+      settled = true;
       const fn = captchaRetry;
       captchaRetry = null;
-      if (res) {
-        log('极验结果: ' + res, 'info');
-        setCredStatus('验证通过，正在继续…');
-        if (fn) fn(res);
-      } else {
-        log('极验结果为空（用户取消或验证失败）', 'error');
-        setCredStatus('验证已取消');
+      $('captchaOverlay').hidden = true;
+      box.innerHTML = '';
+      if (fn) fn(result);
+    }
+    // 用户主动关窗（关闭按钮 / 点背景 / Esc / 返回键都会置 hidden）：清掉回调，
+    // 让迟到的 SDK 事件变成空操作。
+    const closeWatch = new MutationObserver(() => {
+      if (!$('captchaOverlay').hidden) return;
+      closeWatch.disconnect();
+      if (settled) return;
+      settled = true;
+      captchaRetry = null;
+      box.innerHTML = '';
+    });
+    closeWatch.observe($('captchaOverlay'), { attributes: true, attributeFilter: ['hidden'] });
+    if (isGt3) {
+      // ---------- 极验第三代（B站）：gt + challenge ----------
+      loadGeetestScript(
+        'https://static.geetest.com/static/js/gt.0.4.9.js',
+        () => !!window.initGeetest,
+        () => {
+          if ($('captchaOverlay').hidden) return;
+          let done = false;
+          try {
+            window.initGeetest(
+              {
+                gt: captchaId,
+                challenge,
+                offline: false,
+                new_captcha: true,
+                product: 'popup',
+                lang: 'zh-cn',
+                api_server: 'api.geetest.com',
+              },
+              (captcha) => {
+                captcha.appendTo(box);
+                captcha.onReady(() => {
+                  setCaptchaHint('请完成验证');
+                  // onReady 后主动唤起验证面板（参考 BBH3ScanLaunch）。
+                  try { captcha.verify(); } catch (e) { log('极验 verify 异常: ' + e, 'error'); }
+                });
+                captcha.onSuccess(() => {
+                  if (done) return;
+                  done = true;
+                  const v = captcha.getValidate();
+                  if (!v) { setCaptchaHint('验证结果为空，请关闭后重试'); return; }
+                  setCaptchaHint('验证通过，正在继续…');
+                  finish(JSON.stringify({
+                    challenge: v.geetest_challenge,
+                    userid: biliUserId,
+                    validate: v.geetest_validate,
+                  }));
+                });
+                captcha.onError((e) => {
+                  log('极验出错: ' + JSON.stringify(e), 'error');
+                  if (!done) setCaptchaHint('验证出错，请关闭后重试');
+                });
+                // 某些 GT3 环境完成后只触发 onClose，故这里再读一次结果。
+                captcha.onClose(() => {
+                  if (done) return;
+                  const v = captcha.getValidate();
+                  if (v && v.geetest_validate) {
+                    done = true;
+                    finish(JSON.stringify({
+                      challenge: v.geetest_challenge,
+                      userid: biliUserId,
+                      validate: v.geetest_validate,
+                    }));
+                  } else {
+                    setCaptchaHint('验证已取消');
+                  }
+                });
+              }
+            );
+          } catch (e) {
+            log('极验初始化失败: ' + e, 'error');
+            setCaptchaHint('极验初始化失败，请关闭后重试');
+          }
+        }
+      );
+      return;
+    }
+    // ---------- 极验第四代（米哈游）：captchaId ----------
+    loadGeetestScript(
+      'https://static.geetest.com/v4/gt4.js',
+      () => !!window.initGeetest4,
+      () => {
+        if ($('captchaOverlay').hidden) return;
+        // 参数对齐米哈游通行证登录页真实初始化：product bind + hideSuccess + userInfo。
+        const initParams = { captchaId, product: 'bind', language: 'zho', hideSuccess: true };
+        if (sid) initParams.userInfo = JSON.stringify({ session_id: sid });
+        if (riskType) initParams.riskType = riskType;
+        let done4 = false;
+        try {
+          window.initGeetest4(initParams, (captcha) => {
+            captcha.appendTo(box);
+            captcha.onReady(() => { setCaptchaHint('请完成验证'); captcha.showCaptcha(); });
+            captcha.onSuccess(() => {
+              if (done4) return;
+              done4 = true;
+              const v = captcha.getValidate();
+              if (!v) { setCaptchaHint('验证结果为空，请关闭后重试'); return; }
+              // 只保留 GT4 的 5 个标准字段（userInfo 会污染 aigis）。
+              const clean = {
+                captcha_id: v.captcha_id,
+                lot_number: v.lot_number,
+                pass_token: v.pass_token,
+                gen_time: v.gen_time,
+                captcha_output: v.captcha_output,
+              };
+              const payload = btoa(unescape(encodeURIComponent(JSON.stringify(clean))));
+              setCaptchaHint('验证通过，正在继续…');
+              finish(sid + ';' + payload);
+            });
+            captcha.onError(() => {
+              if (!done4) setCaptchaHint('验证出错，请关闭后重试');
+            });
+            captcha.onClose(() => { if (!done4) setCaptchaHint('验证已取消'); });
+          });
+        } catch (e) {
+          log('极验初始化失败: ' + e, 'error');
+          setCaptchaHint('极验初始化失败，请关闭后重试');
+        }
       }
-    }, 400);
+    );
   }
 
   // ---------- 鹰角账号登录 ----------
@@ -1284,6 +1391,19 @@
   // 已保存直播间列表（来自 config.live_history，含元数据缓存；含未开播）。
   let liveRooms = [];
 
+  // 直播间元数据获取状态（id -> 'pending' | 'missing'）。
+  //   pending：刚添加/正在拉取——列表与预览先显示「正在获取直播间…」占位；
+  //   missing：服务端明确回「房间不存在」——显示「房间不存在，请检查」。
+  // 只为**确实在拉取**或**确认不存在**的房间留痕；取到数据即删除条目（恢复正常渲染）。
+  const roomFetchState = new Map();
+  // 判定「房间不存在」的错误特征：后端 get_info 返回 code=1 时消息为「未找到该房间」，
+  // 抖音侧为「房间不存在」。仅这些**终态**错误才落到 missing；网络/风控等瞬时失败
+  // 不应误报成「房间不存在」，故保持正常渲染（沿用缓存/占位）。
+  function isRoomMissingError(msg) {
+    const s = String(msg || '');
+    return /未找到该房间|房间不存在|code=1（|code=1\(/.test(s);
+  }
+
   // 拉取已保存直播间列表（含元数据缓存），保持本地顺序（避免点击后跳序）。
   async function reloadLiveRooms() {
     try {
@@ -1344,6 +1464,9 @@
       const sess = liveSessions.find((x) => x.id === id);
       const active = activeLiveId === id;
       const live = (sess ? sess.status : (s.live_status === 1 ? 'live' : 'off'));
+      // 元数据尚未就绪（刚添加）或已确认不存在：标题与状态徽标改用对应占位文案，
+      // 且不显示封面/缩略图（此时并无真实封面可用）。
+      const fstate = roomFetchState.get(id);
       const card = document.createElement('div');
       card.className = 'room-card' + (active ? ' on' : '');
       card.draggable = true;
@@ -1351,7 +1474,7 @@
       const thumb = document.createElement('div');
       thumb.className = 'thumb';
       // 封面优先级：API 封面 > 关键帧缩略图 > 占位。
-      const coverSrc = s.cover || frameThumbs.get(id) || '';
+      const coverSrc = fstate ? '' : (s.cover || frameThumbs.get(id) || '');
       if (coverSrc) {
         const img = document.createElement('img');
         img.src = coverSrc;
@@ -1370,9 +1493,12 @@
       const rn = document.createElement('div');
       rn.className = 'rname';
       // 第一行：有备注时显示「备注（原标题）」（与账号名同规则）；无备注显示标题。
+      // 正在获取 / 房间不存在时，标题行改为对应的占位文案（覆盖备注拼接）。
       const origTitle = s.title || s.room;
       const dispName = s.note ? (s.note + '（' + origTitle + '）') : origTitle;
-      rn.textContent = dispName;
+      rn.textContent = fstate === 'pending' ? '正在获取直播间…'
+        : fstate === 'missing' ? '房间不存在，请检查'
+        : dispName;
       const rs = document.createElement('div');
       rs.className = 'rsub';
       // 第二行：主播名（无主播名时退化为「平台 + 房间号」）。
@@ -1381,9 +1507,13 @@
       card.title = s.nickname ? (dispName + '-' + s.nickname) : dispName;
       meta.append(rn, rs);
       const st = document.createElement('span');
-      const stCls = live === 'scan' ? 'scan' : live === 'done' ? 'done' : live === 'live' ? 'live' : 'off';
+      const stCls = fstate === 'missing' ? 'off'
+        : fstate === 'pending' ? 'off'
+        : live === 'scan' ? 'scan' : live === 'done' ? 'done' : live === 'live' ? 'live' : 'off';
       st.className = 'st ' + stCls;
-      st.textContent = live === 'scan' ? '识别中' : live === 'done' ? '已确认' : live === 'live' ? '直播中' : '未开播';
+      st.textContent = fstate === 'missing' ? '不存在'
+        : fstate === 'pending' ? '获取中'
+        : live === 'scan' ? '识别中' : live === 'done' ? '已确认' : live === 'live' ? '直播中' : '未开播';
       // 状态徽标叠在封面正中；「移除直播间」自右侧滑出 —— 两者都不再占用文字宽度。
       thumb.append(st);
       const x = document.createElement('span');
@@ -1473,8 +1603,12 @@
     }
     if (room) {
       const name = room.note ? (room.note + '（' + (room.title || room.room) + '）') : (room.title || room.room);
-      const stat = room.live_status === 1 ? '直播中，等待画面…' : '未开播（开播后自动连接）';
-      tip.textContent = name + ' · ' + stat;
+      // 元数据未就绪 / 确认不存在时，占位文案同步反映真实状态（而非显示尚未拿到的标题）。
+      const fstate = roomFetchState.get(roomId);
+      const stat = fstate === 'pending' ? '正在获取直播间…'
+        : fstate === 'missing' ? '房间不存在，请检查'
+        : room.live_status === 1 ? '直播中，等待画面…' : '未开播（开播后自动连接）';
+      tip.textContent = fstate ? stat : (name + ' · ' + stat);
     } else {
       tip.textContent = '';
     }
@@ -1517,13 +1651,21 @@
         local.cover = m.cover || local.cover;
         local.room_id = m.room_id || local.room_id;
         local.live_status = m.live_status;
-        renderLiveTabs();
-        if (activeLiveId === id) {
-          updateVpInfo();
-          if (coverShown) showCover(id);   // 仍在占位态：同步刷新封面/状态文案
-        }
       }
-    }).catch(() => {});
+      // 拿到数据即撤掉占位（顺带让「不存在」的房间在改名后恢复正常）。
+      if (roomFetchState.delete(id)) renderLiveTabs();
+      if (activeLiveId === id) {
+        updateVpInfo();
+        if (coverShown) showCover(id);   // 仍在占位态：同步刷新封面/状态文案
+      }
+    }).catch((e) => {
+      // 点开一个已存的坏房间（房间号被删/填错）：同样落到「房间不存在，请检查」。
+      if (isRoomMissingError(e)) {
+        roomFetchState.set(id, 'missing');
+        renderLiveTabs();
+        if (activeLiveId === id) { updateVpInfo(); if (coverShown) showCover(id); }
+      }
+    });
     // ④ 未连接：后台连接（成功 → 首帧到达揭除封面；失败 → 保持封面）。
     if (!hasSession) {
       await connectLive(platform, room, '');
@@ -1559,12 +1701,23 @@
               local.cover = m.cover || local.cover;
               local.room_id = m.room_id || local.room_id;
             }
-            if (status_changed || went_live) {
+            // 元数据到达即视为获取成功：撤掉「正在获取…」占位（此前不重渲染也撤掉）。
+            const rid = r.platform + ':' + r.room;
+            const hadPending = roomFetchState.delete(rid);
+            if (status_changed || went_live || hadPending) {
               renderLiveTabs();
-              if ((r.platform + ':' + r.room) === activeLiveId) updateVpInfo();
+              if (rid === activeLiveId) updateVpInfo();
             }
           }
-        } catch (e) { /* 忽略单个失败 */ }
+        } catch (e) {
+          // 轮询这一路的失败：只有「房间不存在」才是终态（保持/落到 missing，
+          // 不再反复重试刷屏）；其余瞬时失败维持原状，交给下一轮。
+          const rid = r.platform + ':' + r.room;
+          if (isRoomMissingError(e) && roomFetchState.get(rid) !== 'missing') {
+            roomFetchState.set(rid, 'missing');
+            renderLiveTabs();
+          }
+        }
         await new Promise((res) => setTimeout(res, 2000));
       }
     } finally {
@@ -1727,10 +1880,19 @@
     const room = $('addLiveRoom').value.trim();
     if (!room) { log('请输入直播间号', 'error'); return; }
     const note = $('addLiveNote').value.trim();
+    const platform = addLivePlatform;
+    const nid = platform + ':' + room;
     $('addLiveOverlay').hidden = true;
-    await connectLive(addLivePlatform, room, note);
+    // ① 立即入列 + 置「正在获取直播间…」占位：不必等网络往返，用户马上看到反馈。
+    liveRooms.push({
+      room, platform, note: note || '', last_used: Math.floor(Date.now() / 1000),
+      title: '', nickname: '', cover: '', room_id: '', live_status: 0,
+      live_start: 0, last_checked: 0,
+    });
+    roomFetchState.set(nid, 'pending');
+    renderLiveTabs();
+    await connectLive(platform, room, note);
     // 新增成功（已建立会话）：切到新房间（含封面占位语义）；未开播则不切、仅进列表。
-    const nid = addLivePlatform + ':' + room;
     if (liveSessions.some((s) => s.id === nid)) switchLive(nid);
   });
   $('addLiveRoom').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btnAddLiveSave').click(); });
@@ -1750,9 +1912,22 @@
         local.cover = m.cover || local.cover;
         local.room_id = m.room_id || local.room_id;
         local.live_status = m.live_status;
-        renderLiveTabs();
       }
-    } catch (e) { /* 忽略 */ }
+      // 取到元数据：撤掉占位，落到真实数据。
+      roomFetchState.delete(id);
+      renderLiveTabs();
+    } catch (e) {
+      // 拉取失败：仅当服务端**明确**说房间不存在才落到「房间不存在，请检查」；
+      // 网络/风控等瞬时失败保留 pending 语义由后续轮询补上，避免误报。
+      const local = liveRooms.find((x) => (x.platform + ':' + x.room) === id);
+      if (isRoomMissingError(e)) {
+        roomFetchState.set(id, 'missing');
+        log('直播间 ' + room + '：房间不存在，请检查房间号是否正确', 'error');
+      } else if (!(local && (local.title || local.nickname))) {
+        roomFetchState.set(id, 'pending');
+      }
+      renderLiveTabs();
+    }
     if (liveSessions.some((s) => s.id === id)) {
       await reloadLiveRooms();
       return;
@@ -1768,7 +1943,11 @@
       invoke('set_preview_active', { active: false }).catch(() => {});
       log('已连接' + livePlatformLabel(platform) + '直播间 ' + room + '（' + info.w + '×' + info.h + '），预览与扫码已切换', 'success');
     } catch (e) {
-      log('直播间 ' + room + '：' + e, 'info');
+      // 房间不存在时 live_start 也会失败：此时不重复报错（上面已给明确结论），
+      // 避免同一问题刷两条矛盾日志；其余失败照常提示原因。
+      if (!roomFetchState.has(id) || roomFetchState.get(id) !== 'missing') {
+        log('直播间 ' + room + '：' + e, 'info');
+      }
     }
     await reloadLiveRooms();
     // 不在此强制切换视图：点击流程已在 switchLive 中**立即**切换（此后用户可能已
@@ -2015,6 +2194,13 @@
   }
   // 屏幕扫码「自动切后台」标志：回到前台时据此自动停止屏幕扫码（用完即止）。
   let screenScanAutoBg = false;
+  // 屏幕扫码前正在观看的直播间（回到应用后恢复它）。
+  //
+  // 屏幕扫码必须把中间区从「直播画面」切到「桌面预览」才能扫到游戏内的二维码，
+  // 而 exitLiveMode() 会清空 activeLiveId / 视图 / last_live。此前回到应用后
+  // 中间就停在退出前的桌面预览上，用户得手动点一次直播间才能回去——这与
+  // 「回到应用应看到之前的直播间」相悖，故在此记住并在回前台时恢复。
+  let screenScanPrevLive = null;
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       // 隐藏时若正处于拖拽中，window 的 mouseup 可能不再触发 → dragging 永久为 true
@@ -2035,6 +2221,16 @@
         if (wasScanning) stopScanTarget("screen");
         if (wasScanning) log("已回到应用，自动停止屏幕扫码", "info");
         stopScreenShare({ quiet: true });
+      }
+      // 恢复屏幕扫码前正在看的直播间（房间可能已被删除，故需再确认一次）。
+      if (screenScanPrevLive) {
+        const prev = screenScanPrevLive;
+        screenScanPrevLive = null;
+        const known = liveRooms.some((r) => (r.platform + ':' + r.room) === prev);
+        if (known && !liveOn()) {
+          switchLive(prev).catch(() => {});
+          log("已回到应用，恢复上次观看的直播间", "info");
+        }
       }
     }
   });
@@ -2589,10 +2785,6 @@
     const dn = $('displayName');
     dn.addEventListener('change', () => saveCfg({ display_name: dn.value.trim() }));
     dn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dn.blur(); } });
-    // 屏幕共享：停止入口 + 状态显示（仅移动端有意义；桌面端该行被 CSS 隐藏）。
-    const btnStopCap = $('btnStopCapture');
-    if (btnStopCap) btnStopCap.addEventListener('click', () => stopScreenShare());
-    refreshCaptureRow();
   }
 
   /// 版本号单一来源：Cargo.toml（get_app_version）；注入关于弹窗与底部栏迷你版。
@@ -2603,17 +2795,6 @@
         if (el) el.textContent = 'v' + v;
       });
     }).catch(() => {});
-  }
-
-  /// 刷新「屏幕共享」行的状态文字（未开启 / 共享中）。
-  async function refreshCaptureRow() {
-    const el = $('capState');
-    const btn = $('btnStopCapture');
-    if (!el || !btn) return;
-    let on = false;
-    try { on = await invoke('screen_capture_state'); } catch (_) { on = false; }
-    el.textContent = on ? '共享中' : '未开启';
-    btn.disabled = !on;
   }
 
   /// 应用内停止屏幕共享（等价于系统状态栏的「停止共享」）。
@@ -2634,7 +2815,6 @@
     } catch (e) {
       log('停止屏幕共享失败：' + String(e), 'error');
     }
-    refreshCaptureRow();
   }
 
   async function init() {
@@ -2691,12 +2871,11 @@
       });
       // 屏幕共享被系统/用户停止（状态栏「停止共享」/ Android 14 一次性令牌到期 /
       // 系统回收）。此时帧管道已断开，屏幕扫码循环再跑也拿不到帧——停掉它并提示
-      // 重新授权，避免界面显示「共享中」却毫无反应。
+      // 重新授权，避免用户以为还在扫却毫无反应。
       await listen('capture-stopped', () => {
         // 共享已由系统侧（通知栏「停止共享」）或我们主动结束：清掉「切后台自动停」
         // 的待办标记，避免下次回前台再走一遍无意义的停止流程。
         screenScanAutoBg = false;
-        refreshCaptureRow();
         if (scanningTargets.has('screen')) {
           stopScanTarget('screen');
           log('屏幕共享已停止，如需继续屏幕扫码请重新授权', 'warn');
@@ -2812,8 +2991,6 @@
     function closeLeft() { settleSwipe(0); }
     function openRight() {
       settleSwipe(-drawerW());
-      // 抽屉每次展开都刷新一次屏幕共享状态（面板常驻，不能用 hidden 事件）。
-      if (typeof refreshCaptureRow === "function") refreshCaptureRow();
     }
     function closeRight() { settleSwipe(0); }
     window.closeLeft = closeLeft;
@@ -2982,6 +3159,9 @@
     $("mBtnScreenScan").addEventListener("click", async () => {
       // 屏幕扫码：先确保捕获授权，再切到桌面目标（无直播会话时）并开始扫码。
       if (!(await ensureScreenCapture())) return;
+      // 记住当前正在看的直播间：exitLiveMode() 会清空它，回前台时据此恢复
+      // （见 visibilitychange 里的 screenScanPrevLive 处理）。
+      screenScanPrevLive = activeLiveId;
       exitLiveMode();
       renderScan();
       // 若已在扫屏幕：再点一次 = 停止。
