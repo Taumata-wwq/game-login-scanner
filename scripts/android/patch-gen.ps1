@@ -289,6 +289,44 @@ if (-not (Test-Path $miSrc)) {
     } else {
         Write-Host "  = app/build.gradle.kts 已含 :mi_sdk 依赖"
     }
+
+    # protobuf-java：小米 SDK（mio_sdk_base）内含**生成的 protobuf 类**
+    # （org.xiaomi.gamecenter.milink.msg.NoticeConfigProtos 等，实现
+    # com.google.protobuf.ProtocolMessageEnum），但该 jar **不自带** protobuf 运行时，
+    # 参考项目是靠其它依赖（leancloud 等）传递引入的，我们这条依赖链上没有。
+    #
+    # 缺它的后果不是「编译失败」，而是**运行时崩溃**（真机实证）：
+    #   java.lang.NoClassDefFoundError:
+    #     Failed resolution of: Lorg/xiaomi/gamecenter/milink/msg/NoticeConfigProtos$SdkType;
+    #   at com.xiaomi.gamecenter.sdk.MiCommplatform.onUserAgreed
+    #   at ChannelLoginPlugin.xiaomiLogin
+    # 即「一点小米添加账号就闪退」。原因是 R8 被 channel-proguard-rules.pro 里的
+    # `-dontwarn com.google.**` 放过了缺失的父类（GeneratedMessageV3/Descriptors…），
+    # 构建照常通过，但打进去的类在 ART 上无法解析父类链 → 抛 NoClassDefFoundError。
+    # 加真实依赖后父类链完整；这也解释了为何 debug 包（不混淆）同样会崩。
+    if ($ag -notmatch [regex]::Escape('protobuf-java')) {
+        $ag = [System.IO.File]::ReadAllText($appGradlePath)
+        $ag = $ag.Replace("dependencies {", "dependencies {`r`n    implementation(`"com.google.protobuf:protobuf-java:3.25.5`")")
+        [System.IO.File]::WriteAllText($appGradlePath, $ag, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host '  + app/build.gradle.kts: implementation("com.google.protobuf:protobuf-java:3.25.5")'
+    } else {
+        Write-Host "  = app/build.gradle.kts 已含 protobuf-java 依赖"
+    }
+
+    # gson：同类问题（真机实证）。小米 SDK 里 **15 个类**引用 gson，包括
+    # `com.xiaomi.gamecenter.sdk.utils.HyUtils` 与 `MiCommplatform` 本身：
+    #   java.lang.NoClassDefFoundError: com.xiaomi.gamecenter.sdk.utils.HyUtils
+    #   Caused by: ClassNotFoundException: com.google.gson.Gson
+    # 修完 protobuf 后**紧接着**暴露出来的下一个缺口——说明缺的是一整组运行时库，
+    # 故一次补齐（gson + eventbus 由 mi_sdk/libs 自带，此处只缺 gson）。
+    if ($ag -notmatch [regex]::Escape('com.google.code.gson')) {
+        $ag = [System.IO.File]::ReadAllText($appGradlePath)
+        $ag = $ag.Replace("dependencies {", "dependencies {`r`n    implementation(`"com.google.code.gson:gson:2.11.0`")")
+        [System.IO.File]::WriteAllText($appGradlePath, $ag, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host '  + app/build.gradle.kts: implementation("com.google.code.gson:gson:2.11.0")'
+    } else {
+        Write-Host "  = app/build.gradle.kts 已含 gson 依赖"
+    }
 }
 
 Write-Host "== 5c. 渠道混淆规则（参考项目 proguard 规则，幂等刷新）=="

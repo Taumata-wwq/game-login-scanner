@@ -426,35 +426,43 @@
       list.appendChild(row);
     });
     // 「添加账号」作为列表末项（与账号同级、随列表滚动；不参与拖拽排序）。
-    const add = document.createElement('button');
-    add.type = 'button';
-    add.className = 'acct-add';
-    add.textContent = '＋ 添加账号';
-    add.title = '添加账号';
-    add.addEventListener('click', () => {
-      if (filter === 'hypergryph') {
-        $('hyperPhone').value = '';
-        $('hyperCode').value = '';
-        $('hyperStatus').textContent = '';
-        $('hyperOverlay').hidden = false;
-        $('hyperPhone').focus();
-        return;
-      }
-      if (isChannelAcct(filter)) {
-        channelLogin(filter.slice(8));
-        return;
-      }
-      openLogin();
-    });
-    list.appendChild(add);
-    // B 服额外提供「B 站授权登录」（仅 Android：走 B 站 SDK，免账号密码）。
-    if (filter === "bilibili" && window.__ANDROID__) {
-      const addSdk = document.createElement("button");
-      addSdk.type = "button";
-      addSdk.className = "acct-add";
-      addSdk.textContent = "＋ B 站授权登录";
-      addSdk.title = "使用 B 站 SDK 授权登录（Android）";
-      addSdk.addEventListener("click", () => biliSdkLogin());
+    //
+    // Android + B 服：**不提供**通用「＋ 添加账号」。手机端 B 服统一走 B 站 SDK
+    // 授权（下方那个按钮），扫码/账密登录在手机上体验远不如一次授权，且授权链路
+    // 已真机跑通——保留两条入口只会让用户困惑该点哪个。
+    const biliSdkOnly = (filter === 'bilibili' && window.__ANDROID__);
+    if (!biliSdkOnly) {
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'acct-add';
+      add.textContent = '＋ 添加账号';
+      add.title = '添加账号';
+      add.addEventListener('click', () => {
+        if (filter === 'hypergryph') {
+          $('hyperPhone').value = '';
+          $('hyperCode').value = '';
+          $('hyperStatus').textContent = '';
+          $('hyperOverlay').hidden = false;
+          $('hyperPhone').focus();
+          return;
+        }
+        if (isChannelAcct(filter)) {
+          channelLogin(filter.slice(8));
+          return;
+        }
+        openLogin();
+      });
+      list.appendChild(add);
+    }
+    // B 服（Android）：B 站授权登录入口——`bili_sdk_login` 调起 B 站客户端授权，
+    // 产出 uid + access_key 后由后端校验并入库（B 服账号）。
+    if (biliSdkOnly) {
+      const addSdk = document.createElement('button');
+      addSdk.type = 'button';
+      addSdk.className = 'acct-add';
+      addSdk.textContent = '＋ B 站授权登录';
+      addSdk.title = '使用 B 站 SDK 授权登录（Android）';
+      addSdk.addEventListener('click', () => biliSdkLogin());
       list.appendChild(addSdk);
     }
   }
@@ -3121,9 +3129,23 @@
     // 抽屉打开时点击主界面 → 收回（吞掉该次点击，避免误触主界面按钮）。
     // 注：弹层打开时不做拦截（弹层交互优先）；顶栏按钮不拦截（其自身 toggle 逻辑
     // 负责开/关，允许"左开时点右按钮直接切到右侧"）。
+    //
+    // **弹窗内的点击也必须放行**：弹窗（如「关于」「修改备注」）是挂在整个视口上的
+    // 遮罩，用户点它空白处即关闭弹窗——而弹窗是在 mousedown 阶段被置 hidden 的，
+    // 等到 click 阶段 `anyModalOpen()` 已经变回 false，于是这段逻辑会把「关弹窗」
+    // 误当成「点了主界面」，顺带把侧栏抽屉也收回、直接跳回主界面（用户反馈的问题）。
+    // 故在指针按下时**先记下**当时是否有弹窗，click 阶段据此跳过抽屉收回。
+    let modalOpenAtPointerDown = false;
+    document.addEventListener("pointerdown", () => {
+      modalOpenAtPointerDown = anyModalOpen();
+    }, { capture: true, passive: true });
     document.addEventListener("click", (e) => {
       if (!drawerOpen()) return;
+      // 本次点击起始于弹窗之上：交给弹窗的关闭逻辑，抽屉保持原地。
+      if (modalOpenAtPointerDown) { modalOpenAtPointerDown = false; return; }
       if (anyModalOpen()) return;
+      // 直接点中弹窗遮罩本身也算弹窗交互（双保险：某些环境 click 会落在遮罩上）。
+      if (e.target.classList && e.target.classList.contains("overlay")) return;
       if (e.target.closest("#toolsOverlay .dialog") || e.target.closest(".sidebar") || e.target.closest(".m-topbar")) return;
       settleSwipe(0);
       e.stopPropagation();
@@ -3288,7 +3310,9 @@
       // 返回 false 时由原生层 moveTaskToBack（回桌面保活），不再走 Activity.finish。
       function consumeBack() {
         if (cameraMode) { window.exitCameraMode(); return true; }
-        if (swipeTarget !== 0) { settleSwipe(0); return true; }
+        // 弹窗优先于抽屉：侧栏里打开的弹窗（关于 / 修改备注…）应先被关掉，
+        // 抽屉保持在原地——否则按一次返回会连带把抽屉收回去、跳回主界面，
+        // 与「点空白关弹窗应留在侧栏」的预期不一致（用户反馈）。
         if (window.__anyModalOpen && window.__anyModalOpen()) {
           // 关掉当前打开的所有弹窗（含登录弹窗需取消二维码轮询）。
           document.querySelectorAll(".overlay").forEach((o) => {
@@ -3298,6 +3322,7 @@
           });
           return true;
         }
+        if (swipeTarget !== 0) { settleSwipe(0); return true; }
         return false;
       }
       window.__gsHandleBack = consumeBack;
