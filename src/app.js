@@ -861,13 +861,40 @@
     const h = $('captchaHint');
     if (h) h.textContent = msg;
   }
+  /// 极验诊断日志：**只写 logcat**（`frontend_log`），不进用户可见的应用内日志面板。
+  ///
+  /// 极验这条链路的失败形态是「静默」的（JSONP 被拦、回调不来 → 一片空白），
+  /// 没有设备日志就只能靠猜；但这些过程信息对用户毫无价值，故与用户可见的
+  /// `log()` 分开——只有真正的错误（`captchaFail`）才同时写面板。
+  function captchaDiag(msg) {
+    try { invoke('frontend_log', { level: 'info', msg: '[极验] ' + msg }); } catch (e) {}
+  }
+  /// 极验失败：写 logcat **并**告诉用户（这些是真需要用户知道/照做的）。
+  function captchaFail(msg) {
+    log(msg, 'error');
+    try { invoke('frontend_log', { level: 'error', msg: '[极验] ' + msg }); } catch (e) {}
+  }
+  /// 页面来源诊断：GT3/GT4 SDK 的 `protocol` 默认取 `window.location.protocol + '//'`。
+  /// Tauri 的 Android 页面来源是 **http://tauri.localhost**（真机实测），于是 SDK 会拼出
+  /// `http://api.geetest.com/gettype.php` 这类**明文**请求；release 包
+  /// `usesCleartextTraffic=false` 且 WebView 亦拦混合内容 → JSONP 永不回来、
+  /// `initGeetest` 回调永不触发 → 弹窗一片空白（用户反馈的「无内容」）。
+  /// 解法是在初始化参数里显式给 `https: true`（SDK 内该分支优先于 location.protocol）。
+  /// 本函数留在日志里，便于日后来源变化时一眼看出。
+  function captchaOriginInfo() {
+    return 'origin=' + location.origin + ' protocol=' + location.protocol +
+      ' secureContext=' + (window.isSecureContext === true);
+  }
   // 极验 SDK 动态加载（GT3 与 GT4 是两套互不相同的入口，按需加载其一）。
   function loadGeetestScript(src, ready, cb) {
-    if (ready()) { cb(); return; }
+    if (ready()) { captchaDiag('SDK 已在页面中：' + src.split('/').pop()); cb(); return; }
     const s = document.createElement('script');
     s.src = src;
-    s.onerror = () => { setCaptchaHint('极验 SDK 加载失败，请检查网络后重试'); };
-    s.onload = cb;
+    s.onerror = () => {
+      captchaFail('极验 SDK 加载失败：' + src);
+      setCaptchaHint('极验 SDK 加载失败，请检查网络后重试');
+    };
+    s.onload = () => { captchaDiag('SDK 加载完成：' + src.split('/').pop()); cb(); };
     document.head.appendChild(s);
   }
   async function showCaptcha(aigis, retryFn) {
@@ -886,6 +913,7 @@
     const captchaId = data.captcha_id || data.captchaId || gt;
     const riskType = data.risk_type || data.riskType || '';
     if (!captchaId) {
+      captchaFail('验证参数缺失：aigis=' + JSON.stringify(aigis).slice(0, 200));
       setCredStatus('验证参数缺失');
       if (retryFn) retryFn('');
       return;
@@ -896,6 +924,7 @@
     box.innerHTML = '';
     setCaptchaHint(isGt3 ? '请完成下方验证…' : '正在加载验证组件…');
     $('captchaOverlay').hidden = false;
+    captchaDiag('弹窗已打开，代际=' + (isGt3 ? 'GT3' : 'GT4') + ' box=' + (box ? 'ok' : 'MISSING'));
     // 本次验证是否已有结论（成功交付 or 被用户关闭）。极验 SDK 的事件迟于弹窗
     // 关闭才到达是常态，故统一用 settled 闸门挡住「关窗后仍继续登录」。
     let settled = false;
@@ -922,6 +951,7 @@
     closeWatch.observe($('captchaOverlay'), { attributes: true, attributeFilter: ['hidden'] });
     if (isGt3) {
       // ---------- 极验第三代（B站）：gt + challenge ----------
+      captchaDiag('GT3 初始化 gt=' + captchaId + ' challenge=' + challenge.slice(0, 16) + '… | ' + captchaOriginInfo());
       loadGeetestScript(
         'https://static.geetest.com/static/js/gt.0.4.9.js',
         () => !!window.initGeetest,
@@ -935,22 +965,35 @@
                 challenge,
                 offline: false,
                 new_captcha: true,
+                // `https: true` 必须显式给：SDK 的 protocol 默认取
+                // `window.location.protocol + '//'`，而 Tauri 的 Android 页面来源是
+                // **http://tauri.localhost**（真机实测），于是它会去请求
+                // `http://api.geetest.com/gettype.php` —— 明文请求被 WebView 与
+                // usesCleartextTraffic=false 一并拦掉，JSONP 永不回来，initGeetest
+                // 的回调永不触发，弹窗里就是一片空白（用户反馈的「无内容」）。
+                // 该选项在 SDK 里优先于 location.protocol（见其 `if (userConfig.https)` 分支）。
+                https: true,
                 product: 'popup',
                 lang: 'zh-cn',
+                // api_server 不带协议前缀（SDK 自己拼 protocol），下方 protocol 已由
+                // https:true 固定为 https://。
                 api_server: 'api.geetest.com',
               },
               (captcha) => {
+                captchaDiag('GT3 实例已回调，appendTo 挂载');
                 captcha.appendTo(box);
                 captcha.onReady(() => {
+                  captchaDiag('GT3 onReady（控件已渲染）');
                   setCaptchaHint('请完成验证');
                   // onReady 后主动唤起验证面板（参考 BBH3ScanLaunch）。
-                  try { captcha.verify(); } catch (e) { log('极验 verify 异常: ' + e, 'error'); }
+                  try { captcha.verify(); } catch (e) { captchaFail('极验 verify 异常: ' + e); }
                 });
                 captcha.onSuccess(() => {
                   if (done) return;
                   done = true;
                   const v = captcha.getValidate();
                   if (!v) { setCaptchaHint('验证结果为空，请关闭后重试'); return; }
+                  captchaDiag('GT3 onSuccess');
                   setCaptchaHint('验证通过，正在继续…');
                   finish(JSON.stringify({
                     challenge: v.geetest_challenge,
@@ -959,13 +1002,14 @@
                   }));
                 });
                 captcha.onError((e) => {
-                  log('极验出错: ' + JSON.stringify(e), 'error');
+                  captchaFail('GT3 onError: ' + JSON.stringify(e));
                   if (!done) setCaptchaHint('验证出错，请关闭后重试');
                 });
                 // 某些 GT3 环境完成后只触发 onClose，故这里再读一次结果。
                 captcha.onClose(() => {
                   if (done) return;
                   const v = captcha.getValidate();
+                  captchaDiag('GT3 onClose，getValidate=' + JSON.stringify(v));
                   if (v && v.geetest_validate) {
                     done = true;
                     finish(JSON.stringify({
@@ -980,7 +1024,7 @@
               }
             );
           } catch (e) {
-            log('极验初始化失败: ' + e, 'error');
+            captchaFail('GT3 initGeetest 抛异常: ' + e);
             setCaptchaHint('极验初始化失败，请关闭后重试');
           }
         }
@@ -988,25 +1032,36 @@
       return;
     }
     // ---------- 极验第四代（米哈游）：captchaId ----------
+    captchaDiag('GT4 初始化 captchaId=' + captchaId + ' riskType=' + (riskType || '-') + ' | ' + captchaOriginInfo());
     loadGeetestScript(
       'https://static.geetest.com/v4/gt4.js',
       () => !!window.initGeetest4,
       () => {
         if ($('captchaOverlay').hidden) return;
         // 参数对齐米哈游通行证登录页真实初始化：product bind + hideSuccess + userInfo。
-        const initParams = { captchaId, product: 'bind', language: 'zho', hideSuccess: true };
+        // `https: true` 与 GT3 同理：页面来源是 http://tauri.localhost 时，若不显式指定，
+        // SDK 会拼出 http://gcaptcha4.geetest.com 的明文请求并被拦掉（真机实测）。
+        const initParams = {
+          captchaId, product: 'bind', language: 'zho', hideSuccess: true, https: true,
+        };
         if (sid) initParams.userInfo = JSON.stringify({ session_id: sid });
         if (riskType) initParams.riskType = riskType;
         let done4 = false;
         try {
           window.initGeetest4(initParams, (captcha) => {
+            captchaDiag('GT4 实例已回调，appendTo 挂载');
             captcha.appendTo(box);
-            captcha.onReady(() => { setCaptchaHint('请完成验证'); captcha.showCaptcha(); });
+            captcha.onReady(() => {
+              captchaDiag('GT4 onReady（控件已渲染）');
+              setCaptchaHint('请完成验证');
+              captcha.showCaptcha();
+            });
             captcha.onSuccess(() => {
               if (done4) return;
               done4 = true;
               const v = captcha.getValidate();
               if (!v) { setCaptchaHint('验证结果为空，请关闭后重试'); return; }
+              captchaDiag('GT4 onSuccess');
               // 只保留 GT4 的 5 个标准字段（userInfo 会污染 aigis）。
               const clean = {
                 captcha_id: v.captcha_id,
@@ -1019,13 +1074,17 @@
               setCaptchaHint('验证通过，正在继续…');
               finish(sid + ';' + payload);
             });
-            captcha.onError(() => {
+            captcha.onError((e) => {
+              captchaFail('GT4 onError: ' + JSON.stringify(e));
               if (!done4) setCaptchaHint('验证出错，请关闭后重试');
             });
-            captcha.onClose(() => { if (!done4) setCaptchaHint('验证已取消'); });
+            captcha.onClose(() => {
+              captchaDiag('GT4 onClose');
+              if (!done4) setCaptchaHint('验证已取消');
+            });
           });
         } catch (e) {
-          log('极验初始化失败: ' + e, 'error');
+          captchaFail('GT4 initGeetest4 抛异常: ' + e);
           setCaptchaHint('极验初始化失败，请关闭后重试');
         }
       }

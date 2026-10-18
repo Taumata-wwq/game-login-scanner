@@ -291,15 +291,34 @@ pub async fn bili_sdk_captcha() -> Result<Value, String> {
 /// 都会走到这里。此前调用方无条件转入极验，于是**任何**失败都表现为「弹验证窗，
 /// 填完仍登不进去」，把真正的失败原因彻底盖掉（真机反馈）。
 ///
-/// 这里只在响应里出现验证码信号时才判定为需要极验：
-///   - `code` 为已知的验证码业务码（-105 / -6620 等）；
-///   - 或 body 直接带 `gt` / `challenge`（服务端把极验参数塞进了登录响应）；
-///   - 或 `validate` / `seccode` 被回显要求补交。
+/// 真机实测（2026-10-18，Redmi K40）该接口索要验证码时的**权威响应**：
+/// ```json
+/// {"code":200000,"message":"trigger account secondary verify","need_captch":"1",
+///  "requestId":"…","server_message":"","timestamp":"…"}
+/// ```
+/// 注意服务端字段名是 `need_captch`（少一个 `a`，B站自身的拼写），值以**字符串**
+/// `"1"` 表示需要验证。这是首要判据——只认业务码会漏掉它，把正常的二次验证请求
+/// 误判为「登录失败」，用户便再也走不到极验那一步。
 ///
-/// 说明：B站该接口的验证码业务码**没有权威文档**（项目内 `docs/API协议.md` 对
-/// B站账密登录一节自述「未真机验证」）。因此判定取保守策略：只有明确信号才转极验，
-/// 其余一律如实抛错——宁可让用户看到服务端的真实 message，也不要伪造一个验证窗。
+/// 判据（任一命中即需要极验）：
+///   - `need_captch`（兼容拼写正确的 `need_captcha`）为 "1"/1/true；
+///   - `code` 为已知验证码业务码（-105 / -6620 / -6621）；
+///   - body 直接带 `gt` / `challenge`（服务端把极验参数塞进登录响应）；
+///   - 回显 `validate` / `seccode` 要求补交。
 pub fn bili_login_needs_captcha(resp: &Value) -> bool {
+    /// `need_captch` / `need_captcha` 的宽松真值判定：字符串 "1"、数字 1、布尔 true
+    /// 都算（服务端历史上两种类型都用过，不能只认一种）。
+    fn truthy(v: Option<&Value>) -> bool {
+        match v {
+            Some(Value::String(s)) => !matches!(s.trim(), "" | "0" | "false"),
+            Some(Value::Number(n)) => n.as_i64().is_some_and(|x| x != 0),
+            Some(Value::Bool(b)) => *b,
+            _ => false,
+        }
+    }
+    if truthy(resp.get("need_captch")) || truthy(resp.get("need_captcha")) {
+        return true;
+    }
     /// 已知「需要验证码」的业务码（B站游戏 SDK 域）。
     const CAPTCHA_CODES: &[i64] = &[-105, -6620, -6621];
     let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -380,6 +399,37 @@ mod captcha_gate_tests {
         assert!(!bili_login_needs_captcha(&json!({
             "code": 0, "gt": "", "challenge": "", "validate": ""
         })));
+        // need_captch 显式为「否」的各种写法都不算。
+        assert!(!bili_login_needs_captcha(&json!({ "need_captch": "0" })));
+        assert!(!bili_login_needs_captcha(&json!({ "need_captch": 0 })));
+        assert!(!bili_login_needs_captcha(&json!({ "need_captch": false })));
+        assert!(!bili_login_needs_captcha(&json!({ "need_captch": "" })));
+    }
+
+    /// 真机实测的原始响应（2026-10-18 Redmi K40）——回归锚点。
+    ///
+    /// 这是**权威样本**：服务端字段名拼作 `need_captch`（少一个 a），值以字符串
+    /// `"1"` 表示需要二次验证。只认业务码的实现会漏掉它，把正常流程误判成失败。
+    #[test]
+    fn real_device_captcha_payload_is_detected() {
+        let real = json!({
+            "code": 200000,
+            "message": "trigger account secondary verify",
+            "need_captch": "1",
+            "requestId": "794cd779f61f428691f33a2b3fc32735",
+            "server_message": "",
+            "timestamp": "1792305328132"
+        });
+        assert!(
+            bili_login_needs_captcha(&real),
+            "真机样本必须被识别为需要验证码，否则用户走不到极验那一步"
+        );
+        // 三种真值写法都要认（服务端类型不稳定）。
+        assert!(bili_login_needs_captcha(&json!({ "need_captch": "1" })));
+        assert!(bili_login_needs_captcha(&json!({ "need_captch": 1 })));
+        assert!(bili_login_needs_captcha(&json!({ "need_captch": true })));
+        // 拼写正确的变体也兼容。
+        assert!(bili_login_needs_captcha(&json!({ "need_captcha": "1" })));
     }
 
     /// 真实验证码信号必须被识别，否则会退化成「永远不弹验证窗」。
