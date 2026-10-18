@@ -293,7 +293,11 @@ class MainActivity : TauriActivity() {
                 // 单引号转义：目标是内部生成的 `live:<platform>:<room>`，只含字母数字与冒号，
                 // 这里仍做一次替换以防万一（避免 JS 字符串注入）。
                 val safe = target.replace("'", "")
-                w.evaluateJavascript("window.__gsOpenTarget&&window.__gsOpenTarget('$safe')", null)
+                // ⚠️ `$safe` 必须写成 `` `$safe ``：本段是 PowerShell 双引号 here-string，
+                // 不转义的 `$safe` 会被 **PowerShell** 在生成期插值成空串（该变量只存在于
+                // Kotlin），生成的 Kotlin 就变成 `__gsOpenTarget('')` —— 通知点击永远跳不动
+                // （真机实测：传 live:bilibili:6 也不切换房间，日志无「已从通知打开直播间」）。
+                w.evaluateJavascript("window.__gsOpenTarget&&window.__gsOpenTarget('`$safe')", null)
             }
         }
         window?.decorView?.post(probe)
