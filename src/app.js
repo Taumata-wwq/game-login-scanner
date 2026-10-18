@@ -1470,27 +1470,71 @@
     const scanning = parts.length > 0;
     const title = scanning ? '正在扫码' : '扫码器在后台';
     const text = scanning ? parts.join(' · ') : '当前没有进行中的扫码任务';
-    invoke('notify_persistent_show', { title, text }).catch(() => {});
+    // 点通知回到应用时尽量定位到"当前在看/在扫的那个直播间"：
+    // 优先正在扫的直播目标，其次当前观看的，都没有则只回主界面。
+    let openTarget = '';
+    for (const t of scanningTargets) {
+      if (String(t).startsWith('live:')) { openTarget = String(t); break; }
+    }
+    if (!openTarget && activeLiveId) openTarget = 'live:' + activeLiveId;
+    invoke('notify_persistent_show', { title, text, target: openTarget }).catch(() => {});
     persistentNotifyShown = true;
   }
 
+  /// 点通知 → 定位到对应直播间（由 Android 侧 MainActivity 经
+  /// `window.__gsOpenTarget` 调用；参数形如 `live:bilibili:6`）。
+  window.__gsOpenTarget = function (target) {
+    try {
+      const s = String(target || '');
+      if (!s.startsWith('live:')) return true;
+      const id = s.slice(5);   // `bilibili:6`
+      const known = liveRooms.some((r) => (r.platform + ':' + r.room) === id);
+      if (known) {
+        switchLive(id).catch(() => {});
+        log('已从通知打开直播间 ' + id, 'info');
+        return true;
+      }
+      // 房间可能已被删除：仍切到它（后端会按 id 建会话），失败则忽略。
+      switchLive(id).catch(() => {});
+      return true;
+    } catch (e) { return false; }
+  };
+
+  /// 点通知上的「停止扫码」→ 停掉所有扫码路（含屏幕共享），
+  /// 由 Android 侧 MainActivity 经 `window.__gsStopScanFromNotification` 调用。
+  window.__gsStopScanFromNotification = function () {
+    try {
+      const targets = [...scanningTargets];
+      for (const t of targets) stopScanTarget(t);
+      if (targets.length) log('已从通知停止扫码（' + targets.length + ' 路）', 'info');
+      // 屏幕路一并释放捕获，否则前台服务与常驻通知会一直挂着。
+      if (targets.includes('screen')) stopScreenShare({ quiet: true });
+      syncPersistentNotification();
+      return true;
+    } catch (e) { return false; }
+  };
+
   /// 发一条即时通知。`kind` ∈ scan_success | live_status | scan_error。
+  ///
+  /// `target` 为扫码目标键（`screen` / `camera` / `live:<platform>:<room>`）——除了
+  /// 决定文案，也作为**点击跳转目标**传给系统通知：用户点"扫码成功"通知时应直接
+  /// 落到那个直播间，而不是自己再翻侧栏找。
+  ///
+  /// **成功通知做去抖合并**：多路并行扫码时，几个直播间可能在同一瞬间各命中一个码
+  /// （不同直播间各自的二维码）。逐条发会在一秒内刷出多条通知，既吵又难看清。
+  /// 这里把短窗口内的多次成功合成一条汇总（"3 个直播间已确认"），更符合"扫完一轮"
+  /// 的语义；错误/下播等事件不合并（各自是独立信息）。
   function notifyEvent(kind, target, message) {
     if (!window.__ANDROID__) return;
     if (!notifyLiveStatus) return;
+    if (kind === 'success') {
+      queueSuccessNotification(target);
+      return;
+    }
     let title = '扫码器';
     let text = message || '';
-    if (kind === 'success') {
-      title = '扫码成功';
-      if (target === 'screen') text = '屏幕扫码已识别并确认登录';
-      else if (target === 'camera') text = '摄像头扫码已识别并确认登录';
-      else {
-        const id = String(target).startsWith('live:') ? String(target).slice(5) : '';
-        const room = liveRooms.find((r) => (r.platform + ':' + r.room) === id);
-        const name = (room && (room.note || room.title)) || id;
-        text = (name ? name + '：' : '') + '已识别并确认登录';
-      }
-    } else if (kind === 'stopped') {
+    const openTarget = String(target || '').startsWith('live:') ? String(target) : '';
+    if (kind === 'stopped') {
       title = '扫码已停止';
       text = message || '已停止扫描';
     } else if (kind === 'error' || kind === 'failed') {
@@ -1499,8 +1543,65 @@
     } else {
       return; // started 等过程事件不发即时通知，避免刷屏
     }
-    invoke('notify_event', { kind: kind === 'success' ? 'scan_success' : 'live_status', title, text })
-      .catch(() => {});
+    invoke('notify_event', {
+      kind: kind === 'success' ? 'scan_success' : 'live_status',
+      title, text, target: openTarget,
+    }).catch(() => {});
+  }
+
+  // 成功通知合并窗口（毫秒）：并行多路在此时段内的成功合并为一条。
+  const SCAN_SUCCESS_MERGE_MS = 1200;
+  let successMergeTimer = null;
+  let successMergeTargets = [];
+
+  /// 把一次扫码成功并入待发队列；窗口结束后统一发一条（单条则直述该目标）。
+  function queueSuccessNotification(target) {
+    if (!successMergeTargets.includes(target)) successMergeTargets.push(target);
+    if (successMergeTimer !== null) return;
+    successMergeTimer = setTimeout(() => {
+      const targets = successMergeTargets;
+      successMergeTargets = [];
+      successMergeTimer = null;
+      flushSuccessNotification(targets);
+    }, SCAN_SUCCESS_MERGE_MS);
+  }
+
+  /// 发出合并后的成功通知。
+  function flushSuccessNotification(targets) {
+    if (!targets.length) return;
+    let title = '扫码成功';
+    let text = '';
+    let openTarget = '';
+    if (targets.length === 1) {
+      const t = targets[0];
+      if (t === 'screen') text = '屏幕扫码已识别并确认登录';
+      else if (t === 'camera') text = '摄像头扫码已识别并确认登录';
+      else {
+        const id = String(t).startsWith('live:') ? String(t).slice(5) : '';
+        const room = liveRooms.find((r) => (r.platform + ':' + r.room) === id);
+        const name = (room && (room.note || room.title)) || id;
+        text = (name ? name + '：' : '') + '已识别并确认登录';
+      }
+      openTarget = String(t).startsWith('live:') ? String(t) : '';
+    } else {
+      // 多路同时成功：列出名字（过多时收敛为计数），点击落到第一个直播间。
+      const names = targets.map((t) => {
+        if (t === 'screen') return '屏幕';
+        if (t === 'camera') return '摄像头';
+        const id = String(t).slice(5);
+        const room = liveRooms.find((r) => (r.platform + ':' + r.room) === id);
+        return (room && (room.note || room.title)) || id;
+      });
+      title = '扫码成功（' + targets.length + ' 个）';
+      text = names.length <= 4 ? names.join('、') + ' 均已确认登录'
+        : names.slice(0, 3).join('、') + ' 等 ' + targets.length + ' 个已确认登录';
+      for (const t of targets) {
+        if (String(t).startsWith('live:')) { openTarget = String(t); break; }
+      }
+    }
+    invoke('notify_event', {
+      kind: 'scan_success', title, text, target: openTarget,
+    }).catch(() => {});
   }
 
   // 更新视窗信息栏（标题/副标题）。数据源优先前台房间（含未开播）。

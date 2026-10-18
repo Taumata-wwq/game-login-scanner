@@ -201,12 +201,14 @@ $mainActivity = Join-Path $gen "app/src/main/java/com/taumata/game_scanner/MainA
 $mainKt = @"
 package com.taumata.game_scanner
 
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import com.taumata.scanner.plugins.NotifyBridge
 
 class MainActivity : TauriActivity() {
     private var web: WebView? = null
@@ -226,6 +228,16 @@ class MainActivity : TauriActivity() {
         )
         super.onCreate(savedInstanceState)
 
+        // 通知「停止扫码」按钮 → 本 Activity → 前端。用回调注册避免持有 Activity 引用。
+        NotifyBridge.setStopScanCallback {
+            web?.post {
+                web?.evaluateJavascript(
+                    "(window.__gsStopScanFromNotification&&window.__gsStopScanFromNotification())",
+                    null,
+                )
+            }
+        }
+
         // 返回键全权由本 Activity 接管。绝不调用 Activity.finish()：
         // 那会触发 onStop -> Rust.stop() -> tao 事件循环退出 -> std::process::exit，
         // 而 exit 时静态析构 joinable std::thread 会 std::terminate（SIGABRT）。
@@ -243,11 +255,59 @@ class MainActivity : TauriActivity() {
                 }
             }
         })
+
+        // 冷启动即由通知带入（应用未运行 → 点通知直接启动本 Activity）：在
+        // onCreate 里就尝试派发一次跳转目标。
+        handleOpenTarget(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // 应用已在运行（singleTask + SINGLE_TOP）：通知点击只走到这里。
+        setIntent(intent)
+        handleOpenTarget(intent)
+    }
+
+    /**
+     * 通知点击携带的跳转目标（`live:<platform>:<room>`）→ 前端定位到该直播间。
+     *
+     * 用户从通知进来时最想要的就是"回到那个直播间"，而不是自己再翻侧栏去找
+     * （后台可能同时在扫多个房间）。前端函数不存在时静默忽略（例如启动早期）。
+     */
+    private fun handleOpenTarget(intent: Intent?) {
+        val target = intent?.getStringExtra(NotifyBridge.EXTRA_OPEN_TARGET) ?: return
+        if (target.isEmpty()) return
+        intent.removeExtra(NotifyBridge.EXTRA_OPEN_TARGET)  // 只消费一次，避免重建时重复跳
+        // 冷启动时 webview 可能尚未创建：短轮询等待就绪（最多约 3 秒），就绪后派发一次。
+        //
+        // 投递用 `window.decorView` 而非 TauriActivity 的 view：后者不存在（TauriActivity
+        // 未暴露该属性，真机编译期报 Unresolved reference: view）；decorView 一定已就绪。
+        var tries = 0
+        val probe = object : Runnable {
+            override fun run() {
+                val w = web
+                if (w == null) {
+                    if (tries++ < 30) window?.decorView?.postDelayed(this, 100)
+                    return
+                }
+                // 单引号转义：目标是内部生成的 `live:<platform>:<room>`，只含字母数字与冒号，
+                // 这里仍做一次替换以防万一（避免 JS 字符串注入）。
+                val safe = target.replace("'", "")
+                w.evaluateJavascript("window.__gsOpenTarget&&window.__gsOpenTarget('$safe')", null)
+            }
+        }
+        window?.decorView?.post(probe)
     }
 
     override fun onWebViewCreate(webView: WebView) {
         super.onWebViewCreate(webView)
         web = webView
+    }
+
+    override fun onDestroy() {
+        // 清掉静态回调，避免 Activity 重建后旧实例被 NotifyBridge 持有而泄漏。
+        NotifyBridge.clearStopScanCallback()
+        super.onDestroy()
     }
 }
 "@
@@ -525,6 +585,23 @@ if ($c -notmatch "com\.taumata\.scanner\.plugins\.ScreenCaptureService") {
     Write-Host "  + service 声明（com.taumata.scanner.plugins.ScreenCaptureService, mediaProjection）"
 } else {
     Write-Host "  = service 声明已存在"
+}
+
+# NotifyActionReceiver：承接常驻通知上「停止扫码」按钮的广播（2026-10-19 新增）。
+# exported=false：只由本应用的 PendingIntent 触发，不对外暴露（避免被第三方伪装广播
+# 触发停止扫码）。
+if ($c -notmatch "com\.taumata\.scanner\.plugins\.NotifyActionReceiver") {
+    $rcv = @(
+        '        <receiver',
+        '            android:name="com.taumata.scanner.plugins.NotifyActionReceiver"',
+        '            android:exported="false" />',
+        '    </application>'
+    ) -join $nl
+    $c = $c.Replace('    </application>', $rcv)
+    $changed = $true
+    Write-Host "  + receiver 声明（NotifyActionReceiver，通知动作广播）"
+} else {
+    Write-Host "  = receiver 声明已存在"
 }
 
 if ($changed) {

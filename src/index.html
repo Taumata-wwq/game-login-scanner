@@ -365,7 +365,9 @@
         </button>
       </div>
       <div class="dbody">
-        <div class="dsec">设置</div>
+        <!-- 设置项按用途分节：手机屏一屏放不下，分组后能快速定位；
+             `dsec` 是本项目既有的分节标题样式（与「日志」节同款）。 -->
+        <div class="dsec">通用</div>
         <div class="opt-row">
           <span class="lbl">登入名</span>
           <input class="txtin" id="displayName" type="text" maxlength="20" placeholder="游戏扫码器用户" autocomplete="off" />
@@ -375,6 +377,12 @@
           <label class="switch"><input type="checkbox" id="alwaysOnTop" /><span class="track"></span></label>
         </div>
         <div class="opt-row">
+          <span class="lbl">自动检查更新</span>
+          <label class="switch"><input type="checkbox" id="autoCheckUpdate" /><span class="track"></span></label>
+        </div>
+
+        <div class="dsec">扫码</div>
+        <div class="opt-row">
           <span class="lbl">扫码成功后自动退出</span>
           <label class="switch"><input type="checkbox" id="autoClose" /><span class="track"></span></label>
         </div>
@@ -382,9 +390,21 @@
           <span class="lbl">扫码成功后停止其他直播间扫码</span>
           <label class="switch"><input type="checkbox" id="stopOthersOnSuccess" /><span class="track"></span></label>
         </div>
+        <div class="opt-row">
+          <span class="lbl">显示区域帧率</span>
+          <div class="filter-seg" id="fpsSeg">
+            <button data-fps="30">30</button>
+            <button data-fps="60" class="on">60</button>
+            <button data-fps="120">120</button>
+          </div>
+        </div>
+
         <!-- 屏幕扫码相关（仅移动端有意义：桌面端没有「切到后台去扫游戏」的场景）。
              「启动时自动开启扫码」已移除——手机端启动即扫码会在用户还没选好账号/
-             直播间时就占用屏幕捕获与解码，弊大于利。 -->
+             直播间时就占用屏幕捕获与解码，弊大于利。
+             注意：`mb-only-row` 的 CSS 选择器是 `.opt-row.mb-only-row`（见 app.css），
+             故分节标题与行元素都必须各自带上 mb-only-row，否则该节在移动端也不显示。 -->
+        <div class="dsec mb-only-row">屏幕扫码</div>
         <div class="opt-row mb-only-row">
           <span class="lbl">扫描屏幕时自动切到后台
             <small>便于到游戏里扫二维码</small>
@@ -395,10 +415,12 @@
           <span class="lbl">回到应用后自动停止屏幕扫码</span>
           <label class="switch"><input type="checkbox" id="screenScanStopOnResume" /><span class="track"></span></label>
         </div>
-        <div class="opt-row">
-          <span class="lbl">自动检查更新</span>
-          <label class="switch"><input type="checkbox" id="autoCheckUpdate" /><span class="track"></span></label>
-        </div>
+        <!-- 屏幕共享控制已移除：移动端「屏幕扫码」是先授权再自动切后台，回前台时
+             会自动停止扫码并释放共享（见 app.js screenScanAutoBg 分支），系统状态栏
+             通知本身也带「停止共享」入口——应用内这一行既是重复入口，又因需先回前台
+             才能点到而常常是灰的，故删除。 -->
+
+        <div class="dsec">通知</div>
         <div class="opt-row">
           <span class="lbl">后台驻留通知
             <small>切到后台时在通知栏显示扫码状态</small>
@@ -411,18 +433,6 @@
           </span>
           <label class="switch"><input type="checkbox" id="notifyLiveStatus" /><span class="track"></span></label>
         </div>
-        <div class="opt-row">
-          <span class="lbl">显示区域帧率</span>
-          <div class="filter-seg" id="fpsSeg">
-            <button data-fps="30">30</button>
-            <button data-fps="60" class="on">60</button>
-            <button data-fps="120">120</button>
-          </div>
-        </div>
-        <!-- 屏幕共享控制已移除：移动端「屏幕扫码」是先授权再自动切后台，回前台时
-             会自动停止扫码并释放共享（见 app.js screenScanAutoBg 分支），系统状态栏
-             通知本身也带「停止共享」入口——应用内这一行既是重复入口，又因需先回前台
-             才能点到而常常是灰的，故删除。 -->
 
         <div class="dsec">日志
           <button class="btn ghost tiny" id="btnClearLog">清空</button>

@@ -227,13 +227,15 @@ fn frontend_log(level: String, msg: String) {
 // 由前端按设置开关（notify_persistent / notify_live_status）决定是否调用。
 
 /// 显示/更新后台常驻通知。
+///
+/// `target`：点击通知后要定位的目标（`live:<platform>:<room>`；空则只回主界面）。
 #[tauri::command]
-fn notify_persistent_show(title: String, text: String) {
+fn notify_persistent_show(title: String, text: String, target: Option<String>) {
     #[cfg(target_os = "android")]
-    crate::android::notify::show_persistent(&title, &text);
+    crate::android::notify::show_persistent(&title, &text, target.as_deref());
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (title, text);
+        let _ = (title, text, target);
     }
 }
 
@@ -245,8 +247,10 @@ fn notify_persistent_hide() {
 }
 
 /// 发一条可划掉的即时通知。`kind` 决定固定 id（同类事件覆盖，避免刷屏）。
+///
+/// `target`：点击通知后要定位的目标（`live:<platform>:<room>`；空则只回主界面）。
 #[tauri::command]
-fn notify_event(kind: String, title: String, text: String) {
+fn notify_event(kind: String, title: String, text: String, target: Option<String>) {
     #[cfg(target_os = "android")]
     {
         let id = match kind.as_str() {
@@ -254,11 +258,11 @@ fn notify_event(kind: String, title: String, text: String) {
             "live_status" => crate::android::notify::ids::LIVE_STATUS,
             _ => crate::android::notify::ids::SCAN_ERROR,
         };
-        crate::android::notify::notify_once(id, &title, &text);
+        crate::android::notify::notify_once(id, &title, &text, target.as_deref());
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (kind, title, text);
+        let _ = (kind, title, text, target);
     }
 }
 

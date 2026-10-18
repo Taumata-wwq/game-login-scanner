@@ -50,12 +50,14 @@ fn ready() -> bool {
 }
 
 /// 显示/更新常驻通知。未初始化时静默忽略（通知不是关键路径，不该因此报错）。
+///
+/// `target`：点击后要定位的目标（`live:<platform>:<room>`；None/空 → 只回主界面）。
 #[cfg(target_os = "android")]
-pub fn show_persistent(title: &str, text: &str) {
+pub fn show_persistent(title: &str, text: &str, target: Option<&str>) {
     if !ready() {
         return;
     }
-    use jni::objects::JValue;
+    use jni::objects::{JObject, JValue};
     use jni::{jni_sig, jni_str};
     let Some((vm, gref)) = BRIDGE.get().and_then(|o| o.as_ref()) else {
         return;
@@ -63,18 +65,27 @@ pub fn show_persistent(title: &str, text: &str) {
     let _ = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
         let jt = env.new_string(title)?;
         let jx = env.new_string(text)?;
+        // Kotlin 侧签名是 (String, String, String?)：无目标时传 null。
+        let jg = match target.filter(|s| !s.is_empty()) {
+            Some(t) => JObject::from(env.new_string(t)?),
+            None => JObject::null(),
+        };
         env.call_static_method(
             &**gref,
             jni_str!("showPersistent"),
-            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
-            &[JValue::Object(&jt), JValue::Object(&jx)],
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+            &[
+                JValue::Object(&jt),
+                JValue::Object(&jx),
+                JValue::Object(&jg),
+            ],
         )?;
         Ok(())
     });
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn show_persistent(_title: &str, _text: &str) {}
+pub fn show_persistent(_title: &str, _text: &str, _target: Option<&str>) {}
 
 /// 撤下常驻通知（回到前台 / 关掉开关时调用）。
 #[cfg(target_os = "android")]
@@ -96,12 +107,14 @@ pub fn hide_persistent() {
 pub fn hide_persistent() {}
 
 /// 发一条可划掉的即时通知（同一 id 覆盖上一条，避免刷屏）。
+///
+/// `target`：点击后要定位的目标（`live:<platform>:<room>`；None/空 → 只回主界面）。
 #[cfg(target_os = "android")]
-pub fn notify_once(id: i32, title: &str, text: &str) {
+pub fn notify_once(id: i32, title: &str, text: &str, target: Option<&str>) {
     if !ready() {
         return;
     }
-    use jni::objects::JValue;
+    use jni::objects::{JObject, JValue};
     use jni::{jni_sig, jni_str};
     let Some((vm, gref)) = BRIDGE.get().and_then(|o| o.as_ref()) else {
         return;
@@ -109,18 +122,27 @@ pub fn notify_once(id: i32, title: &str, text: &str) {
     let _ = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
         let jt = env.new_string(title)?;
         let jx = env.new_string(text)?;
+        let jg = match target.filter(|s| !s.is_empty()) {
+            Some(t) => JObject::from(env.new_string(t)?),
+            None => JObject::null(),
+        };
         env.call_static_method(
             &**gref,
             jni_str!("notifyOnce"),
-            jni_sig!("(ILjava/lang/String;Ljava/lang/String;)V"),
-            &[JValue::Int(id), JValue::Object(&jt), JValue::Object(&jx)],
+            jni_sig!("(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+            &[
+                JValue::Int(id),
+                JValue::Object(&jt),
+                JValue::Object(&jx),
+                JValue::Object(&jg),
+            ],
         )?;
         Ok(())
     });
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn notify_once(_id: i32, _title: &str, _text: &str) {}
+pub fn notify_once(_id: i32, _title: &str, _text: &str, _target: Option<&str>) {}
 
 /// 清除即时通知（按 id）。
 #[cfg(target_os = "android")]

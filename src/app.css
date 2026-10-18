@@ -640,6 +640,11 @@
   /* 「屏幕共享」行仅移动端可见（桌面端没有 MediaProjection）。 */
   .opt-row.mb-only-row { display: none; }
   html.mobile .opt-row.mb-only-row { display: flex; }
+  /* 同理：移动端专属的**分节标题**（如「屏幕扫码」节）在桌面端也要隐藏。
+     .dsec 自身没有 display 声明，上一条只命中 .opt-row，故需单独给 .dsec 一条。
+     .dsec 是 flex 容器（见其自身规则），故恢复时用 flex。 */
+  .dsec.mb-only-row { display: none; }
+  html.mobile .dsec.mb-only-row { display: flex; }
 
   /* ---- 摄像头扫码模式：中间显示区平滑扩展，覆盖账号 / 游戏区服区 ----
      保留顶栏（52px）与底部操作栏（64px），其余高度全部让给取景区。
