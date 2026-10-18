@@ -14,5 +14,6 @@ pub mod duplication;
 pub mod http_bridge;
 pub mod jni_bridge;
 pub mod mediacodec_decode;
+pub mod notify;
 pub mod screenshot;
 pub mod tunnel;

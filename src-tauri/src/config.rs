@@ -306,6 +306,24 @@ pub struct AppConfig {
     /// 扫码成功后自动停止其他直播间的扫码（默认开）。
     #[serde(default = "default_true")]
     pub stop_others_on_scan_success: bool,
+    /// 屏幕扫码时自动把应用切到后台（默认开）。
+    ///
+    /// 屏幕扫码必须切到游戏里才能扫到二维码，故默认自动切后台并提示用户；
+    /// 关掉则停留在应用内（用户自行切换，适合分屏/多任务场景）。
+    #[serde(default = "default_true")]
+    pub screen_scan_auto_bg: bool,
+    /// 回到应用后自动停止屏幕扫码（默认开）。
+    ///
+    /// 屏幕扫码的授权会一直挂着前台服务与常驻通知；回到应用通常意味着扫完了，
+    /// 默认顺手停掉并释放共享（关掉则保持捕获，便于反复切出/切回连续扫码）。
+    #[serde(default = "default_true")]
+    pub screen_scan_stop_on_resume: bool,
+    /// 切到后台时显示常驻通知（后台是否在扫码 + 正在扫码的直播间状态；默认开）。
+    #[serde(default = "default_true")]
+    pub notify_persistent: bool,
+    /// 直播间状态通知（扫码成功 / 下播等即时提醒；默认开）。
+    #[serde(default = "default_true")]
+    pub notify_live_status: bool,
     /// 启动后自动检查 GitHub Release 更新（发现新正式版：下载 → 启动安装包 →
     /// 关闭当前窗口；默认开）。
     #[serde(default = "default_true")]
@@ -368,6 +386,10 @@ impl Default for AppConfig {
             sidebar_w: None,
             game_col_w: None,
             stop_others_on_scan_success: true,
+            screen_scan_auto_bg: true,
+            screen_scan_stop_on_resume: true,
+            notify_persistent: true,
+            notify_live_status: true,
             auto_check_update: true,
             device_id: String::new(),
             device_fp: String::new(),

@@ -371,10 +371,6 @@
           <input class="txtin" id="displayName" type="text" maxlength="20" placeholder="游戏扫码器用户" autocomplete="off" />
         </div>
         <div class="opt-row">
-          <span class="lbl">启动时自动开启扫码</span>
-          <label class="switch"><input type="checkbox" id="autoLoginLast" /><span class="track"></span></label>
-        </div>
-        <div class="opt-row">
           <span class="lbl">窗口置顶</span>
           <label class="switch"><input type="checkbox" id="alwaysOnTop" /><span class="track"></span></label>
         </div>
@@ -386,9 +382,34 @@
           <span class="lbl">扫码成功后停止其他直播间扫码</span>
           <label class="switch"><input type="checkbox" id="stopOthersOnSuccess" /><span class="track"></span></label>
         </div>
+        <!-- 屏幕扫码相关（仅移动端有意义：桌面端没有「切到后台去扫游戏」的场景）。
+             「启动时自动开启扫码」已移除——手机端启动即扫码会在用户还没选好账号/
+             直播间时就占用屏幕捕获与解码，弊大于利。 -->
+        <div class="opt-row mb-only-row">
+          <span class="lbl">扫描屏幕时自动切到后台
+            <small>便于到游戏里扫二维码</small>
+          </span>
+          <label class="switch"><input type="checkbox" id="screenScanAutoBg" /><span class="track"></span></label>
+        </div>
+        <div class="opt-row mb-only-row">
+          <span class="lbl">回到应用后自动停止屏幕扫码</span>
+          <label class="switch"><input type="checkbox" id="screenScanStopOnResume" /><span class="track"></span></label>
+        </div>
         <div class="opt-row">
           <span class="lbl">自动检查更新</span>
           <label class="switch"><input type="checkbox" id="autoCheckUpdate" /><span class="track"></span></label>
+        </div>
+        <div class="opt-row">
+          <span class="lbl">后台驻留通知
+            <small>切到后台时在通知栏显示扫码状态</small>
+          </span>
+          <label class="switch"><input type="checkbox" id="notifyPersistent" /><span class="track"></span></label>
+        </div>
+        <div class="opt-row">
+          <span class="lbl">直播间状态通知
+            <small>扫码成功 / 下播等即时提醒</small>
+          </span>
+          <label class="switch"><input type="checkbox" id="notifyLiveStatus" /><span class="track"></span></label>
         </div>
         <div class="opt-row">
           <span class="lbl">显示区域帧率</span>

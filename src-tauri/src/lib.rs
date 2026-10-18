@@ -219,6 +219,49 @@ fn frontend_log(level: String, msg: String) {
     }
 }
 
+// ---------- 系统通知（Android；桌面为空实现） ----------
+//
+// 手机切到游戏里扫码时应用界面不可见，通知栏是唯一的状态出口：
+// - 常驻：切后台时显示「后台是否在扫码 / 正在扫哪些直播间」，回前台撤下；
+// - 即时：扫码成功、直播间下播等一次性提醒（可划掉）。
+// 由前端按设置开关（notify_persistent / notify_live_status）决定是否调用。
+
+/// 显示/更新后台常驻通知。
+#[tauri::command]
+fn notify_persistent_show(title: String, text: String) {
+    #[cfg(target_os = "android")]
+    crate::android::notify::show_persistent(&title, &text);
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (title, text);
+    }
+}
+
+/// 撤下后台常驻通知（回到前台时调用）。
+#[tauri::command]
+fn notify_persistent_hide() {
+    #[cfg(target_os = "android")]
+    crate::android::notify::hide_persistent();
+}
+
+/// 发一条可划掉的即时通知。`kind` 决定固定 id（同类事件覆盖，避免刷屏）。
+#[tauri::command]
+fn notify_event(kind: String, title: String, text: String) {
+    #[cfg(target_os = "android")]
+    {
+        let id = match kind.as_str() {
+            "scan_success" => crate::android::notify::ids::SCAN_SUCCESS,
+            "live_status" => crate::android::notify::ids::LIVE_STATUS,
+            _ => crate::android::notify::ids::SCAN_ERROR,
+        };
+        crate::android::notify::notify_once(id, &title, &text);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (kind, title, text);
+    }
+}
+
 /// 记住「最后观看的直播间」（`{platform}:{room}`；空串 = 回到桌面）。
 /// 切换主画面 / 退出直播模式时调用；下次启动据此恢复。
 #[tauri::command]
@@ -280,6 +323,29 @@ fn probe_http(url: String) -> String {
     match crate::http::probe_http(&url) {
         Ok(s) => s,
         Err(e) => format!("请求失败: {e}"),
+    }
+}
+
+/// 请求通知权限（Android 13+ 必需；其他平台/低版本直接成功）。
+///
+/// POST_NOTIFICATIONS 在清单里已声明，但从未在运行时请求——Android 13 起默认拒绝，
+/// 不请求就发不出任何通知。前端在首次打开设置面板时调用（幂等）。
+#[tauri::command]
+async fn request_notify_permission() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let h = screen_capture_plugin::handle().ok_or("屏幕捕获插件未注册")?;
+        h.run_mobile_plugin_async::<serde_json::Value>(
+            "requestNotifyPermission",
+            serde_json::json!({}),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("请求通知权限失败：{e}"))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(())
     }
 }
 
@@ -2390,6 +2456,10 @@ pub fn run() {
             save_config,
             set_options,
             frontend_log,
+            notify_persistent_show,
+            notify_persistent_hide,
+            notify_event,
+            request_notify_permission,
             set_last_live,
             set_ui_widths,
             get_app_version,
@@ -2550,6 +2620,12 @@ pub fn run() {
                 }
             }
             // 启动自动登录：使用上次使用的账号并开始扫描（需已登录任一渠道）。
+            //
+            // **移动端已移除该设置项**（2026-10-18 用户需求）：手机端启动即扫码会在
+            // 用户还没选好账号/直播间时就抢占屏幕捕获与解码，弊大于利。故 Android 上
+            // 只保留字段的读写兼容（旧配置仍能反序列化），但**不再据此自动开扫**——
+            // 否则升级后的旧配置会把已删掉的功能"复活"。桌面端行为不变。
+            #[cfg(not(target_os = "android"))]
             if state
                 .config
                 .lock()

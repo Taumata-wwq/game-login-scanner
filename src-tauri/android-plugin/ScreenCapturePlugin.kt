@@ -9,6 +9,7 @@ import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -24,7 +25,14 @@ import app.tauri.plugin.Plugin
  *
  * 帧数据面不经此插件（高频路径走 ScreenCaptureBridge 的 native 方法）。
  */
-@TauriPlugin
+@TauriPlugin(
+    permissions = [
+        app.tauri.annotation.Permission(
+            strings = [android.Manifest.permission.POST_NOTIFICATIONS],
+            alias = "notifications",
+        ),
+    ],
+)
 class ScreenCapturePlugin(private val activity: Activity) : Plugin(activity) {
 
     init {
@@ -36,6 +44,8 @@ class ScreenCapturePlugin(private val activity: Activity) : Plugin(activity) {
         // 剪贴板桥需要 Context：注册时注入 Application Context 并触发其 JNI 注册
         // （扫码「剪贴板优先」路径；2026-10-17 新增）。
         ClipboardBridge.attach(activity.applicationContext)
+        // 通知桥同样需要 Context（建渠道 + 发常驻/即时通知；2026-10-18 新增）。
+        NotifyBridge.attach(activity.applicationContext)
     }
 
     @Command
@@ -72,6 +82,35 @@ class ScreenCapturePlugin(private val activity: Activity) : Plugin(activity) {
         val obj = JSObject()
         obj.put("capturing", ScreenCaptureService.isRunning)
         invoke.resolve(obj)
+    }
+
+    /**
+     * 请求通知权限（Android 13+ 必需；低版本直接 resolve）。
+     *
+     * POST_NOTIFICATIONS 在清单里早已声明，但**从未在运行时请求**——Android 13 起
+     * 该权限默认拒绝，不请求就发不出任何通知（扫码状态/结果通知全部静默失败）。
+     * 这里用一个 PermissionAlias 走 Tauri 的权限回调机制请求它。
+     */
+    @Command
+    fun requestNotifyPermission(invoke: Invoke) {
+        if (hasNotifyPermission()) {
+            invoke.resolve()
+        } else {
+            requestPermissionForAlias("notifications", invoke, "notifyPermissionResult")
+        }
+    }
+
+    @PermissionCallback
+    fun notifyPermissionResult(invoke: Invoke) {
+        // 无论用户同意与否都 resolve：通知是「锦上添花」，被拒绝不该阻断扫码主流程
+        // （前端只是少一个反馈渠道；后台扫码本身照常运行）。
+        invoke.resolve()
+    }
+
+    private fun hasNotifyPermission(): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return true
+        return activity.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
     /** 把应用切到后台（屏幕扫码后自动切出，让用户去游戏里对着二维码）。 */

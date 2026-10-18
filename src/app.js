@@ -11,6 +11,12 @@
   let stoppingTargets = new Set();
   // 「扫码成功后自动停止其他直播间」（设置项；renderOptions 从配置同步）。
   let stopOthersOnScanSuccess = true;
+  // 屏幕扫码：切后台 / 回前台自动停（设置项，默认开；renderOptions 从配置同步）。
+  let screenScanAutoBgEnabled = true;
+  let screenScanStopOnResume = true;
+  // 通知开关（设置项，默认开）。
+  let notifyPersistent = true;
+  let notifyLiveStatus = true;
   // 移动端「摄像头扫码」取景模式：中间显示区扩展覆盖账号 / 游戏区服区。
   // 纯 UI 模式——进入/退出都不触碰任何扫描会话（直播 / 屏幕各路照常运行）。
   let cameraMode = false;
@@ -149,7 +155,19 @@
   bindWinButton('btnClose', () => win('close'));
 
   // ---------- 弹窗 ----------
-  function setToolsOpen(open) { $('toolsOverlay').hidden = !open; $('btnTools').classList.toggle('open', open); }
+  function setToolsOpen(open) {
+    $('toolsOverlay').hidden = !open;
+    $('btnTools').classList.toggle('open', open);
+    // 打开设置面板是请求通知权限的合适时机：用户此刻正看着通知相关的开关，
+    // 语境明确（Android 13+ 不请求就发不出任何通知）。
+    if (open) requestNotifyPermissionOnce();
+  }
+  let notifyPermissionAsked = false;
+  function requestNotifyPermissionOnce() {
+    if (notifyPermissionAsked) return;
+    notifyPermissionAsked = true;
+    invoke('request_notify_permission').catch(() => {});
+  }
   document.querySelectorAll('[data-close]').forEach((b) => {
     b.addEventListener('click', () => {
       // 移动端工具面板为滑动抽屉（常驻显示）：交由抽屉模型收回，勿置 hidden。
@@ -1411,6 +1429,80 @@
   function activeSession() { return liveSessions.find((s) => s.id === activeLiveId) || null; }
   function livePlatformLabel(p) { return (p === 'douyin') ? '抖音' : 'B站'; }
 
+  // ---------- 通知栏（Android；桌面为空实现） ----------
+  //
+  // 手机切到游戏里扫码时应用界面不可见——通知栏是唯一的状态出口：
+  //   常驻：后台是否在扫码 / 正在扫哪些直播间（回前台立刻撤下）；
+  //   即时：扫码成功、直播间开播下播等一次性提醒（可划掉）。
+  //
+  // 均受设置开关控制（notify_persistent / notify_live_status），且整条链路静默降级：
+  // 通知失败不该影响扫码本身，故所有 invoke 都吞掉异常。
+  let persistentNotifyShown = false;
+
+  /// 后台扫码状态的文案：正在扫哪些目标（屏幕 / 各直播间）与各自游戏。
+  function scanStatusText() {
+    const parts = [];
+    if (scanningTargets.has('screen')) parts.push('屏幕 · ' + gameLabel(curGameId()));
+    for (const t of scanningTargets) {
+      if (!t.startsWith('live:')) continue;
+      const id = t.slice(5);
+      const s = liveSessions.find((x) => x.id === id);
+      const room = liveRooms.find((r) => (r.platform + ':' + r.room) === id);
+      const name = (room && (room.note || room.title)) || (s && s.room) || id;
+      parts.push(name);
+    }
+    // 摄像头取景也算一路（虽不占 scanningTargets 的语义，但对用户是「在扫码」）。
+    if (cameraMode) parts.push('摄像头');
+    return parts;
+  }
+
+  /// 同步常驻通知：后台且有扫码任务时显示/更新，否则撤下。
+  function syncPersistentNotification() {
+    if (!window.__ANDROID__) return;
+    if (!notifyPersistent || !document.hidden) {
+      if (persistentNotifyShown) {
+        invoke('notify_persistent_hide').catch(() => {});
+        persistentNotifyShown = false;
+      }
+      return;
+    }
+    const parts = scanStatusText();
+    const scanning = parts.length > 0;
+    const title = scanning ? '正在扫码' : '扫码器在后台';
+    const text = scanning ? parts.join(' · ') : '当前没有进行中的扫码任务';
+    invoke('notify_persistent_show', { title, text }).catch(() => {});
+    persistentNotifyShown = true;
+  }
+
+  /// 发一条即时通知。`kind` ∈ scan_success | live_status | scan_error。
+  function notifyEvent(kind, target, message) {
+    if (!window.__ANDROID__) return;
+    if (!notifyLiveStatus) return;
+    let title = '扫码器';
+    let text = message || '';
+    if (kind === 'success') {
+      title = '扫码成功';
+      if (target === 'screen') text = '屏幕扫码已识别并确认登录';
+      else if (target === 'camera') text = '摄像头扫码已识别并确认登录';
+      else {
+        const id = String(target).startsWith('live:') ? String(target).slice(5) : '';
+        const room = liveRooms.find((r) => (r.platform + ':' + r.room) === id);
+        const name = (room && (room.note || room.title)) || id;
+        text = (name ? name + '：' : '') + '已识别并确认登录';
+      }
+    } else if (kind === 'stopped') {
+      title = '扫码已停止';
+      text = message || '已停止扫描';
+    } else if (kind === 'error' || kind === 'failed') {
+      title = '扫码失败';
+      text = message || '扫描过程中出现问题';
+    } else {
+      return; // started 等过程事件不发即时通知，避免刷屏
+    }
+    invoke('notify_event', { kind: kind === 'success' ? 'scan_success' : 'live_status', title, text })
+      .catch(() => {});
+  }
+
   // 更新视窗信息栏（标题/副标题）。数据源优先前台房间（含未开播）。
   function updateVpInfo() {
     const ttl = $('vpTitle'), sub = $('vpSub');
@@ -1815,6 +1907,14 @@
       local.live_status = p.live_status;
       log((local.nickname || local.room) + (went_live ? ' 已开播' : ' 已下播'),
         went_live ? 'success' : 'info');
+      // 直播间开播/下播：常驻通知里的直播间清单要跟着变（用户可能在后台扫码），
+      // 并按设置发一条可划掉的即时通知。
+      syncPersistentNotification();
+      if (notifyLiveStatus) {
+        const rid = p.platform + ':' + p.room;
+        notifyEvent('live_status', rid, (local.nickname || local.title || local.room) +
+          (went_live ? ' 已开播' : ' 已下播'));
+      }
       renderLiveTabs();
       if ((p.platform + ':' + p.room) === activeLiveId) updateVpInfo();
       if (went_live) {
@@ -2275,14 +2375,21 @@
       panStart = null;
       if (dragging) { dragging = false; canvas.classList.remove('dragging'); }
       stopPreview();
+      // 切到后台：显示常驻通知（后台是否在扫码 / 正在扫哪些直播间）。
+      syncPersistentNotification();
     } else {
       startPreview();
-      // 屏幕扫码切后台后用户切回：自动停止屏幕扫码**并释放屏幕共享**。
+      // 回前台：立刻撤下常驻通知（用户已能看到界面，通知栏没有必要再占位）。
+      syncPersistentNotification();
+      // 屏幕扫码切后台后用户切回：按设置决定是否自动停止屏幕扫码并释放共享。
       //
       // 只停扫码循环不够：MediaProjection 仍在取帧，通知栏持续显示「正在共享屏幕」，
       // 却没有消费者——既费电也违背用户的停止预期（真机实测：日志已写「自动停止
       // 屏幕扫码」，设置面板的「屏幕共享」仍显示「共享中」）。
-      if (screenScanAutoBg) {
+      //
+      // 该行为现由设置项 `screen_scan_stop_on_resume` 控制（默认开）：关掉后保持
+      // 捕获与扫码，适合反复切出/切回连续扫多个码的场景。
+      if (screenScanAutoBg && screenScanStopOnResume) {
         screenScanAutoBg = false;
         const wasScanning = scanningTargets.has("screen") || stoppingTargets.has("screen");
         if (wasScanning) stopScanTarget("screen");
@@ -2779,11 +2886,24 @@
 
   function renderOptions() {
     if (!config) return;
-    $('autoLoginLast').checked = !!config.auto_login_last;
     $('alwaysOnTop').checked = !!config.always_on_top;
     $('autoClose').checked = !!config.auto_close;
     $('stopOthersOnSuccess').checked = config.stop_others_on_scan_success !== false;
     stopOthersOnScanSuccess = config.stop_others_on_scan_success !== false;
+    // 屏幕扫码两个开关（默认开；`!== false` 兼容旧配置缺字段）。
+    screenScanAutoBgEnabled = config.screen_scan_auto_bg !== false;
+    screenScanStopOnResume = config.screen_scan_stop_on_resume !== false;
+    const ssb = $('screenScanAutoBg');
+    if (ssb) ssb.checked = screenScanAutoBgEnabled;
+    const ssr = $('screenScanStopOnResume');
+    if (ssr) ssr.checked = screenScanStopOnResume;
+    // 通知开关（默认开）。
+    notifyPersistent = config.notify_persistent !== false;
+    notifyLiveStatus = config.notify_live_status !== false;
+    const np = $('notifyPersistent');
+    if (np) np.checked = notifyPersistent;
+    const nl = $('notifyLiveStatus');
+    if (nl) nl.checked = notifyLiveStatus;
     $('autoCheckUpdate').checked = config.auto_check_update !== false;
     $('displayName').value = config.display_name || '';
     // 显示帧率页签（30/60/120）。
@@ -2805,13 +2925,42 @@
   }
 
   function bindOptions() {
-    $('autoLoginLast').addEventListener('change', (e) => saveCfg({ auto_login_last: e.target.checked }));
     $('alwaysOnTop').addEventListener('change', (e) => saveCfg({ always_on_top: e.target.checked }));
     $('autoClose').addEventListener('change', (e) => saveCfg({ auto_close: e.target.checked }));
     $('stopOthersOnSuccess').addEventListener('change', (e) => {
       stopOthersOnScanSuccess = e.target.checked;
       saveCfg({ stop_others_on_scan_success: e.target.checked });
     });
+    const ssbEl = $('screenScanAutoBg');
+    if (ssbEl) {
+      ssbEl.addEventListener('change', (e) => {
+        screenScanAutoBgEnabled = e.target.checked;
+        saveCfg({ screen_scan_auto_bg: e.target.checked });
+      });
+    }
+    const ssrEl = $('screenScanStopOnResume');
+    if (ssrEl) {
+      ssrEl.addEventListener('change', (e) => {
+        screenScanStopOnResume = e.target.checked;
+        saveCfg({ screen_scan_stop_on_resume: e.target.checked });
+      });
+    }
+    const npEl = $('notifyPersistent');
+    if (npEl) {
+      npEl.addEventListener('change', (e) => {
+        notifyPersistent = e.target.checked;
+        saveCfg({ notify_persistent: e.target.checked });
+        // 立即生效：关掉时撤下常驻通知，打开且正在扫码时补上。
+        syncPersistentNotification();
+      });
+    }
+    const nlEl = $('notifyLiveStatus');
+    if (nlEl) {
+      nlEl.addEventListener('change', (e) => {
+        notifyLiveStatus = e.target.checked;
+        saveCfg({ notify_live_status: e.target.checked });
+      });
+    }
     $('autoCheckUpdate').addEventListener('change', (e) => saveCfg({ auto_check_update: e.target.checked }));
     // 关于弹窗：链接用系统默认浏览器打开；「检查更新」手动触发一次检查。
     const aboutOverlay = $('aboutOverlay');
@@ -2927,6 +3076,15 @@
           }
         }
         if (!quiet) log(p.message || '', p.type === 'started' ? 'info' : (p.type || 'info'));
+        // 常驻通知要跟着扫码状态走：用户可能**已经**在后台（去游戏里扫码了），
+        // 此时界面不再有 visibilitychange，若不在这里主动刷新，通知栏就会一直停在
+        // 「没有进行中的扫码任务」——正是最需要它准确的时候。
+        syncPersistentNotification();
+        // 通知栏提醒（仅 Android；由设置项 notify_live_status 控制）：
+        // 界面此时多半在后台（去游戏里扫码了），通知是唯一可见的反馈渠道。
+        if (notifyLiveStatus && !quiet) {
+          notifyEvent(p.type, t, p.message || '');
+        }
       });
       // 更新检查结果（自动检查/手动检查共用：把结果写进日志面板）。
       // Android 的「发现新版本」不带安装包，只带 Release 页面 url——手动检查时
@@ -3058,6 +3216,9 @@
     function closeLeft() { settleSwipe(0); }
     function openRight() {
       settleSwipe(-drawerW());
+      // 与桌面端一致：打开设置时顺带请求一次通知权限（幂等，见
+      // requestNotifyPermissionOnce）。
+      if (typeof requestNotifyPermissionOnce === "function") requestNotifyPermissionOnce();
     }
     function closeRight() { settleSwipe(0); }
     window.closeLeft = closeLeft;
@@ -3252,10 +3413,16 @@
       }
       setTimeout(() => {
         $("btnStart").click();
-        // 屏幕扫码需用户切到游戏/其它应用才能扫到二维码：自动把应用切到后台。
-        vpToast("已开启屏幕扫码，请移动到其他应用扫描二维码");
-        screenScanAutoBg = true;
-        invoke("move_to_back").catch(() => {});
+        // 屏幕扫码需用户切到游戏/其它应用才能扫到二维码。是否自动切后台由设置项
+        // `screen_scan_auto_bg` 控制（默认开）：关掉则停在应用内，由用户自行切换
+        // （分屏 / 多任务场景）。
+        if (screenScanAutoBgEnabled) {
+          vpToast("已开启屏幕扫码，请移动到其他应用扫描二维码");
+          screenScanAutoBg = true;
+          invoke("move_to_back").catch(() => {});
+        } else {
+          vpToast("已开启屏幕扫码，请切换到游戏后返回本应用停止扫码");
+        }
       }, 50);
     });
     // --- 摄像头扫码取景模式（进入 / 退出） ---
