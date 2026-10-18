@@ -48,6 +48,10 @@ node_modules/
 *.json.tmp
 *.json.corrupt.*
 
+# Python 字节码缓存（scripts/android/check_channel_deps.py 运行后产生）
+__pycache__/
+*.pyc
+
 # 编辑器 / 系统
 .vscode/
 .idea/

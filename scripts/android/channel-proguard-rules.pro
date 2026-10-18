@@ -55,7 +55,24 @@
 -dontwarn sun.security.**
 -keep class sun.security.** { *; }
 
--dontwarn com.google.**
+# ⚠️ 收窄说明（2026-10-18）：
+# `-dontwarn com.google.**` 原本是整包豁免，把 `com.google.protobuf.*` 这类**必需**的
+# 运行时也一起放过了——构建照常通过，但打进去的类在 ART 上解析不到父类，
+# 运行期抛 NoClassDefFoundError（小米「添加账号」闪退的真因）。
+# 现改为**逐包**豁免：只放过渠道 SDK 里真正可选/反射才用到的第三方包，
+# 让 `com.google.protobuf` / `com.google.gson` 这类必需依赖在缺失时**构建期就报错**。
+#
+# 必需（不可再豁免；缺失即构建失败）：
+#   com.google.protobuf.* —— 小米 mio_sdk_base 的生成类父类链（已显式引入 protobuf-java）
+#   com.google.gson.*     —— 小米 HyUtils/MiCommplatform 等 15 个类（已显式引入 gson）
+#   com.google.android.gms.ads.identifier.* —— 广告标识（渠道 SDK 反射调用）
+-dontwarn com.google.android.gms.**
+-dontwarn com.google.android.play.**
+-dontwarn com.google.firebase.**
+-dontwarn com.google.common.**
+-dontwarn com.google.errorprone.**
+-dontwarn com.google.j2objc.**
+-dontwarn com.google.api.client.**
 -keep class com.google.** { *;}
 
 -dontwarn cn.leancloud.**
@@ -103,7 +120,16 @@
 
 -keepattributes InnerClasses,Signature,Exceptions,Deprecated,*Annotation*
 -dontwarn android.**
--dontwarn com.google.**
+# 同文件上方 `-dontwarn com.google.**` 的收窄理由同样适用于此处（这是第二段来源的
+# 规则块）：保留 -keep（只是别裁剪，无副作用），但**不再整包豁免警告**，让
+# protobuf / gson 等必需依赖缺失时在构建期暴露。
+-dontwarn com.google.android.gms.**
+-dontwarn com.google.android.play.**
+-dontwarn com.google.firebase.**
+-dontwarn com.google.common.**
+-dontwarn com.google.errorprone.**
+-dontwarn com.google.j2objc.**
+-dontwarn com.google.api.client.**
 -keep class android.** {*;}
 -keep class com.google.** {*;}
 -keep class com.android.** {*;}
