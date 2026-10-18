@@ -1554,9 +1554,19 @@
   let successMergeTimer = null;
   let successMergeTargets = [];
 
+  // 通知观测计数（供排障与自动化验证；`window.__gsNotifyStats` 可读）。
+  // 现场排查「到底发没发通知 / 合并了几条」时，比翻 logcat 更直接。
+  window.__gsNotifyStats = {
+    queued: 0,      // 进入合并队列的成功次数
+    flushes: 0,     // 实际发出的成功通知条数
+    merged: 0,      // 被合并（即一条通知覆盖多个目标）的次数
+    lastTargets: [],// 最近一次 flush 的目标列表
+  };
+
   /// 把一次扫码成功并入待发队列；窗口结束后统一发一条（单条则直述该目标）。
   function queueSuccessNotification(target) {
     if (!successMergeTargets.includes(target)) successMergeTargets.push(target);
+    window.__gsNotifyStats.queued++;
     if (successMergeTimer !== null) return;
     successMergeTimer = setTimeout(() => {
       const targets = successMergeTargets;
@@ -1569,6 +1579,11 @@
   /// 发出合并后的成功通知。
   function flushSuccessNotification(targets) {
     if (!targets.length) return;
+    // 统计：本次发出的条数与是否发生了合并（自动化验证与现场排障都用它）。
+    const st = window.__gsNotifyStats;
+    st.flushes++;
+    if (targets.length > 1) st.merged++;
+    st.lastTargets = targets.slice();
     let title = '扫码成功';
     let text = '';
     let openTarget = '';
