@@ -605,7 +605,16 @@ if ($c -notmatch "com\.taumata\.scanner\.plugins\.NotifyActionReceiver") {
     $changed = $true
     Write-Host "  + receiver 声明（NotifyActionReceiver，通知动作广播）"
 } else {
-    Write-Host "  = receiver 声明已存在"
+    # 声明已存在也可能 `exported` 被改成 true（例如排障时临时放开过）——
+    # 仅凭"名字出现过"就跳过会让错误的 exported 一直留在包里，故这里显式纠正回 false。
+    $rcvPat = '(?s)(NotifyActionReceiver[^>]*?android:exported=")true(")'
+    if ($c -match $rcvPat) {
+        $c = $c -replace $rcvPat, '${1}false${2}'
+        $changed = $true
+        Write-Host "  ~ receiver 声明已存在，但 exported 被改为 true —— 已纠正回 false"
+    } else {
+        Write-Host "  = receiver 声明已存在（exported=false）"
+    }
 }
 
 if ($changed) {
