@@ -898,11 +898,10 @@ fn select_account(
         .config
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // set_current 内部会清掉该游戏的渠道账号选择（两处「当前账号」不能并存）。
     if !cfg.set_current(&game, channel, &uid) {
         return Err("账号不存在".to_string());
     }
-    // 选中 B服 / 官服账号时清掉该游戏的渠道账号选择，避免两处「当前账号」并存。
-    cfg.active_channel.remove(&game);
     let _ = cfg.save();
     drop(cfg);
     // 切换到 B 服账号时立即后台预校验（扫描确认零等待；失败提前暴露）。

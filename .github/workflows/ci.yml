@@ -20,7 +20,7 @@ jobs:
         # 真实运行用例（此前因无测试目标而空转）。
         # 同日恢复 [lib] test=true（watch.rs / lib.rs 内联测试重新执行），并新增
         # [[test]] bench_qr_live（required-features = "bench-qr"，CI 不启用 → 不参与）。
-        # 当前共 100 个用例（lib 4 + smoke 1 + unit 95）。
+        # 当前共 107 个用例（lib 11 + smoke 1 + unit 95）。
         uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Cache cargo

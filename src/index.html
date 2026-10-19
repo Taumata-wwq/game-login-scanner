@@ -420,14 +420,17 @@
              通知本身也带「停止共享」入口——应用内这一行既是重复入口，又因需先回前台
              才能点到而常常是灰的，故删除。 -->
 
-        <div class="dsec">通知</div>
-        <div class="opt-row">
+        <!-- 通知相关（仅 Android 有效）：通知实现全部走 Android 通知栏（NotifyBridge），
+             app.js 的两个通知函数首行就是 `if (!window.__ANDROID__) return;`，桌面端这两行
+             开关点开也毫无效果，纯属噪音，故与「屏幕扫码」同法加 mb-only-row 只在移动端显示。 -->
+        <div class="dsec mb-only-row">通知</div>
+        <div class="opt-row mb-only-row">
           <span class="lbl">后台驻留通知
             <small>切到后台时在通知栏显示扫码状态</small>
           </span>
           <label class="switch"><input type="checkbox" id="notifyPersistent" /><span class="track"></span></label>
         </div>
-        <div class="opt-row">
+        <div class="opt-row mb-only-row">
           <span class="lbl">直播间状态通知
             <small>扫码成功 / 下播等即时提醒</small>
           </span>
@@ -465,6 +468,7 @@
         </div>
         <div class="about-line">
           作者 <a class="pi-link" data-url="https://github.com/Taumata-wwq">Taumata-wwq</a> ·
+          B 站 <a class="pi-link" data-url="https://space.bilibili.com/24176056">Taumata°</a> ·
           仓库 <a class="pi-link" data-url="https://github.com/Taumata-wwq/game-login-scanner">GitHub</a> ·
           许可证 MIT（第三方依赖许可见 THIRD-PARTY-NOTICES）
         </div>

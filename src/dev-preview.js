@@ -55,11 +55,13 @@
     if (ch === "official") return cfg.official_accounts;
     return cfg.hypergryph_accounts;
   }
+  // 与后端一致：「当前账号」全局唯一——选中官服/B 服时清掉渠道账号选择。
   function setActive(ch, game, key) {
     if (ch === "bilibili") cfg.active_bili[game] = key;
     else if (ch === "official") cfg.active_official[game] = key;
     else cfg.active_hypergryph[game] = key;
     cfg.game_channel[game] = ch;
+    if (cfg.active_channel) delete cfg.active_channel[game];
   }
   function liveIndex(platform, room) {
     for (var i = 0; i < cfg.live_history.length; i++) {
@@ -216,6 +218,8 @@
               if (!hit2) return reject("账号不存在");
               cfg.active_channel = cfg.active_channel || {};
               cfg.active_channel[g] = { channel: ckey, uid: args.uid };
+              // 与后端一致：选中渠道账号时清掉 B服/官服渠道选择（两种指向不能并存）。
+              cfg.game_channel[g] = null;
               return Promise.resolve();
             }
             var list = acctList(args.channel);
@@ -308,9 +312,10 @@
               cred: "mock", alias: "", remark: "", last_login_succ: true, last_used_at: nowSec()
             });
             console.log("[dev-preview] 已添加渠道账号 " + cuid + "（" + cch + "）");
-            // 与真实后端一致：登录即选中该账号。
+            // 与真实后端一致：登录即选中该账号，并清掉 B服/官服渠道指向。
             cfg.active_channel = cfg.active_channel || {};
             cfg.active_channel[cg] = { channel: cch, uid: cuid };
+            cfg.game_channel[cg] = null;
             return Promise.resolve({ channel: cch, channel_label: "预览渠道", uid: cuid, name: "预览渠道号 " + cuid });
           }
           // --- B 站 SDK 授权登录（Android）：预览环境直接"成功" ---

@@ -257,15 +257,21 @@
   // 第三方渠道账号（ch 形如 'channel:xiaomi'）。
   function isChannelAcct(ch) { return ch.startsWith('channel:'); }
   // 是否「当前账号」：该游戏该渠道的激活标识匹配。
+  //
+  // 「当前账号」全局唯一：第三方渠道账号与官服/B 服互斥。后端在选中任一方时都会
+  // 清掉另一方的指向（config.rs 的 set_current_channel / upsert_bili / upsert_official
+  // 与 lib.rs 的 select_account），这里再做一次互斥，保证旧配置里两个字段同时有值时
+  // 也只高亮一个（升级后不必等用户重新点一次）。
   function isCurrentAccount(ch, key) {
     if (!config) return false;
-    // 渠道账号的「当前账号」机制待确认路由接入（后续版本）。
-    if (isChannelAcct(ch)) {
-      const sel = (config.active_channel || {})[curGameId()];
-      return !!sel && sel.channel === ch.slice(8) && sel.uid === key;
-    }
     const g = curGameId();
     if (ch === 'hypergryph') return (config.active_hypergryph || {})[g] === key;
+    if (isChannelAcct(ch)) {
+      const sel = (config.active_channel || {})[g];
+      return !!sel && sel.channel === ch.slice(8) && sel.uid === key;
+    }
+    // 官服 / B 服：该游戏已选中第三方渠道账号时，两者都不再是「当前账号」。
+    if ((config.active_channel || {})[g]) return false;
     const curCh = (config.game_channel || {})[g];
     return curCh === ch && activeUidOf(ch) === key;
   }
@@ -345,14 +351,24 @@
       return;
     }
     // 恢复目标游戏上次的渠道；不支持时由 renderFilter 回退。
-    const g = gameMeta(id);
-    const saved = (config.game_channel || {})[id];
-    if (g.hyper) filter = 'hypergryph';
-    else if (saved) filter = saved;
+    filter = initialFilterForGame(id);
     renderGame();
     renderAll();
     if (window.__MOBILE__) closeMGameOverlay();
     log('已切换到 ' + gameLabel(id), 'info');
+  }
+
+  // 打开某游戏时初始展示哪个渠道的账号列表：优先「当前选中的第三方渠道账号」，
+  // 其次上次使用的渠道（game_channel），都没有则回退到官服/B 服。
+  // 必须在两处共用（启动恢复、切换游戏），否则渠道账号被选中后 game_channel 为
+  // 空，列表会停在官服/B 服上，看不到那个已被选中的渠道账号。
+  function initialFilterForGame(gid) {
+    const g = gameMeta(gid);
+    if (g.hyper) return 'hypergryph';
+    const sel = (config && (config.active_channel || {})[gid]) || null;
+    if (sel && g.id === 'bh3') return 'channel:' + sel.channel;
+    const saved = (config && (config.game_channel || {})[gid]) || null;
+    return saved || filter;
   }
 
   function renderFilter() {
@@ -3225,11 +3241,7 @@
     }
     try { config = await invoke('get_config'); } catch (e) { config = null; log('加载配置失败: ' + e, 'error'); }
     if (config) {
-      const gid = config.current_game || 'bh3';
-      const g = gameMeta(gid);
-      const saved = (config.game_channel || {})[gid];
-      if (g.hyper) filter = 'hypergryph';
-      else if (saved) filter = saved;
+      filter = initialFilterForGame(config.current_game || 'bh3');
     }
     // 恢复界面列宽（侧栏 / 游戏列；拖动结束落盘，见 set_ui_widths）。
     if (config && config.sidebar_w) {

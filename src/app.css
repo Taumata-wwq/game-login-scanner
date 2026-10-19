@@ -190,8 +190,12 @@
     font-size: 9.5px; font-weight: 600; color: var(--faint);
     letter-spacing: 0.1em; text-transform: uppercase;
   }
+  /* 右侧的横线；flex:1 吃掉全部剩余空间，把分节里的按钮顶到最右。 */
   .dsec::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-  .dsec .btn { margin-left: auto; }
+  /* 按钮必须排在 ::after **之前**（order:1）才能被顶到右端——::after 是生成内容，
+     永远排在 DOM 元素之后；若按钮留在默认 order，横线 flex:1 只会在按钮右侧膨胀，
+     按钮反而紧贴标题文字（此前「清空」贴线的根因）。 */
+  .dsec .btn { order: 1; margin-left: auto; }
   .opt-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .opt-row .lbl { font-size: 11px; flex: 0 0 auto; }
   /* 设置区内的登入名输入框：占据行内剩余空间。 */

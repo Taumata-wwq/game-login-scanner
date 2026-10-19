@@ -426,6 +426,12 @@ impl AppConfig {
     }
 
     /// 把某渠道账号设为该游戏的当前账号（账号必须已存在）。
+    ///
+    /// 选中渠道账号时**清掉**该游戏的 B服/官服渠道选择（`game_channel`），与
+    /// `lib.rs` 的 `select_account` 里反方向的处理对称——否则 `game_channel` 仍停在
+    /// 原来的官服/B 服上，前端会把那个账号也高亮成「当前账号」，出现两个勾选。
+    /// 注意 `active_bili` / `active_official` 里的**账号记忆不清理**（只清「当前渠道」
+    /// 这个指向），用户切回官服/B 服时仍落到上次那个账号。
     pub fn set_current_channel(&mut self, game: &str, channel: &str, uid: &str) -> bool {
         let exists = self
             .channel_accounts
@@ -441,6 +447,8 @@ impl AppConfig {
                 uid: uid.to_string(),
             },
         );
+        // 与「选中 B服/官服账号时清掉 active_channel」对称：两种「当前账号」不能并存。
+        self.game_channel.insert(game.to_string(), None);
         true
     }
 
@@ -513,6 +521,9 @@ impl AppConfig {
         self.active_bili.insert(game.clone(), uid.clone());
         self.game_channel
             .insert(game.clone(), Some(Channel::Bilibili));
+        // 与 set_current_channel 对称：B 服账号一旦登录/激活，之前选中的第三方渠道
+        // 账号就不再是「当前账号」（否则前端会把两者同时高亮，扫描也会误用渠道凭证）。
+        self.active_channel.remove(&game);
         self.touch(&game, Channel::Bilibili, &uid);
     }
 
@@ -541,6 +552,8 @@ impl AppConfig {
         self.active_official.insert(game.clone(), uid.clone());
         self.game_channel
             .insert(game.clone(), Some(Channel::Official));
+        // 同 upsert_bili：官服账号激活后清掉渠道账号的「当前」指向。
+        self.active_channel.remove(&game);
         self.touch(&game, Channel::Official, &uid);
     }
 
@@ -575,6 +588,9 @@ impl AppConfig {
         };
         if ok {
             self.game_channel.insert(game.to_string(), Some(channel));
+            // 与 set_current_channel 对称：官服/B 服一旦成为「当前账号」，
+            // 该游戏的第三方渠道账号就不再是当前账号（两种指向不能并存）。
+            self.active_channel.remove(game);
             self.touch(game, channel, uid);
         }
         ok
@@ -895,5 +911,124 @@ impl AppConfig {
             .unwrap_or(0);
         let backup = path.with_extension(format!("json.corrupt.{stamp}"));
         let _ = std::fs::rename(path, backup);
+    }
+}
+
+#[cfg(test)]
+mod current_account_tests {
+    use super::*;
+
+    /// 造一个带 B 服 / 官服 / 渠道三种账号的配置。
+    fn cfg_with_accounts() -> AppConfig {
+        let mut c = AppConfig::default();
+        c.upsert_bili(BiliToken {
+            uid: "bili1".into(),
+            access_key: "ak".into(),
+            uname: "B".into(),
+            game: "bh3".into(),
+            ..Default::default()
+        });
+        c.upsert_official(OfficialToken {
+            uid: "off1".into(),
+            stoken: "st".into(),
+            mid: "mid".into(),
+            uname: "O".into(),
+            game: "bh3".into(),
+            ..Default::default()
+        });
+        c.channel_accounts.push(ChannelAccount {
+            channel: "xiaomi".into(),
+            game: "bh3".into(),
+            uid: "mi1".into(),
+            name: "小米账号".into(),
+            cred: "{}".into(),
+            ..Default::default()
+        });
+        c
+    }
+
+    /// 选中渠道账号 → 清掉 game_channel，官服/B 服不再是「当前」。
+    #[test]
+    fn selecting_channel_account_clears_game_channel() {
+        let mut c = cfg_with_accounts();
+        c.set_current("bh3", Channel::Bilibili, "bili1");
+        assert_eq!(
+            c.game_channel.get("bh3").copied().flatten(),
+            Some(Channel::Bilibili)
+        );
+        assert!(!c.active_channel.contains_key("bh3"));
+
+        assert!(c.set_current_channel("bh3", "xiaomi", "mi1"));
+        assert_eq!(c.game_channel.get("bh3").copied().flatten(), None);
+        let sel = c.active_channel.get("bh3").expect("渠道账号应被选中");
+        assert_eq!(sel.channel, "xiaomi");
+        assert_eq!(sel.uid, "mi1");
+        // 账号记忆保留：切回 B 服时仍落到上次那个账号。
+        assert_eq!(c.active_bili.get("bh3").map(String::as_str), Some("bili1"));
+        assert!(c.current_uid("bh3").is_none());
+    }
+
+    /// 选回官服/B 服 → 清掉渠道账号选择（反方向对称）。
+    #[test]
+    fn selecting_bili_or_official_clears_channel_selection() {
+        let mut c = cfg_with_accounts();
+        assert!(c.set_current_channel("bh3", "xiaomi", "mi1"));
+        assert!(c.active_channel.contains_key("bh3"));
+
+        assert!(c.set_current("bh3", Channel::Bilibili, "bili1"));
+        assert!(!c.active_channel.contains_key("bh3"));
+        assert_eq!(
+            c.game_channel.get("bh3").copied().flatten(),
+            Some(Channel::Bilibili)
+        );
+
+        assert!(c.set_current_channel("bh3", "xiaomi", "mi1"));
+        assert!(c.set_current("bh3", Channel::Official, "off1"));
+        assert!(!c.active_channel.contains_key("bh3"));
+        assert_eq!(
+            c.game_channel.get("bh3").copied().flatten(),
+            Some(Channel::Official)
+        );
+    }
+
+    /// 重新登录官服/B 服（upsert_*）同样要清掉渠道账号选择。
+    ///
+    /// 这是用户报的 bug 的另一半：先选中渠道账号，再扫码登录官服账号，
+    /// 若不清理，前端会把渠道账号与官服账号同时高亮。
+    #[test]
+    fn upsert_clears_channel_selection() {
+        let mut c = cfg_with_accounts();
+        assert!(c.set_current_channel("bh3", "xiaomi", "mi1"));
+        c.upsert_official(OfficialToken {
+            uid: "off1".into(),
+            stoken: "st2".into(),
+            mid: "mid".into(),
+            uname: "O".into(),
+            game: "bh3".into(),
+            ..Default::default()
+        });
+        assert!(!c.active_channel.contains_key("bh3"));
+
+        assert!(c.set_current_channel("bh3", "xiaomi", "mi1"));
+        c.upsert_bili(BiliToken {
+            uid: "bili1".into(),
+            access_key: "ak2".into(),
+            uname: "B".into(),
+            game: "bh3".into(),
+            ..Default::default()
+        });
+        assert!(!c.active_channel.contains_key("bh3"));
+    }
+
+    /// 不存在的渠道账号不能被选中（不应改动任何指向）。
+    #[test]
+    fn selecting_unknown_channel_account_is_rejected() {
+        let mut c = cfg_with_accounts();
+        c.set_current("bh3", Channel::Bilibili, "bili1");
+        assert!(!c.set_current_channel("bh3", "xiaomi", "nope"));
+        assert_eq!(
+            c.game_channel.get("bh3").copied().flatten(),
+            Some(Channel::Bilibili)
+        );
     }
 }
