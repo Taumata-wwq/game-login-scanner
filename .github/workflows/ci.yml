@@ -15,7 +15,9 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: "1.98.1"
     steps:
-      - uses: actions/checkout@v4
+      # v4 的 action 跑在 Node 20 上，GitHub 已标记弃用（runner 会强制用 Node 24 并
+      # 打印告警）。升到 v5 直接以 Node 24 运行，消掉这条噪音。
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         # 固定 1.98.1（稳定性偏好，保留）。
