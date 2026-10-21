@@ -45,3 +45,23 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test
+
+      # Android 侧是 Kotlin / PowerShell / Python，windows-latest 上没有 Android SDK，
+      # 编译不了；但下面两项不变量无需 SDK 即可完整校验（2026-10-21 审计 P3-13 补）。
+      - name: 校验 Android 构建脚本语法
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem scripts/android/*.ps1 | ForEach-Object {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errs) | Out-Null
+            foreach ($e in $errs) {
+              Write-Host "::error file=$($_.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              $bad = 1
+            }
+          }
+          if ($bad -ne 0) { exit 1 }
+          Write-Host "[OK] scripts/android/*.ps1 语法正确"
+
+      - name: 校验 Kotlin↔Rust JNI 契约
+        run: python scripts/android/check_jni_contract.py

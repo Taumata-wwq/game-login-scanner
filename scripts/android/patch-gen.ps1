@@ -24,29 +24,85 @@ if (-not (Test-Path $gen)) {
     Write-Error "未找到 $gen，请先运行 cargo tauri android init"
     exit 1
 }
+# ---------------------------------------------------------------------------
+# 换行常量：补丁文本里不再散落反引号转义，也便于跟随文件实际换行。
+$LF = [string][char]10
+$CRLF = [string][char]13 + [string][char]10
+
+# ---------------------------------------------------------------------------
+# 统一补丁入口（P1-1）。
+#
+# 背景：早先每个补丁都写成裸的 $text.Replace(anchor, insert)，而判定条件用的是
+# 「插入串是否已存在」——插入串在**锚点缺失时必然不存在**，于是补丁静默变成 no-op，
+# 却照样打印「+ …」成功日志。最危险的后果不是构建失败，而是**静默产出错误产物**：
+# 签名块锚点漂移后 release 长期未签名、权限没进 manifest 却以为进了、依赖没加却
+# 以为加了（后者表现为真机 NoClassDefFoundError 崩溃）。
+# 因此统一走这里：锚点必须存在、命中次数必须符合预期、替换后文本必须真的变化，
+# 否则直接 throw——可见的失败远好过静默的错误产物。
+# ---------------------------------------------------------------------------
+$script:PatchApplied = 0
+function Set-Patch {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Anchor,
+        [Parameter(Mandatory = $true)][string]$Insert,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [int]$Expect = 1
+    )
+    if (-not $Text.Contains($Anchor)) {
+        throw ("[补丁锚点缺失] " + $Label + $LF + "  锚点: " + $Anchor + $LF +
+            "  gen/ 结构可能已被 tauri 或 AGP 升级改动，请同步更新 patch-gen.ps1")
+    }
+    $hits = ([regex]::Matches($Text, [regex]::Escape($Anchor))).Count
+    if ($hits -ne $Expect) {
+        throw ("[补丁锚点不唯一] " + $Label + $LF + "  锚点: " + $Anchor + $LF +
+            "  期望命中 $Expect 次，实际 $hits 次")
+    }
+    $out = $Text.Replace($Anchor, $Insert)
+    if ($out -eq $Text) {
+        throw ("[补丁未生效] " + $Label + $LF + "  插入串与锚点相同，替换后文本未变化")
+    }
+    $script:PatchApplied++
+    Write-Host ("  + " + $Label)
+    return $out
+}
 
 Write-Host "== 1. gradle.properties 补丁 =="
 $props = Join-Path $gen "gradle.properties"
 function Add-Prop($key, $line) {
-    # 注意：必须按“整行完全匹配”判断是否已存在。曾用 `^key=` 的前缀匹配 +
-    # Add-Content：当文件末行没有换行符时，新属性会被**拼接**到最后一行上
-    # （实测产出 `android.nonFinalResIds=falseabiList=arm64-v8a,...`，
-    #   Gradle 报 "Cannot parse project property ... as boolean" 直接构建失败）。
-    $lines = Get-Content $props
-    $hit = $false
-    foreach ($l in $lines) { if ($l -match ("^\s*" + [regex]::Escape($key) + "\s*=")) { $hit = $true; break } }
-    if ($hit) {
-        Write-Host "  = $key 已存在"
+    # 注意：必须按“整行完全匹配”判断是否已存在。曾用前缀匹配 + Add-Content：
+    # 当文件末行没有换行符时，新属性会被**拼接**到最后一行上（实测产出
+    # android.nonFinalResIds=falseabiList=arm64-v8a,...，Gradle 报
+    # "Cannot parse project property ... as boolean" 直接构建失败）。
+    #
+    # P1-2：命中时还要比对**值**。早期只判「key 出现过」就 return，于是
+    # -AbiList / -ArchList / -TargetList / -JavaHomeAscii 这些参数一旦 gen 里
+    # 已有一份（哪怕值不对）就被静默忽略——用户以为收窄了 ABI，实际仍打 4 个架构。
+    $raw = [System.IO.File]::ReadAllText($props)
+    $rx = [regex]::new("^\s*" + [regex]::Escape($key) + "\s*=",
+        [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    $m = $rx.Match($raw)
+    if ($m.Success) {
+        $lineEnd = $raw.IndexOf($LF, $m.Index)
+        if ($lineEnd -lt 0) { $lineEnd = $raw.Length }
+        $current = $raw.Substring($m.Index, $lineEnd - $m.Index).TrimEnd([char]13)
+        if ($current.Trim() -eq $line.Trim()) {
+            Write-Host "  = $key 已存在"
+            return
+        }
+        $newRaw = $raw.Substring(0, $m.Index) + $line + $raw.Substring($lineEnd)
+        [System.IO.File]::WriteAllText($props, $newRaw, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "  ~ $key 已存在但值不同，已更新为：$line"
         return
     }
-    # 读全文 → 补齐末尾换行 → 追加 → 整体写回（UTF-8 无 BOM，不可用 Add-Content：
-    # 它在末行无换行的文件上会拼接）。
-    $raw = [System.IO.File]::ReadAllText($props)
-    if ($raw.Length -gt 0 -and -not $raw.EndsWith("`n")) { $raw += "`r`n" }
-    $raw += $line + "`r`n"
+    # 未命中：读全文 → 补齐末尾换行 → 追加 → 整体写回（UTF-8 无 BOM；不可用
+    # Add-Content，它在末行无换行的文件上会拼接）。
+    if ($raw.Length -gt 0 -and -not $raw.EndsWith($LF)) { $raw += $CRLF }
+    $raw += $line + $CRLF
     [System.IO.File]::WriteAllText($props, $raw, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "  + $line"
 }
+
 # Jetifier：渠道 SDK（mi_sdk 的 MiFileProvider 继承 android.support.v4.content.FileProvider）
 # 仍是旧 support 库字节码，不转换则运行时 ClassNotFoundException →
 # 「Unable to get provider com.xiaomi.gamecenter.sdk.utils.MiFileProvider」直接崩溃
@@ -67,17 +123,26 @@ $appGradle = Join-Path $gen "app/build.gradle.kts"
 if ((Get-Content $appGradle -Raw) -notmatch "buildToolsVersion") {
     $ls = Get-Content $appGradle
     $out = New-Object System.Collections.ArrayList
+    $btHits = 0
     foreach ($l in $ls) {
         [void]$out.Add($l)
-        if ($l -match "^    compileSdk = 36") {
-            [void]$out.Add('    buildToolsVersion = "36.0.0"')
+        # 锚点必须捕获 compileSdk 号：tauri 升级 SDK 时 buildToolsVersion 要跟着走；
+        # 旧写法把锚点写死成 compileSdk = 36，漂移时**静默不插入**（P1-1 同类）。
+        if ($l -match "^(\s*)compileSdk = (\d+)") {
+            [void]$out.Add($Matches[1] + 'buildToolsVersion = "' + $Matches[2] + '.0.0"')
+            $btHits++
         }
     }
+    if ($btHits -ne 1) {
+        throw ("[补丁锚点缺失] buildToolsVersion 插入点匹配到 $btHits 次（应为 1）：" + $LF +
+            "  未找到 compileSdk = <n> 行；app/build.gradle.kts 结构可能已被 tauri 升级改动")
+    }
     $out | Set-Content $appGradle
-    Write-Host '  + buildToolsVersion = "36.0.0"'
+    Write-Host '  + buildToolsVersion = "<compileSdk>.0.0"'
 } else {
     Write-Host "  = buildToolsVersion 已存在"
 }
+
 
 Write-Host "== 3b. 资源裁剪（release 体积） =="
 # 两个开关都是「不给就浪费」的类型，实测合计 -1.13MB（17.24MB -> 16.12MB）：
@@ -90,23 +155,16 @@ Write-Host "== 3b. 资源裁剪（release 体积） =="
 $agRc = [System.IO.File]::ReadAllText($appGradle)
 $nlRc = if ($agRc.Contains("`r`n")) { "`r`n" } else { "`n" }
 if ($agRc -notmatch 'isShrinkResources') {
-    $agRc = $agRc.Replace(
-        'isMinifyEnabled = true',
-        'isMinifyEnabled = true' + $nlRc + '            isShrinkResources = true'
-    )
-    Write-Host "  + isShrinkResources = true（release）"
+    $agRc = Set-Patch -Text $agRc -Anchor 'isMinifyEnabled = true' -Label "isShrinkResources = true（release）" -Insert ('isMinifyEnabled = true' + $nlRc + '            isShrinkResources = true')
 } else {
     Write-Host "  = isShrinkResources 已存在"
 }
 if ($agRc -notmatch 'resourceConfigurations') {
-    $agRc = $agRc.Replace(
-        'minSdk = 24',
-        'minSdk = 24' + $nlRc + '        resourceConfigurations += listOf("zh", "en")'
-    )
-    Write-Host '  + resourceConfigurations = ["zh", "en"]'
+    $agRc = Set-Patch -Text $agRc -Anchor 'minSdk = 24' -Label 'resourceConfigurations = ["zh", "en"]' -Insert ('minSdk = 24' + $nlRc + '        resourceConfigurations += listOf("zh", "en")')
 } else {
     Write-Host "  = resourceConfigurations 已存在"
 }
+
 [System.IO.File]::WriteAllText($appGradle, $agRc, (New-Object System.Text.UTF8Encoding($false)))
 
 Write-Host "== 4. BuildTask.kt（cmd 包装 cargo + 注入 PATH）=="
@@ -174,6 +232,20 @@ if (-not (Test-Path $pluginSrc)) {
         Copy-Item $_.FullName -Destination $pluginDst -Force
         Write-Host "  -> $($_.Name)"
     }
+    # P2-6：只覆盖不删除会在 gen 里留下**孤儿 .kt**（源目录已删掉的插件仍参与编译，
+    # 且 R8 的保留判定会被多余类干扰）。华为插件来自 android-plugin-huawei，
+    # 此处不能删，故排除两边都存在的名字。
+    $keep = @{}
+    $huaweiSrcDir = Join-Path $root "src-tauri/android-plugin-huawei"
+    if (Test-Path $huaweiSrcDir) {
+        Get-ChildItem -Path $huaweiSrcDir -Filter *.kt | ForEach-Object { $keep[$_.Name] = $true }
+    }
+    Get-ChildItem -Path $pluginDst -Filter *.kt | ForEach-Object {
+        if ((Test-Path (Join-Path $pluginSrc $_.Name)) -or $keep.ContainsKey($_.Name)) { return }
+        Remove-Item $_.FullName -Force
+        Write-Host "  - 清理孤儿插件 $($_.Name)（源目录已无此文件）"
+    }
+
 }
 
 # 兼容清理：历史遗留的旧版插件源码目录（主包下 game_scanner/plugins）。
@@ -346,10 +418,11 @@ if (-not (Test-Path $miSrc)) {
     # app/build.gradle.kts：幂等插入模块依赖（CRLF 保持，仅替换首个 dependencies 块声明）
     $appGradlePath = Join-Path $gen "app/build.gradle.kts"
     $ag = [System.IO.File]::ReadAllText($appGradlePath)
+    $nlAg = if ($ag.Contains($CRLF)) { $CRLF } else { $LF }
     if ($ag -notmatch [regex]::Escape('project(":mi_sdk")')) {
-        $ag = $ag.Replace("dependencies {", "dependencies {`r`n    implementation(project(`":mi_sdk`"))")
+        $ag = Set-Patch -Text $ag -Anchor "dependencies {" -Label 'app/build.gradle.kts: implementation(project(":mi_sdk"))' -Insert ('dependencies {' + $nlAg + '    implementation(project(":mi_sdk"))')
         [System.IO.File]::WriteAllText($appGradlePath, $ag, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Host '  + app/build.gradle.kts: implementation(project(":mi_sdk"))'
+
     } else {
         Write-Host "  = app/build.gradle.kts 已含 :mi_sdk 依赖"
     }
@@ -370,9 +443,9 @@ if (-not (Test-Path $miSrc)) {
     # 加真实依赖后父类链完整；这也解释了为何 debug 包（不混淆）同样会崩。
     if ($ag -notmatch [regex]::Escape('protobuf-java')) {
         $ag = [System.IO.File]::ReadAllText($appGradlePath)
-        $ag = $ag.Replace("dependencies {", "dependencies {`r`n    implementation(`"com.google.protobuf:protobuf-java:3.25.5`")")
+        $ag = Set-Patch -Text $ag -Anchor "dependencies {" -Label 'app/build.gradle.kts: implementation("com.google.protobuf:protobuf-java:3.25.5")' -Insert ('dependencies {' + $nlAg + '    implementation("com.google.protobuf:protobuf-java:3.25.5")')
         [System.IO.File]::WriteAllText($appGradlePath, $ag, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Host '  + app/build.gradle.kts: implementation("com.google.protobuf:protobuf-java:3.25.5")'
+
     } else {
         Write-Host "  = app/build.gradle.kts 已含 protobuf-java 依赖"
     }
@@ -385,17 +458,19 @@ if (-not (Test-Path $miSrc)) {
     # 故一次补齐（gson + eventbus 由 mi_sdk/libs 自带，此处只缺 gson）。
     if ($ag -notmatch [regex]::Escape('com.google.code.gson')) {
         $ag = [System.IO.File]::ReadAllText($appGradlePath)
-        $ag = $ag.Replace("dependencies {", "dependencies {`r`n    implementation(`"com.google.code.gson:gson:2.11.0`")")
+        $ag = Set-Patch -Text $ag -Anchor "dependencies {" -Label 'app/build.gradle.kts: implementation("com.google.code.gson:gson:2.11.0")' -Insert ('dependencies {' + $nlAg + '    implementation("com.google.code.gson:gson:2.11.0")')
         [System.IO.File]::WriteAllText($appGradlePath, $ag, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Host '  + app/build.gradle.kts: implementation("com.google.code.gson:gson:2.11.0")'
+
     } else {
         Write-Host "  = app/build.gradle.kts 已含 gson 依赖"
     }
 }
 
 Write-Host "== 5c. 渠道混淆规则（参考项目 proguard 规则，幂等刷新）=="
-# 渠道 SDK 需要整套 keep/dontwarn（含 -ignorewarnings 与 -dontwarn com.google.**，
-# 否则 R8 full mode 因小米 SDK 的 protobuf 隐式引用报 Missing class 失败）。
+# 渠道 SDK 需要整套 keep/dontwarn（含 -dontwarn com.google.**，否则 R8 full mode 因
+# 小米 SDK 的 protobuf 隐式引用报 Missing class 失败）。注意**不要**加 -ignorewarnings：
+# 它会把「必需依赖缺失」一并吞掉，正是小米「添加账号」NoClassDefFoundError 的成因
+# （2026-10-21 审计 P3-14 已从 channel-proguard-rules.pro 移除）。
 # 规则在 gen/android/app/proguard-rules.pro 以标记段形式追加，每次刷新为最新。
 $chanRules = Join-Path $root "scripts/android/channel-proguard-rules.pro"
 $proguardPath = Join-Path $gen "app/proguard-rules.pro"
@@ -439,9 +514,9 @@ if (-not (Test-Path $sdkSrc)) {
     # 换行符跟随文件（tauri 生成的是 LF；早期版本曾被改写为 CRLF，不能写死）。
     $nl2 = if ($ag2.Contains("`r`n")) { "`r`n" } else { "`n" }
     if ($ag2 -notmatch [regex]::Escape('fileTree(mapOf("dir" to "libs"')) {
-        $ag2 = $ag2.Replace("dependencies {", "dependencies {" + $nl2 + "    $ft")
+        $ag2 = Set-Patch -Text $ag2 -Anchor "dependencies {" -Label "app/build.gradle.kts: fileTree(libs) 依赖" -Insert ("dependencies {" + $nl2 + "    $ft")
         [System.IO.File]::WriteAllText($ag2Path, $ag2, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Host "  + app/build.gradle.kts: fileTree(libs) 依赖"
+
     } else {
         Write-Host "  = fileTree(libs) 依赖已存在"
     }
@@ -454,9 +529,9 @@ if (-not (Test-Path $sdkSrc)) {
             "        }",
             "    }"
         ) -join $nl2
-        $ag2 = $ag2.Replace("android {" + $nl2, "android {" + $nl2 + $srcSets + $nl2, 1)
+        $ag2 = Set-Patch -Text $ag2 -Anchor ("android {" + $nl2) -Label "app/build.gradle.kts: jniLibs.srcDirs(libs)" -Insert ("android {" + $nl2 + $srcSets + $nl2)
         [System.IO.File]::WriteAllText($ag2Path, $ag2, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Host "  + app/build.gradle.kts: jniLibs.srcDirs(libs)"
+
     } else {
         Write-Host "  = jniLibs 配置已存在"
     }
@@ -480,6 +555,13 @@ if (-not (Test-Path $huaweiJson)) {
     $rootGradle = Join-Path $gen "build.gradle.kts"
     $rg = [System.IO.File]::ReadAllText($rootGradle)
     if ($rg -notmatch "developer\.huawei\.com/repo") {
+        # P1-1 同类：[regex]::Replace 匹配不到时同样静默无操作，先显式校验锚点。
+        if (-not [regex]::IsMatch($rg, '(?m)^([ 	]*)mavenCentral\(\)(\r?\n)([ 	]*)\}')) {
+            throw "[补丁锚点缺失] 根 build.gradle.kts 未找到 mavenCentral() 仓库块（华为渠道）"
+        }
+        if (-not [regex]::IsMatch($rg, '(?m)^([ 	]*)classpath\("org\.jetbrains\.kotlin:kotlin-gradle-plugin:[^"]+"\)(\r?\n)')) {
+            throw "[补丁锚点缺失] 根 build.gradle.kts 未找到 kotlin-gradle-plugin classpath 行（华为渠道）"
+        }
         $rg = [regex]::Replace(
             $rg,
             '(?m)^([ \t]*)mavenCentral\(\)(\r?\n)([ \t]*)\}',
@@ -501,10 +583,8 @@ if (-not (Test-Path $huaweiJson)) {
     $ag3 = [System.IO.File]::ReadAllText($appGradle2)
     $nl3 = if ($ag3.Contains("`r`n")) { "`r`n" } else { "`n" }
     if ($ag3 -notmatch 'id\("com\.huawei\.agconnect"\)') {
-        $ag3 = $ag3.Replace(
-            '    id("rust")' + $nl3 + '}',
-            '    id("rust")' + $nl3 + '    id("com.huawei.agconnect")' + $nl3 + '}'
-        )
+        $ag3 = Set-Patch -Text $ag3 -Anchor ('    id("rust")' + $nl3 + '}') -Label 'app/build.gradle.kts: id("com.huawei.agconnect")' -Insert ('    id("rust")' + $nl3 + '    id("com.huawei.agconnect")' + $nl3 + '}')
+
     }
     foreach ($dep in @(
         'implementation("com.huawei.hms:hwid:6.8.0.300")',
@@ -513,7 +593,8 @@ if (-not (Test-Path $huaweiJson)) {
         # 判断必须比对**整条**依赖串：只比版本号会把同版本的另一条依赖误判为已存在
         # （实测 hwid 先插入后，game 因共享 "6.8.0.300" 被跳过）。
         if ($ag3 -notmatch [regex]::Escape($dep)) {
-            $ag3 = $ag3.Replace("dependencies {", "dependencies {" + $nl3 + "    " + $dep)
+            $ag3 = Set-Patch -Text $ag3 -Anchor "dependencies {" -Label ("app/build.gradle.kts: " + $dep) -Insert ("dependencies {" + $nl3 + "    " + $dep)
+
         }
     }
     [System.IO.File]::WriteAllText($appGradle2, $ag3, (New-Object System.Text.UTF8Encoding($false)))
@@ -527,6 +608,14 @@ if (-not (Test-Path $huaweiJson)) {
         Get-ChildItem -Path $huaweiSrc -Filter *.kt | ForEach-Object {
             Copy-Item $_.FullName -Destination $pluginDst2 -Force
             Write-Host "  -> $($_.Name)"
+        }
+        # P2-6 同类：源目录删掉的文件若不同步清理，gen 里会留下孤儿华为插件。
+        if (Test-Path $pluginSrc) {
+            Get-ChildItem -Path $pluginDst2 -Filter *.kt | ForEach-Object {
+                if ((Test-Path (Join-Path $pluginSrc $_.Name)) -or (Test-Path (Join-Path $huaweiSrc $_.Name))) { return }
+                Remove-Item $_.FullName -Force
+                Write-Host "  - 清理孤儿插件 $($_.Name)（两个源目录均已无此文件）"
+            }
         }
     }
 }
@@ -544,12 +633,9 @@ if ($c -notmatch "FOREGROUND_SERVICE_MEDIA_PROJECTION") {
         '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />',
         '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />'
     ) -join $nl
-    $c = $c.Replace(
-        '    <uses-permission android:name="android.permission.INTERNET" />',
-        $permLines
-    )
+    $c = Set-Patch -Text $c -Anchor '    <uses-permission android:name="android.permission.INTERNET" />' -Insert $permLines -Label "4 条权限（INTERNET/FOREGROUND_SERVICE/FOREGROUND_SERVICE_MEDIA_PROJECTION/POST_NOTIFICATIONS）"
     $changed = $true
-    Write-Host "  + 4 条权限（INTERNET/FOREGROUND_SERVICE/FOREGROUND_SERVICE_MEDIA_PROJECTION/POST_NOTIFICATIONS）"
+
 } else {
     Write-Host "  = 权限已存在"
 }
@@ -557,12 +643,9 @@ if ($c -notmatch "FOREGROUND_SERVICE_MEDIA_PROJECTION") {
 # 相机权限（摄像头扫码）：独立幂等检查，插在 INTERNET 行之前。
 if ($c -notmatch "android.permission.CAMERA") {
     $camPerm = '    <uses-permission android:name="android.permission.CAMERA" />' + $nl
-    $c = $c.Replace(
-        '    <uses-permission android:name="android.permission.INTERNET" />',
-        $camPerm + '    <uses-permission android:name="android.permission.INTERNET" />'
-    )
+    $c = Set-Patch -Text $c -Anchor '    <uses-permission android:name="android.permission.INTERNET" />' -Insert ($camPerm + '    <uses-permission android:name="android.permission.INTERNET" />') -Label "CAMERA 权限（摄像头扫码）"
     $changed = $true
-    Write-Host "  + CAMERA 权限（摄像头扫码）"
+
 } else {
     Write-Host "  = CAMERA 权限已存在"
 }
@@ -584,9 +667,9 @@ if ($c -notmatch "com\.taumata\.scanner\.plugins\.ScreenCaptureService") {
         '            android:foregroundServiceType="mediaProjection" />',
         '    </application>'
     ) -join $nl
-    $c = $c.Replace('    </application>', $svc)
+    $c = Set-Patch -Text $c -Anchor '    </application>' -Insert $svc -Label "service 声明（com.taumata.scanner.plugins.ScreenCaptureService, mediaProjection）"
     $changed = $true
-    Write-Host "  + service 声明（com.taumata.scanner.plugins.ScreenCaptureService, mediaProjection）"
+
 } else {
     Write-Host "  = service 声明已存在"
 }
@@ -601,9 +684,9 @@ if ($c -notmatch "com\.taumata\.scanner\.plugins\.NotifyActionReceiver") {
         '            android:exported="false" />',
         '    </application>'
     ) -join $nl
-    $c = $c.Replace('    </application>', $rcv)
+    $c = Set-Patch -Text $c -Anchor '    </application>' -Insert $rcv -Label "receiver 声明（NotifyActionReceiver，通知动作广播）"
     $changed = $true
-    Write-Host "  + receiver 声明（NotifyActionReceiver，通知动作广播）"
+
 } else {
     # 声明已存在也可能 `exported` 被改成 true（例如排障时临时放开过）——
     # 仅凭"名字出现过"就跳过会让错误的 exported 一直留在包里，故这里显式纠正回 false。
@@ -634,13 +717,9 @@ $nl2 = if ($mc.Contains("`r`n")) { "`r`n" } else { "`n" }
 $mChg = $false
 
 if ($mc -notmatch "vivo\.game\.permission\.OPEN_JUMP_INTENTS") {
-    $mc = $mc.Replace(
-        '    <uses-permission android:name="android.permission.INTERNET" />',
-        '    <uses-permission android:name="vivo.game.permission.OPEN_JUMP_INTENTS" />' + $nl2 +
-        '    <uses-permission android:name="android.permission.INTERNET" />'
-    )
+    $mc = Set-Patch -Text $mc -Anchor '    <uses-permission android:name="android.permission.INTERNET" />' -Label "vivo 权限（OPEN_JUMP_INTENTS）" -Insert ('    <uses-permission android:name="vivo.game.permission.OPEN_JUMP_INTENTS" />' + $nl2 + '    <uses-permission android:name="android.permission.INTERNET" />')
     $mChg = $true
-    Write-Host "  + vivo 权限（OPEN_JUMP_INTENTS）"
+
 } else {
     Write-Host "  = vivo 权限已存在"
 }
@@ -652,9 +731,9 @@ if ($mc -notmatch 'android:name="vivo_union_sdk"') {
         '            android:value="4.6.0.1" />',
         '    </application>'
     ) -join $nl2
-    $mc = $mc.Replace('    </application>', $meta)
+    $mc = Set-Patch -Text $mc -Anchor '    </application>' -Insert $meta -Label "vivo meta-data（vivo_union_sdk=4.6.0.1）"
     $mChg = $true
-    Write-Host "  + vivo meta-data（vivo_union_sdk=4.6.0.1）"
+
 } else {
     Write-Host "  = vivo meta-data 已存在"
 }
@@ -680,9 +759,9 @@ if ($mc -notmatch "com\.vivo\.unionsdk\.ui\.UnionActivity") {
         '        </activity>',
         '    </application>'
     ) -join $nl2
-    $mc = $mc.Replace('    </application>', $act)
+    $mc = Set-Patch -Text $mc -Anchor '    </application>' -Insert $act -Label "vivo UnionActivity 声明"
     $mChg = $true
-    Write-Host "  + vivo UnionActivity 声明"
+
 } else {
     Write-Host "  = vivo UnionActivity 已存在"
 }
@@ -696,9 +775,9 @@ if ($mc -notmatch 'android:name="BSGameSdk_PaidGame"') {
         '            android:value="false" />',
         '    </application>'
     ) -join $nl2
-    $mc = $mc.Replace('    </application>', $bmeta)
+    $mc = Set-Patch -Text $mc -Anchor '    </application>' -Insert $bmeta -Label "B站 SDK meta-data（BSGameSdk_PaidGame=false）"
     $mChg = $true
-    Write-Host "  + B站 SDK meta-data（BSGameSdk_PaidGame=false）"
+
 } else {
     Write-Host "  = B站 SDK meta-data 已存在"
 }
@@ -714,12 +793,21 @@ if ($mc -notmatch "ChannelWebLoginActivity") {
         '            android:theme="@android:style/Theme.NoTitleBar" />',
         '    </application>'
     ) -join $nl2
-    $mc = $mc.Replace('    </application>', $webAct)
+    $mc = Set-Patch -Text $mc -Anchor '    </application>' -Insert $webAct -Label "渠道网页登录 Activity（应用宝 / Wegame）"
     $mChg = $true
-    Write-Host "  + 渠道网页登录 Activity（应用宝 / Wegame）"
 } else {
-    Write-Host "  = 渠道网页登录 Activity 已存在"
+    # P2-10：与 NotifyActionReceiver 同理——声明已存在也可能 exported 被改成 true
+    # （排障时临时放开过就会留在包里，等于把登录容器暴露给任意应用），显式纠正回 false。
+    $webPat = '(?s)(ChannelWebLoginActivity[^>]*?android:exported=")true(")'
+    if ($mc -match $webPat) {
+        $mc = $mc -replace $webPat, '${1}false${2}'
+        $mChg = $true
+        Write-Host "  ~ 渠道网页登录 Activity 已存在，但 exported 被改为 true —— 已纠正回 false"
+    } else {
+        Write-Host "  = 渠道网页登录 Activity 已存在（exported=false）"
+    }
 }
+
 
 if ($mChg) {
     [System.IO.File]::WriteAllText($mf2, $mc, (New-Object System.Text.UTF8Encoding($false)))
@@ -751,8 +839,12 @@ if ((Test-Path $oldProps) -and -not (Test-Path $ksProps)) {
     # storeFile 是相对路径，迁移后仍指向同目录的 jks，内容无需改动。
     Move-Item $oldProps $ksProps -Force; Write-Host "  → 迁移 keystore.properties 到 app/"
 }
-$keytool = Join-Path (Split-Path $JavaHomeAscii -Parent) "Java21/bin/keytool.exe"
-if (-not (Test-Path $keytool)) { $keytool = "G:/Java21/bin/keytool.exe" }
+# P2-9：keytool 必须从**本脚本实际使用的 JAVA_HOME** 推导。早期写法是
+# Join-Path (Split-Path $JavaHomeAscii -Parent) "Java21/bin/keytool.exe"，
+# 只在默认 G:/Java21 下凑巧成立——换成 JDK 17 或其它路径就找不到 keytool，
+# 于是静默跳过签名，产出无法安装的 unsigned release APK。
+$keytool = Join-Path $JavaHomeAscii "bin/keytool.exe"
+if (-not (Test-Path $keytool)) { $keytool = Join-Path (Split-Path $JavaHomeAscii -Parent) "Java21/bin/keytool.exe" }
 
 if ((Test-Path $ksProps) -and (Test-Path $ksPath)) {
     Write-Host "  = keystore 已存在（跳过生成）"
@@ -762,6 +854,12 @@ if ((Test-Path $ksProps) -and (Test-Path $ksPath)) {
         -keyalg RSA -keysize 2048 -validity 10000 `
         -storepass $pass -keypass $pass `
         -dname "CN=Game Login Scanner, OU=Dev, O=Taumata, L=CN, ST=CN, C=CN" 2>&1 | Out-Null
+    # 先确认 keytool 真的产出了 jks，再写 keystore.properties：否则会留下一份
+    # 指向不存在 keystore 的配置，Gradle 侧静默无签名（P2-9）。
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $ksPath)) {
+        throw ("[签名 keystore 生成失败] keytool 退出码 $LASTEXITCODE，未产出 $ksPath" + $LF +
+            "  请检查 -JavaHomeAscii（当前：$JavaHomeAscii）与 keytool：$keytool")
+    }
     @(
         "storeFile=game-scanner-release.jks",
         "storePassword=$pass",
@@ -770,17 +868,28 @@ if ((Test-Path $ksProps) -and (Test-Path $ksPath)) {
     ) | Set-Content -Path $ksProps -Encoding ASCII
     Write-Host "  + 生成 game-scanner-release.jks + keystore.properties（本地签名用，勿入库）"
 } else {
-    Write-Host "  ! 未找到 keytool，跳过签名配置"
+    Write-Host "  ! 未找到 keytool（$keytool），跳过签名配置"
 }
 
 if (Test-Path $ksProps) {
+    # P1-3：守卫必须看**我们自己写入的标记**。旧守卫是 -notmatch "keystore.properties"
+    # ——该字符串同时出现在下面 Properties() 块里，于是锚点一旦漂移、块没插进去，
+    # 后续每次运行都会因「文本里已经有这个字符串」而跳过，签名块永远补不上。
+    $signMarker = '// release 签名参数（由 scripts/android/patch-gen.ps1 生成；不入库）'
     $gradleTxt = Get-Content $appGradle -Raw
-    if ($gradleTxt -notmatch "keystore.properties") {
+    if ($gradleTxt -notmatch [regex]::Escape($signMarker)) {
         $lines = Get-Content $appGradle
+        # 三个真锚点先校验唯一性：行投影匹配不到就静默少插，结果是无签名配置的 release。
+        $nAndroid = @($lines | Where-Object { $_ -match '^android \{' }).Count
+        $nNamespace = @($lines | Where-Object { $_ -match '^\s+namespace = ' }).Count
+        $nRelease = @($lines | Where-Object { $_ -match '^\s+getByName\("release"\) \{' }).Count
+        if ($nAndroid -ne 1 -or $nNamespace -ne 1 -or $nRelease -ne 1) {
+            throw ("[补丁锚点异常] 签名配置插入点：android = $nAndroid，namespace = $nNamespace，release = $nRelease（各应为 1）")
+        }
         $out = New-Object System.Collections.ArrayList
         foreach ($l in $lines) {
-            if ($l -match "^android \{") {
-                [void]$out.Add('// release 签名参数（由 scripts/android/patch-gen.ps1 生成；不入库）')
+            if ($l -match '^android \{') {
+                [void]$out.Add($signMarker)
                 [void]$out.Add('val keystoreProperties = Properties().apply {')
                 [void]$out.Add('    val f = file("keystore.properties")')
                 [void]$out.Add('    if (f.exists()) { f.inputStream().use { load(it) } }')
@@ -805,10 +914,18 @@ if (Test-Path $ksProps) {
             }
         }
         $out | Set-Content $appGradle
+        # 写入后自校验：真正落盘了才算成功（锚点漂移时这里会可见地失败）。
+        $after = Get-Content $appGradle -Raw
+        if ($after -notmatch [regex]::Escape($signMarker) -or
+            $after -notmatch 'signingConfigs \{' -or
+            $after -notmatch 'signingConfig = signingConfigs\.findByName\("release"\)') {
+            throw "[补丁未生效] 签名配置写入后校验失败（signingConfigs / signingConfig 行缺失）"
+        }
         Write-Host "  + app/build.gradle.kts 已加签名配置（signingConfigs.release）"
     } else {
         Write-Host "  = 签名配置已存在"
     }
 }
 
-Write-Host "全部补丁完成。"
+
+Write-Host ("全部补丁完成（本次实际应用 " + $script:PatchApplied + " 处补丁，其余为已存在）。")

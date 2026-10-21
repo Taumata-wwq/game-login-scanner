@@ -23,6 +23,7 @@
 坐标（maven 坐标 → 包根映射见 KNOWN_PROVIDERS）；以及渠道 SDK 自带的 libs/*.jar。
 """
 import argparse
+import io
 import os
 import re
 import sys
@@ -160,26 +161,67 @@ def class_refs(data):
     return out
 
 
-def jar_classes(path):
-    """返回 (definitions, references)。
+def is_r_class(internal_name):
+    """是否 AAPT2 生成的资源类（`<pkg>/R`、`<pkg>/R$string` 之类）。
 
-    **必须区分两者**：definitions 是本 jar 真正提供的类（.class 路径），
+    资源类不随 jar/aar 的 classes.jar 发布，而是构建期由 AAPT2 按库的包名生成、
+    直接打进最终 APK，因此「被引用但产物里找不到定义」是**正常**的：
+    bsgamesdk 的 aar 就引用了 com/bsgamesdk/android/R$style 等 8 个资源类，
+    不排除会稳定误报。
+    """
+    seg = internal_name.rsplit("/", 1)[-1]
+    return seg == "R" or seg.startswith("R$")
+
+
+def _scan_class_zip(zf):
+    """扫一个 zip 内的全部 .class，返回 (definitions, references)。"""
+    refs = set()
+    defs = set()
+    for n in zf.namelist():
+        if not n.endswith(".class"):
+            continue
+        defs.add(n[: -len(".class")])
+        refs |= class_refs(zf.read(n))
+    return defs, refs
+
+
+def jar_classes(path):
+    """返回 (definitions, references, errors)。
+
+    **必须区分定义与引用**：definitions 是本产物真正提供的类（.class 路径），
     references 是它引用到的全部类型（含外部依赖）。早先只用一份集合做「是否已
     提供」的判定，结果把 *被引用* 的 protobuf 也算成「已提供」，缺依赖永远测不出来
     （负向测试当场暴露）。
+
+    `.aar` 的类不在顶层，而在它内部的 classes.jar（部分 SDK 还有 libs/*.jar）里，
+    必须解开再扫：早先按普通 zip 只扫顶层 `.class`，
+    bsgamesdk_android_library-3.4.2.aar 的 266 个条目里顶层 .class 为 0，
+    于是该 SDK 的 2214 个类**既不算它自己的引用**（漏报缺失依赖），
+    **也进不了 own_defs**（反过来把别人引用的、它已提供的类报成缺失）。
+
+    errors 非空表示产物读不全（损坏、非 zip、aar 里没有 jar）：调用方必须 fail-closed，
+    不能拿「空集合」当「无依赖问题」。
     """
     refs = set()
     defs = set()
+    errors = []
     try:
         with zipfile.ZipFile(path) as z:
-            for n in z.namelist():
-                if not n.endswith(".class"):
-                    continue
-                defs.add(n[: -len(".class")])
-                refs |= class_refs(z.read(n))
-    except Exception as e:  # 损坏/非 zip
-        print(f"  ! 无法读取 {path}: {e}", file=sys.stderr)
-    return defs, refs
+            names = z.namelist()
+            if path.lower().endswith(".aar"):
+                inner = [n for n in names if n.lower().endswith(".jar")]
+                if not inner:
+                    errors.append("aar 内没有任何 jar（classes.jar 缺失？）")
+                for n in inner:
+                    with zipfile.ZipFile(io.BytesIO(z.read(n))) as zi:
+                        d, r = _scan_class_zip(zi)
+                        defs |= d
+                        refs |= r
+            else:
+                defs, refs = _scan_class_zip(z)
+    except Exception as e:  # 损坏 / 非 zip / 内层 jar 坏
+        errors.append(f"{type(e).__name__}: {e}")
+    return defs, refs, errors
 
 
 def jar_descs(path):
@@ -245,10 +287,24 @@ def main():
     # 后者才是需要找提供方的外部引用。
     own_defs = set()
     per_jar = {}
+    scan_errors = []
     for j in jars:
-        defs, refs = jar_classes(j)
+        defs, refs, errs = jar_classes(j)
+        if errs:
+            scan_errors.append((j, errs))
         per_jar[j] = refs
         own_defs |= defs
+        if args.verbose:
+            print(f"   {os.path.basename(j):<46} defs={len(defs):<6} refs={len(refs)}")
+
+    # fail-closed：产物读不全就不能断言「依赖完整」。早先只往 stderr 打一行就按空集继续，
+    # 等于把「产物损坏」或「aar 没解包」静默当成通过。
+    if scan_errors:
+        print("\n[FAIL] 渠道 SDK 产物解析失败，无法判定依赖完整性：")
+        for j, errs in scan_errors:
+            for e in errs:
+                print(f"   {os.path.basename(j)}: {e}")
+        return 1
 
     # eventbus / onetrack 由 mi_sdk/libs 自带，视为已提供
     bundled_roots = (
@@ -263,6 +319,8 @@ def main():
             if d.startswith(PLATFORM_PREFIXES):
                 continue
             if d.startswith(OPTIONAL_PREFIXES):
+                continue
+            if is_r_class(d):  # AAPT2 生成的资源类，运行期一定存在
                 continue
             if d in own_defs:  # 由渠道 SDK 自带的某个 jar 真正定义
                 continue

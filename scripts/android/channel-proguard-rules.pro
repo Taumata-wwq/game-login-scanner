@@ -304,7 +304,27 @@ void onEvent*(**);
 -keep interface com.tencent.ysdk.module.AntiAddiction.listener.QueryCertificationCallback {*;}
 -keep class com.tencent.ysdk.module.AntiAddiction.model.CertificationRect {*;}
 
--ignorewarnings
+# 注意（2026-10-21 审计 P3-14）：此处原为参考项目整段拷来的 `-ignorewarnings`。它让 R8
+# 忽略**所有**警告，包括「缺失类」，正好抵消本文件上方（59-76 / 123-132）刻意收窄
+# `-dontwarn com.google.**` 的目的：构建通过、运行期 NoClassDefFoundError（小米「添加
+# 账号」闪退的真因）。移除后，必需依赖一旦缺失就在构建期失败；渠道 SDK 内可选的第三方
+# 包各自已有逐包 -dontwarn 覆盖，不需要这行。
+#
+# 2026-10-21 实测（移除 -ignorewarnings 后的首次 release 构建）：R8 报 27 个「缺失类」，
+# 全部是厂商 SDK 引用了「只在对应 ROM 上才存在的系统 API」或可选组件，编译期必然缺失：
+#   com.huawei.android.* / com.huawei.system.BuildEx / com.huawei.libcore.io.* → EMUI 系统 API
+#   com.huawei.hianalytics.* / appgallery.log / secure.* / ohos.localability.*  → HMS 可选组件
+#   org.bouncycastle.crypto.*                                                  → 可选 BC Provider
+# 这些属于「预期缺类」，用逐包 -dontwarn 精确声明；com.google.protobuf / com.google.gson
+# 这类真依赖不在其中，仍由构建期强制检查兜住（缺了就直接失败）。
+-dontwarn com.huawei.android.**
+-dontwarn com.huawei.appgallery.**
+-dontwarn com.huawei.hianalytics.**
+-dontwarn com.huawei.libcore.**
+-dontwarn com.huawei.ohos.**
+-dontwarn com.huawei.secure.**
+-dontwarn com.huawei.system.**
+-dontwarn org.bouncycastle.crypto.**
 -keepattributes *Annotation*
 -keepattributes Exceptions
 -keepattributes InnerClasses

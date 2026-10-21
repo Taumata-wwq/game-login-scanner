@@ -5,6 +5,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.net.Socket
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
@@ -39,27 +40,33 @@ object StreamTunnel {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val localPort = server.localPort
         Thread {
+            var client: Socket? = null
+            var tls: SSLSocket? = null
             try {
                 server.soTimeout = 10000
-                val client = server.accept()
-                val tls = (SSLSocketFactory.getDefault().createSocket(host, port) as SSLSocket)
+                val c = server.accept()
+                client = c
+                val s = (SSLSocketFactory.getDefault().createSocket(host, port) as SSLSocket)
+                tls = s
                 // 启用主机名验证（默认 SSLSocket 不校验 hostname，易受 MITM）。
-                tls.sslParameters = tls.sslParameters.apply {
+                s.sslParameters = s.sslParameters.apply {
                     endpointIdentificationAlgorithm = "HTTPS"
                 }
-                tls.startHandshake()
-                val up = Thread { pump(client.getInputStream(), tls.outputStream) }
-                val down = Thread { pump(tls.inputStream, client.outputStream) }
+                s.startHandshake()
+                val up = Thread { pump(c.getInputStream(), s.outputStream) }
+                val down = Thread { pump(s.inputStream, c.outputStream) }
                 up.isDaemon = true
                 down.isDaemon = true
                 up.start()
                 down.start()
                 up.join()
                 down.join()
-                try { client.close() } catch (_: Exception) {}
-                try { tls.close() } catch (_: Exception) {}
             } catch (_: Exception) {
             } finally {
+                // 审计 P3-15：两端必须在这里关。原来 close 写在 try 末尾，握手失败/异常
+                // 路径会跳过它，逐次遗留 fd。读方向不设超时是刻意的——FLV 长连接允许空闲。
+                try { client?.close() } catch (_: Exception) {}
+                try { tls?.close() } catch (_: Exception) {}
                 try { server.close() } catch (_: Exception) {}
             }
         }.apply { isDaemon = true; start() }

@@ -83,20 +83,31 @@ if ($SkipPatch) {
     Write-Host "-- patch-gen 完成 --" -ForegroundColor Green
 }
 
-# ---- 2) 同步校验：确保 android-plugin 的每个 .kt 都已进 gen ----
+# ---- 2) 同步校验：确保每个源目录的 .kt 都已进 gen ----
 # 这是对"构建成功但功能静默失效"的最后一道防线：patch-gen 若因某种原因漏拷/漏跑，
 # 这里直接报错而不是产出一个缺功能的包。
+# 覆盖两个源目录：android-plugin（总是）与 android-plugin-huawei（仅当华为渠道启用）。
 $pluginSrc = Join-Path $root "src-tauri/android-plugin"
+$huaweiPluginSrc = Join-Path $root "src-tauri/android-plugin-huawei"
+$huaweiJson = Join-Path $root "vendor/huawei/agconnect-services.json"
 $pluginDst = Join-Path $gen "app/src/main/java/com/taumata/scanner/plugins"
-if (Test-Path $pluginSrc) {
+# 华为插件只在 vendor/huawei/agconnect-services.json 存在时才由 patch-gen 拷入 gen，
+# 未启用时把它算进"应当存在"的清单会误报。
+$srcDirs = @()
+if (Test-Path $pluginSrc) { $srcDirs += $pluginSrc }
+if ((Test-Path $huaweiJson) -and (Test-Path $huaweiPluginSrc)) { $srcDirs += $huaweiPluginSrc }
+if ($srcDirs.Count -gt 0) {
     $missing = @()
-    Get-ChildItem $pluginSrc -Filter *.kt | ForEach-Object {
-        $dst = Join-Path $pluginDst $_.Name
-        if (-not (Test-Path $dst)) {
-            $missing += $_.Name
-        } elseif ((Get-Item $dst).LastWriteTime -lt $_.LastWriteTime) {
-            # 时间戳更旧的 gen 副本 ⇒ 源码更新而未同步
-            $missing += "$($_.Name)（gen 副本较旧）"
+    foreach ($srcDir in $srcDirs) {
+        $srcTag = Split-Path $srcDir -Leaf
+        Get-ChildItem $srcDir -Filter *.kt | ForEach-Object {
+            $dst = Join-Path $pluginDst $_.Name
+            if (-not (Test-Path $dst)) {
+                $missing += "$($_.Name)（$srcTag 未同步）"
+            } elseif ((Get-Item $dst).LastWriteTime -lt $_.LastWriteTime) {
+                # 时间戳更旧的 gen 副本 ⇒ 源码更新而未同步
+                $missing += "$($_.Name)（gen 副本较旧）"
+            }
         }
     }
     if ($missing.Count -gt 0) {

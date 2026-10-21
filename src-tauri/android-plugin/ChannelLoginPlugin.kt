@@ -129,6 +129,51 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
     // ---------- vivo（照参考项目 login/Vivo.java） ----------
 
     /**
+     * 当前等待 vivo 回调的 invoke（审计 P2-11）。
+     *
+     * `VivoUnionSDK.registerAccountCallback` 注册进 SDK 内部静态回调表，且 SDK 没有
+     * unregister 接口。若每次登录都新建匿名 VivoAccountCallback，回调对象连同它捕获的
+     * Invoke / Activity 会随登录次数无上限累积，旧对象也仍可能被 SDK 回调（对已结束的
+     * invoke 重复应答）。这里改为：插件内只保留一个回调实例，每次登录只替换它消费的
+     * invoke，消费后立即置空——重复回调被丢弃，不再累积可达状态。
+     */
+    @Volatile
+    private var vivoInvoke: Invoke? = null
+
+    private val vivoCallback = object : VivoAccountCallback {
+        override fun onVivoAccountLogin(p0: String?, uid: String?, token: String?) {
+            if (uid == null || token == null) {
+                finishVivo(null, "vivo 登录返回空凭证")
+                return
+            }
+            val cred = JSONObject()
+            cred.put("authtoken", token)
+            val obj = JSObject()
+            obj.put("cred", cred.toString())
+            obj.put("uid", uid)
+            obj.put("name", uid)
+            finishVivo(obj, null)
+        }
+
+        override fun onVivoAccountLogout(code: Int) {
+            finishVivo(null, "vivo 账号登出（code=$code）")
+        }
+
+        override fun onVivoAccountLoginCancel() {
+            finishVivo(null, "vivo 登录已取消")
+        }
+    }
+
+    /** 单次消费：先取出并置空 invoke，再回 UI 线程应答；重复回调直接被丢弃。 */
+    private fun finishVivo(obj: JSObject?, error: String?) {
+        val inv = vivoInvoke ?: return
+        vivoInvoke = null
+        activity.runOnUiThread {
+            if (error != null) inv.reject(error) else if (obj != null) inv.resolve(obj)
+        }
+    }
+
+    /**
      * vivo 渠道登录。
      *
      * 链路与参考项目一致：initSdk(appKey) → registerAccountCallback → login
@@ -141,29 +186,13 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
         // 参考项目传 BuildConfig.DEBUG；本应用统一以非调试模式初始化（登录链路一致，
         // 该标志只影响 SDK 自有的日志与调试提示）。
         VivoUnionSDK.initSdk(activity, VIVO_APP_KEY, false)
-        VivoUnionSDK.registerAccountCallback(activity, object : VivoAccountCallback {
-            override fun onVivoAccountLogin(p0: String?, uid: String?, token: String?) {
-                if (uid == null || token == null) {
-                    activity.runOnUiThread { invoke.reject("vivo 登录返回空凭证") }
-                    return
-                }
-                val cred = JSONObject()
-                cred.put("authtoken", token)
-                val obj = JSObject()
-                obj.put("cred", cred.toString())
-                obj.put("uid", uid)
-                obj.put("name", uid)
-                activity.runOnUiThread { invoke.resolve(obj) }
-            }
-
-            override fun onVivoAccountLogout(code: Int) {
-                activity.runOnUiThread { invoke.reject("vivo 账号登出（code=$code）") }
-            }
-
-            override fun onVivoAccountLoginCancel() {
-                activity.runOnUiThread { invoke.reject("vivo 登录已取消") }
-            }
-        })
+        // 上一次登录未收尾（用户中途返回等）：先让它失败，避免 JS 侧永久等待。
+        vivoInvoke?.reject("vivo 登录被新的登录请求取代")
+        vivoInvoke = invoke
+        // 仍每次登录都注册（而不是只注册一次）：initSdk 是否会重置 SDK 内部回调表未知，
+        // 而 vivo（B 服）本项目不做真机验证，保持原有时序风险最小；重复注册同一实例
+        // 只是让表里多几个同引用项，不再新增可达状态。
+        VivoUnionSDK.registerAccountCallback(activity, vivoCallback)
         VivoUnionSDK.login(activity)
     }
 
