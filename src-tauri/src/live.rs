@@ -1719,8 +1719,13 @@ fn decode_hls_session(
     let mut last_seq = playlist.media_sequence.saturating_sub(1);
     let mut skipped_first = false;
     let mut fail_streak = 0u32;
-    // 连续解码失败计数（与 FLV 路径同一个阈值），到限即报错走降级/重连。
+    // 连续解码失败计数（阈值与 FLV 路径相同，见 DECODE_FAIL_LIMIT），到限即报错走
+    // 降级/重连。与 FLV 的差别：这里把「解码调用成功但零输出」也算作失败——HLS 没有
+    // FLV 那样的逐 tag 心跳，「分片能下、画面解不出来」的流若不计数就会永远占带宽与
+    // CPU 却零帧零报错。两个分项只为让日志能区分成因。
     let mut dec_fails = 0u32;
+    let mut dec_none = 0u32;
+    let mut dec_err = 0u32;
     // P1/P3：按分片边界调度轮询——无新分片时轮询间隔取 target_duration/4
     // （1 秒分片 → 250ms），夹在 [150, 400]ms；不再用固定 300ms。
     let poll_ms = (playlist.target_duration * 1000 / 4).clamp(150, 400);
@@ -1810,18 +1815,24 @@ fn decode_hls_session(
                     continue;
                 }
                 let media_ts = (s.time * 1000 / timescale) as u32;
-                if decode_and_push(&mut decoder, &annexb, media_ts, frames) {
-                    dec_fails = 0;
-                } else {
-                    dec_fails += 1;
-                    if dec_fails.is_multiple_of(20) {
-                        log::warn!("HLS: H.264 连续解码无输出（{dec_fails} 次）");
-                    }
-                    if dec_fails >= DECODE_FAIL_LIMIT {
-                        return Err(
-                            "H.264 解码持续失败（编码不兼容或解码器能力不足），降级清晰度重试"
-                                .to_string(),
-                        );
+                match decode_and_push(&mut decoder, &annexb, media_ts, frames) {
+                    DecodeOutcome::Frames => dec_fails = 0,
+                    kind => {
+                        dec_fails += 1;
+                        match kind {
+                            DecodeOutcome::None => dec_none += 1,
+                            _ => dec_err += 1,
+                        }
+                        if dec_fails.is_multiple_of(20) {
+                            log::warn!(
+                                "HLS: H.264 连续无输出/解码失败 {dec_fails} 次（无输出 {dec_none} / 错误 {dec_err}）"
+                            );
+                        }
+                        if dec_fails >= DECODE_FAIL_LIMIT {
+                            return Err(format!(
+                                "H.264 解码持续失败（连续 {dec_fails} 次：无输出 {dec_none} / 错误 {dec_err}），降级清晰度重试"
+                            ));
+                        }
                     }
                 }
             }
@@ -1843,26 +1854,41 @@ fn decode_hls_session(
     }
 }
 
+/// HLS 单次解码调用的结果：调用方需要区分「解码器报错」与「调用成功但零输出」，
+/// 两者都计入连续失败（见调用点的说明），但日志与错误文案要能区分成因。
+enum DecodeOutcome {
+    /// 产出至少一帧。
+    Frames,
+    /// 调用成功但没有任何输出（如只含参数集/SEI 的访问单元）。
+    None,
+    /// 解码器返回错误。
+    Err,
+}
+
 /// 解码一个 Annex-B 访问单元并把产出的帧推入帧总线（HLS 路径用）。
-/// 返回是否产出至少一帧：单帧错误本身仍静默，但调用方需要连续失败计数——
-/// 否则「分片能下、H.264 解不出来」的流会永远占带宽和 CPU 却零帧、零报错。
+/// 单帧错误本身仍静默，但调用方需要连续失败计数——否则「分片能下、H.264 解不出来」
+/// 的流会永远占带宽和 CPU 却零帧、零报错。
 fn decode_and_push(
     decoder: &mut dyn VideoDecoder,
     annexb: &[u8],
     media_ts: u32,
     frames: &Arc<Mutex<Frames>>,
-) -> bool {
+) -> DecodeOutcome {
     match decoder.decode(annexb, media_ts) {
         Ok(list) => {
             let produced = !list.is_empty();
             for of in list {
                 push_decoded(frames, media_ts, of);
             }
-            produced
+            if produced {
+                DecodeOutcome::Frames
+            } else {
+                DecodeOutcome::None
+            }
         }
         Err(e) => {
             log::debug!("HLS 单帧解码失败: {e}");
-            false
+            DecodeOutcome::Err
         }
     }
 }

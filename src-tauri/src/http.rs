@@ -872,7 +872,6 @@ mod tests {
         vec![("Transfer-Encoding".to_string(), "chunked".to_string())]
     }
 
-    /// 64 位最大长度帧头：旧实现下 `size + 2` 回绕，读指针直接跨过 8MiB 上限。
     #[test]
     fn excerpt_never_splits_a_char_boundary() {
         let s = "中文abc"; // 中(3) 文(3) a b c
@@ -887,6 +886,7 @@ mod tests {
         assert_eq!(excerpt("", 10), "");
     }
 
+    /// 64 位最大长度帧头：旧实现下 `size + 2` 回绕，读指针直接跨过 8MiB 上限。
     #[test]
     fn chunked_body_rejects_oversized_frame_without_wrapping() {
         let cr = char::from(13u8);
