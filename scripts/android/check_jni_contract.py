@@ -23,6 +23,13 @@ import re
 import sys
 from pathlib import Path
 
+# CI（GitHub Actions 的 windows-latest）默认 stdout 编码是 cp1252，打印中文会在
+# print() 里抛 UnicodeEncodeError——那会把「检查通过/失败」淹没成环境报错。此处先把
+# 两个流固定成 UTF-8（不支持 reconfigure 的老环境退化为原行为）。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parents[2]
 KT_DIRS = [
     ROOT / "src-tauri" / "android-plugin",

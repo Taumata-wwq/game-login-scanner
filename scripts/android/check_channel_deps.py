@@ -29,6 +29,13 @@ import re
 import sys
 import zipfile
 
+# CI（GitHub Actions 的 windows-latest）默认 stdout 编码是 cp1252，打印中文会在
+# print() 里抛 UnicodeEncodeError——那会把「检查通过/失败」淹没成环境报错。此处先把
+# 两个流固定成 UTF-8（不支持 reconfigure 的老环境退化为原行为）。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # CONSTANT_Class 里存的是**内部名**（`com/foo/Bar`），不带 `L…;` 描述符外壳；
 # 只有数组类型才写成 `[Lcom/foo/Bar;`。早先按描述符形态匹配，导致一个都没命中、
 # 检查恒为"通过"（负向测试两次都没报出来就是这个原因）。
