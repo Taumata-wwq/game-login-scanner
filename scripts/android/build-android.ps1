@@ -139,6 +139,27 @@ if (Test-Path $depCheck) {
     }
 }
 
+# ---- 2c) Kotlin↔Rust JNI 契约（Kotlin external fun 与 Rust 导出符号必须一一对应） ----
+# 背景：JNI 符号名是人手拼出来的字符串，改名/挪包不会产生任何编译错误，只会在真机上
+# 以 UnsatisfiedLinkError 崩溃；@Keep 缺失则被 R8 裁掉，同样是运行期才炸。
+# check_jni_contract.py 同时校验符号配对、@Keep、loadLibrary 与包名（CI 也跑同一脚本）。
+$jniCheck = Join-Path $PSScriptRoot "check_jni_contract.py"
+if (Test-Path $jniCheck) {
+    Write-Host "`n-- Kotlin↔Rust JNI 契约检查 --" -ForegroundColor Cyan
+    $py2 = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py2) {
+        Write-Warning "未找到 python，跳过 JNI 契约检查（CI 仍会校验）"
+    } else {
+        & python $jniCheck
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "JNI 契约不一致（见上方清单）：Kotlin external fun 与 Rust Java_* 符号、" +
+                "@Keep、loadLibrary、包名必须严格对应。"
+            exit 1
+        }
+        Write-Host "-- JNI 契约检查通过 --" -ForegroundColor Green
+    }
+}
+
 # ---- 3) 提链构建 ----
 $typeFlag = if ($Debug) { "--debug" } else { "" }
 Write-Host "`n-- cargo tauri android build $typeFlag --" -ForegroundColor Cyan
@@ -169,5 +190,8 @@ if (Test-Path $apkPath) {
         Write-Host ("  已复制到 dist/（SHA256 前16位 {0}）" -f $hash)
     }
 } else {
-    Write-Warning "未在预期路径找到 APK：$apkPath"
+    # 构建"成功"却没有产物，只能说明产物路径变了或 Gradle 静默跳过——对发布入口而言
+    # 这是失败，不能只 warning 了事（否则 dist/ 里会继续躺着上一次的旧包）。
+    Write-Error "构建结束但未在预期路径找到 APK：$apkPath"
+    exit 1
 }
