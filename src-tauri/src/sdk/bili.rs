@@ -99,12 +99,8 @@ async fn post_form(url: &str, form: &str) -> Result<Value, String> {
     )
     .await
     .map_err(|e| format!("B 站请求失败: {e}"))?;
-    serde_json::from_str(&resp.body).map_err(|_| {
-        format!(
-            "B 站响应非 JSON: {}",
-            &resp.body[..resp.body.len().min(200)]
-        )
-    })
+    serde_json::from_str(&resp.body)
+        .map_err(|_| format!("B 站响应非 JSON: {}", crate::http::excerpt(&resp.body, 200)))
 }
 
 fn tv_signed_form(extra: &[(&str, String)]) -> String {
@@ -217,12 +213,8 @@ async fn send_bili_post(url: &str, data: &str) -> Result<Value, String> {
     )
     .await
     .map_err(|e| format!("B 站请求失败: {e}"))?;
-    serde_json::from_str(&resp.body).map_err(|_| {
-        format!(
-            "B 站响应非 JSON: {}",
-            &resp.body[..resp.body.len().min(200)]
-        )
-    })
+    serde_json::from_str(&resp.body)
+        .map_err(|_| format!("B 站响应非 JSON: {}", crate::http::excerpt(&resp.body, 200)))
 }
 
 /// 获取用户名（失败不影响登录，仅用于展示）。

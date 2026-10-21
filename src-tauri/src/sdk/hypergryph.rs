@@ -58,12 +58,8 @@ async fn post_json(path: &str, body: &Value, token: Option<&str>) -> Result<Valu
         .await
         .map_err(|e| format!("鹰角请求失败: {e}"))?;
     // 参数校验失败走 HTTP 400：响应无 status，只有 msg。
-    let json: Value = serde_json::from_str(&resp.body).map_err(|_| {
-        format!(
-            "鹰角响应非 JSON: {}",
-            &resp.body[..resp.body.len().min(200)]
-        )
-    })?;
+    let json: Value = serde_json::from_str(&resp.body)
+        .map_err(|_| format!("鹰角响应非 JSON: {}", crate::http::excerpt(&resp.body, 200)))?;
     if !(200..300).contains(&resp.status) {
         let msg = json
             .get("msg")

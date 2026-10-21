@@ -105,8 +105,12 @@ fn enter_sync(web_rid: &str, ttwid: &str) -> Result<(String, String), String> {
 }
 
 fn parse_enter_body(body: &str, web_rid: &str, referer: &str) -> Result<(String, String), String> {
-    let v: Value = serde_json::from_str(body)
-        .map_err(|_| format!("抖音直播接口响应非 JSON: {}", &body[..body.len().min(120)]))?;
+    let v: Value = serde_json::from_str(body).map_err(|_| {
+        format!(
+            "抖音直播接口响应非 JSON: {}",
+            crate::http::excerpt(body, 120)
+        )
+    })?;
     parse_douyin_flv(&v)
         .map(|u| (u, referer.to_string()))
         .ok_or_else(|| {

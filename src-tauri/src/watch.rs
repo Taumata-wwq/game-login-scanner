@@ -237,7 +237,11 @@ fn parse_batch(data: &[u8], out: &mut Vec<i64>, auth_code: &mut Option<i64>, dep
             // 普通消息
             5 => match ver {
                 2 => {
-                    if let Ok(inf) = miniz_oxide::inflate::decompress_to_vec_zlib(body) {
+                    // WS 帧本身限 4MiB，但解压输出默认无上限：zlib 炸弹可把内存打爆（abort）。
+                    const MAX_INFLATE: usize = 8 * 1024 * 1024;
+                    if let Ok(inf) =
+                        miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(body, MAX_INFLATE)
+                    {
                         parse_batch(&inf, out, auth_code, depth + 1);
                     }
                 }

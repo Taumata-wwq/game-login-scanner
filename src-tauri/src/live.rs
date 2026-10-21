@@ -89,7 +89,7 @@ async fn resolve_stream(room: &str, qn: u32) -> Result<(String, String), String>
             let v: Value = serde_json::from_str(&resp.body).map_err(|_| {
                 format!(
                     "B站直播接口响应非 JSON: {}",
-                    &resp.body[..resp.body.len().min(120)]
+                    crate::http::excerpt(&resp.body, 120)
                 )
             })?;
             if v.get("code").and_then(|x| x.as_i64()) != Some(0) {
@@ -129,7 +129,7 @@ async fn resolve_stream(room: &str, qn: u32) -> Result<(String, String), String>
             let v2: Value = serde_json::from_str(&resp2.body).map_err(|_| {
                 format!(
                     "B站直播接口响应非 JSON: {}",
-                    &resp2.body[..resp2.body.len().min(120)]
+                    crate::http::excerpt(&resp2.body, 120)
                 )
             })?;
             if v2.get("code").and_then(|x| x.as_i64()) != Some(0) {
@@ -1105,6 +1105,9 @@ pub fn stop_room(platform: Platform, room: &str) {
         s.stop.store(true, Ordering::SeqCst);
         log::info!("直播会话已断开（{} {}）", s.platform.label(), s.room);
     }
+    // 会话已销毁：清掉扫码保活。否则该 id 会永远留在集合里，之后同房间重建时
+    // refresh_paused 会认为「不该暂停」，后台白拉流（keepalive 本意是只在扫码期间保活）。
+    set_scan_keepalive(&key, false);
     // 被停的是前台会话：前台清空（无自动接管，由前端切换）。
     if active_id().as_deref() == Some(key.as_str()) {
         set_active_id(None);
@@ -1116,6 +1119,8 @@ pub fn stop_all() {
     set_active_id(None);
     for s in take_all_sessions() {
         s.stop.store(true, Ordering::SeqCst);
+        // 同 stop_room：会话销毁时一并清掉扫码保活，避免残留 id 影响后续重建。
+        set_scan_keepalive(&s.id, false);
         log::info!("直播会话已断开（{} {}）", s.platform.label(), s.room);
     }
 }
@@ -1644,17 +1649,25 @@ fn decode_loop(
 /// 仅当会话池中仍是本线程对应的会话时移除（防止误删同房间重建的新会话）。
 /// 用 frames 指针匹配：解码线程只持有自己那帧总线的引用。
 fn remove_session_if(frames: &Arc<Mutex<Frames>>) {
-    let mut sessions = lock_sessions();
-    let Some(map) = sessions.as_mut() else {
-        return;
+    let matched_key = {
+        let mut sessions = lock_sessions();
+        let Some(map) = sessions.as_mut() else {
+            return;
+        };
+        let k = map
+            .iter()
+            .find(|(_, s)| Arc::ptr_eq(&s.frames, frames))
+            .map(|(k, _)| k.clone());
+        if let Some(k) = &k {
+            map.remove(k);
+        }
+        k
     };
-    let matched_key = map
-        .iter()
-        .find(|(_, s)| Arc::ptr_eq(&s.frames, frames))
-        .map(|(k, _)| k.clone());
     if let Some(k) = matched_key {
-        map.remove(&k);
         log::info!("直播会话已关闭（流结束/重连失败），回退屏幕预览与扫码");
+        // 先释放会话锁再清保活：set_scan_keepalive 会 refresh_paused，
+        // 其加锁顺序是 keepalive -> sessions，持锁调用会反向加锁。
+        set_scan_keepalive(&k, false);
     }
 }
 
@@ -1706,6 +1719,8 @@ fn decode_hls_session(
     let mut last_seq = playlist.media_sequence.saturating_sub(1);
     let mut skipped_first = false;
     let mut fail_streak = 0u32;
+    // 连续解码失败计数（与 FLV 路径同一个阈值），到限即报错走降级/重连。
+    let mut dec_fails = 0u32;
     // P1/P3：按分片边界调度轮询——无新分片时轮询间隔取 target_duration/4
     // （1 秒分片 → 250ms），夹在 [150, 400]ms；不再用固定 300ms。
     let poll_ms = (playlist.target_duration * 1000 / 4).clamp(150, 400);
@@ -1783,15 +1798,32 @@ fn decode_hls_session(
             last_seq = seg.seq;
             let samples = crate::hls::parse_segment(&seg_bytes, track_id);
             for s in samples {
-                if s.offset + s.size > seg_bytes.len() {
+                let Some(end) = s
+                    .offset
+                    .checked_add(s.size)
+                    .filter(|end| *end <= seg_bytes.len())
+                else {
                     continue;
-                }
-                let annexb = avcc_to_annexb(&seg_bytes[s.offset..s.offset + s.size]);
+                };
+                let annexb = avcc_to_annexb(&seg_bytes[s.offset..end]);
                 if annexb.is_empty() {
                     continue;
                 }
                 let media_ts = (s.time * 1000 / timescale) as u32;
-                decode_and_push(&mut decoder, &annexb, media_ts, frames);
+                if decode_and_push(&mut decoder, &annexb, media_ts, frames) {
+                    dec_fails = 0;
+                } else {
+                    dec_fails += 1;
+                    if dec_fails.is_multiple_of(20) {
+                        log::warn!("HLS: H.264 连续解码无输出（{dec_fails} 次）");
+                    }
+                    if dec_fails >= DECODE_FAIL_LIMIT {
+                        return Err(
+                            "H.264 解码持续失败（编码不兼容或解码器能力不足），降级清晰度重试"
+                                .to_string(),
+                        );
+                    }
+                }
             }
         }
         if lag_window.elapsed() >= Duration::from_secs(5) && backlog_n > 0 {
@@ -1812,16 +1844,25 @@ fn decode_hls_session(
 }
 
 /// 解码一个 Annex-B 访问单元并把产出的帧推入帧总线（HLS 路径用）。
-/// 单帧错误静默（持续失败由上层重连兜底）。
+/// 返回是否产出至少一帧：单帧错误本身仍静默，但调用方需要连续失败计数——
+/// 否则「分片能下、H.264 解不出来」的流会永远占带宽和 CPU 却零帧、零报错。
 fn decode_and_push(
     decoder: &mut dyn VideoDecoder,
     annexb: &[u8],
     media_ts: u32,
     frames: &Arc<Mutex<Frames>>,
-) {
-    if let Ok(list) = decoder.decode(annexb, media_ts) {
-        for of in list {
-            push_decoded(frames, media_ts, of);
+) -> bool {
+    match decoder.decode(annexb, media_ts) {
+        Ok(list) => {
+            let produced = !list.is_empty();
+            for of in list {
+                push_decoded(frames, media_ts, of);
+            }
+            produced
+        }
+        Err(e) => {
+            log::debug!("HLS 单帧解码失败: {e}");
+            false
         }
     }
 }
@@ -2260,7 +2301,7 @@ fn decode_session(
                 log::info!(
                     "AVC 序列参数集: {} 字节（体前 8 字节 {:02x?}）",
                     param_sets.len(),
-                    &body[..8]
+                    &body[..8.min(body.len())]
                 );
                 if !param_sets.is_empty() {
                     log::info!(

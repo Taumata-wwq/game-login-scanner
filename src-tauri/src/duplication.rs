@@ -227,6 +227,11 @@ enum Grab {
 impl MonitorDup {
     /// 把 key（显示器或区域矩形）换算为输出内裁剪矩形。
     fn crop_of(&self, key: MonitorKey) -> (u32, u32, u32, u32) {
+        // clamp 在 min > max 时会 panic，所以先把退化的输出尺寸收敛掉
+        // （DXGI 模式理论上非退化，create_monitor 也会另行拒绝零宽高）。
+        if self.w == 0 || self.h == 0 {
+            return (0, 0, 1, 1);
+        }
         let x = (key.0 - self.output_rect.0).clamp(0, self.w as i32 - 1) as u32;
         let y = (key.1 - self.output_rect.1).clamp(0, self.h as i32 - 1) as u32;
         let w = (key.2 as u32).clamp(1, self.w - x);
@@ -1005,7 +1010,10 @@ fn create_monitor(key: MonitorKey) -> Result<MonitorDup, ()> {
         let dup = output1.DuplicateOutput(&device).map_err(|_| ())?;
         let dd = dup.GetDesc();
         // 仅支持 SDR BGRA；HDR（浮点格式）走 GDI 兜底。
-        if dd.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || dd.ModeDesc.Width == 0 {
+        if dd.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+            || dd.ModeDesc.Width == 0
+            || dd.ModeDesc.Height == 0
+        {
             return Err(());
         }
         let (w, h) = (dd.ModeDesc.Width, dd.ModeDesc.Height);

@@ -313,16 +313,31 @@ fn parse_trun(
     if flags & 0x4 != 0 {
         i += 4;
     }
-    let mut cur = (moof_start as i64 + data_offset) as usize;
+    // 容器元数据来自网络，只能当作待校验的输入：count 直接来自 trun，
+    // u32::MAX 会让 with_capacity 申请约 100GB 并 abort；每个样本还要按 flags 读
+    // 最多 16 字节，必须逐次确认 body 尚未越界，否则 panic。
+    if count > 200_000 {
+        return None;
+    }
+    let mut cur = match (moof_start as i64).checked_add(data_offset) {
+        Some(v) if v >= 0 => v as usize,
+        _ => return None,
+    };
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         let mut dur = 0u32;
         let mut size = default_size.unwrap_or(0);
         if flags & 0x100 != 0 {
+            if i + 4 > body.len() {
+                return None;
+            }
             dur = u32::from_be_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]);
             i += 4;
         }
         if flags & 0x200 != 0 {
+            if i + 4 > body.len() {
+                return None;
+            }
             size = u32::from_be_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
             i += 4;
         }
@@ -333,7 +348,7 @@ fn parse_trun(
             i += 4;
         }
         out.push((cur, size, dur));
-        cur += size;
+        cur = cur.checked_add(size)?;
     }
     Some(out)
 }

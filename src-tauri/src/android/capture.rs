@@ -26,8 +26,13 @@ pub struct FrameSlot {
 static SLOT: OnceLock<Mutex<Option<FrameSlot>>> = OnceLock::new();
 /// 屏幕物理尺寸（授权建立时由 Kotlin 上报；供首帧到达前查询）。
 static SCREEN: OnceLock<Mutex<Option<(u32, u32)>>> = OnceLock::new();
-/// `scan_frame` 上次消费的内容指纹（相同则视为画面无变化）。
-static LAST_SCAN_FP: AtomicU64 = AtomicU64::new(0);
+/// `scan_frame` 各降采样倍率上次消费的内容指纹（相同则视为画面无变化）。
+///
+/// **必须按 scale 分档**：主档（1/2）与兜底档（全分辨率）跑在同一份帧槽上，
+/// 若共用一个指纹，主档先消费掉指纹后兜底档立刻被判「无变化」→ 全分辨率兜底
+/// 永不执行（`scan.rs` 的 `FullSource::Screen` 沦为死代码）。与 Windows 侧
+/// `MonitorDup::scan_seen[scale]` 的分档语义对齐。索引 0 不用（scale 从 1 起）。
+static LAST_SCAN_FP: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 /// `preview_frame` 上次消费的帧序号。
 static LAST_PREVIEW_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -113,11 +118,16 @@ pub fn screen_size() -> Option<(u32, u32)> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-pub fn last_scan_fp() -> u64 {
-    LAST_SCAN_FP.load(Ordering::Relaxed)
+/// 该 scale 档上次消费的指纹。`scale` 收敛到 `[1, 2]`（见 `rgba_gray_stride`）。
+fn scan_fp_slot(scale: u32) -> &'static AtomicU64 {
+    &LAST_SCAN_FP[scale.clamp(1, 2) as usize]
 }
-pub fn set_last_scan_fp(v: u64) {
-    LAST_SCAN_FP.store(v, Ordering::Relaxed);
+
+pub fn last_scan_fp(scale: u32) -> u64 {
+    scan_fp_slot(scale).load(Ordering::Relaxed)
+}
+pub fn set_last_scan_fp(scale: u32, v: u64) {
+    scan_fp_slot(scale).store(v, Ordering::Relaxed);
 }
 pub fn last_preview_seq() -> u64 {
     LAST_PREVIEW_SEQ.load(Ordering::Relaxed)
@@ -130,7 +140,8 @@ pub fn set_last_preview_seq(v: u64) {
 /// 屏幕尺寸保留（授权重建前展示层仍可能需要）。
 pub fn on_capture_stopped() {
     *lock() = None;
-    set_last_scan_fp(0);
+    set_last_scan_fp(1, 0);
+    set_last_scan_fp(2, 0);
     set_last_preview_seq(0);
 }
 

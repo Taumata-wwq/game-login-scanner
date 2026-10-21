@@ -171,7 +171,7 @@ opt-level = "z"
 
 # 基准 / 快速迭代测试专用：继承 release 的优化配置、关闭 fat LTO。
 # 动机：release 的全量 LTO 构建约 12 分钟，基准「优化前后对比」不可接受。
-# 用法：cargo test --profile fastbench --test bench_qr -- --ignored --nocapture
+# 用法：cargo test --profile fastbench --test bench_qr_live -- --ignored --nocapture
 # 注：不配置 [profile.fastbench.package.*] 覆写（本 crate 用继承的 "s"）。
 [profile.fastbench]
 inherits = "release"

@@ -61,14 +61,6 @@
 
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  .sectitle {
-    display: flex; align-items: center; gap: 7px;
-    font-size: 9.5px; font-weight: 600; color: var(--faint);
-    letter-spacing: 0.1em; text-transform: uppercase;
-    height: 13px; flex: none; margin-top: 1px;
-  }
-  .sectitle::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-
   /* ===== 扫描区域（实时监视器） ===== */
   /* canvas 尺寸由 .vp-stage（16:9）控制。 */
   #previewCanvas.dragging { cursor: grabbing; }
@@ -224,7 +216,6 @@
     outline: none; font: inherit;
   }
   .txtin:focus, .field-row input:focus { border-color: #8a8a8a; }
-  .txtin.full { width: 100%; }
   /* 分段控件（登录方式页签）。 */
   .seg3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; }
   /* B站仅两页签（二维码 / 密码）时，改为二等分。 */

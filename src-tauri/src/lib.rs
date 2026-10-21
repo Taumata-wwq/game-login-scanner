@@ -120,31 +120,9 @@ fn get_config(state: tauri::State<'_, AppState>) -> AppConfig {
         .clone()
 }
 
-#[tauri::command]
-fn save_config(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    cfg: AppConfig,
-) -> Result<(), String> {
-    let c = cfg;
-    c.save().map_err(|e| e.to_string())?;
-    let prev_on_top = state
-        .config
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .always_on_top;
-    if prev_on_top != c.always_on_top {
-        apply_always_on_top(&app, c.always_on_top);
-    }
-    *state
-        .config
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = c;
-    Ok(())
-}
-
 /// 设置项增量更新补丁（None = 不修改该项；字段名与前端 patch 键一致）。
 #[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct OptionsPatch {
     auto_login_last: Option<bool>,
     always_on_top: Option<bool>,
@@ -153,11 +131,16 @@ struct OptionsPatch {
     display_name: Option<String>,
     stop_others_on_scan_success: Option<bool>,
     auto_check_update: Option<bool>,
+    // 屏幕扫码 / 通知四项（仅移动端 UI 暴露）：缺字段即不改动，默认语义为 true。
+    screen_scan_auto_bg: Option<bool>,
+    screen_scan_stop_on_resume: Option<bool>,
+    notify_persistent: Option<bool>,
+    notify_live_status: Option<bool>,
 }
 
 /// 字段级更新设置项（不触碰账号列表）。
 ///
-/// 前端设置项（自动登录/置顶/自动退出/显示帧率/登入名）此前走 save_config 整份回写，
+/// 前端设置项（自动登录/置顶/自动退出/显示帧率/登入名）此前走 save_config 整份回写（该命令已因该竞态删除），
 /// 其 payload 是可能已过时的前端快照 → 与后端 select/delete 等账号命令并发时会互相
 /// 覆盖（后到的旧快照抹掉账号改动）。改为只提交本次变更的字段，从根上消除该竞态。
 #[tauri::command]
@@ -174,6 +157,10 @@ fn set_options(
         display_name,
         stop_others_on_scan_success,
         auto_check_update,
+        screen_scan_auto_bg,
+        screen_scan_stop_on_resume,
+        notify_persistent,
+        notify_live_status,
     } = patch;
     let mut cfg = state
         .config
@@ -190,6 +177,18 @@ fn set_options(
     }
     if let Some(v) = auto_check_update {
         cfg.auto_check_update = v;
+    }
+    if let Some(v) = screen_scan_auto_bg {
+        cfg.screen_scan_auto_bg = v;
+    }
+    if let Some(v) = screen_scan_stop_on_resume {
+        cfg.screen_scan_stop_on_resume = v;
+    }
+    if let Some(v) = notify_persistent {
+        cfg.notify_persistent = v;
+    }
+    if let Some(v) = notify_live_status {
+        cfg.notify_live_status = v;
     }
     if let Some(v) = display_fps {
         cfg.display_fps = config::normalize_display_fps(v);
@@ -276,7 +275,9 @@ fn set_last_live(id: String, state: tauri::State<'_, AppState>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if cfg.last_live_id != id {
         cfg.last_live_id = id;
-        let _ = cfg.save();
+        if let Err(e) = cfg.save() {
+            log::warn!("保存配置失败: {e}");
+        }
     }
 }
 
@@ -293,7 +294,9 @@ fn set_ui_widths(sidebar: Option<u32>, game_col: Option<u32>, state: tauri::Stat
     if let Some(v) = game_col {
         cfg.game_col_w = Some(v);
     }
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
 }
 
 /// 返回应用版本（单一来源：Cargo.toml version）。
@@ -406,6 +409,51 @@ mod update_tests {
         assert!(parse_version("v0.3.3").unwrap() > parse_version("0.3.2").unwrap());
         assert!(parse_version("v0.3.1").unwrap() < parse_version("0.3.2").unwrap());
         assert!(parse_version("v1.0.0").unwrap() > parse_version("0.9.9").unwrap());
+    }
+}
+
+/// `set_options` 补丁契约的回归守卫：前端 `saveCfg` 白名单必须与本结构体字段集合一致。
+#[cfg(test)]
+mod options_patch_tests {
+    use super::OptionsPatch;
+
+    /// 用前端实际提交的全部 11 个键驱动反序列化，逐项断言都被接住。
+    /// 少一个键 = 该开关静默不落盘（历史上四项移动端开关就是这样失效的）。
+    #[test]
+    fn all_frontend_option_keys_are_accepted() {
+        let json = r#"{
+            "auto_login_last": true,
+            "always_on_top": false,
+            "auto_close": true,
+            "display_fps": 120,
+            "display_name": "测试",
+            "stop_others_on_scan_success": false,
+            "auto_check_update": true,
+            "screen_scan_auto_bg": false,
+            "screen_scan_stop_on_resume": false,
+            "notify_persistent": false,
+            "notify_live_status": false
+        }"#;
+        let p: OptionsPatch =
+            serde_json::from_str(json).expect("前端提交的键必须全部被 OptionsPatch 接住");
+        assert_eq!(p.auto_login_last, Some(true));
+        assert_eq!(p.always_on_top, Some(false));
+        assert_eq!(p.auto_close, Some(true));
+        assert_eq!(p.display_fps, Some(120));
+        assert_eq!(p.display_name.as_deref(), Some("测试"));
+        assert_eq!(p.stop_others_on_scan_success, Some(false));
+        assert_eq!(p.auto_check_update, Some(true));
+        assert_eq!(p.screen_scan_auto_bg, Some(false));
+        assert_eq!(p.screen_scan_stop_on_resume, Some(false));
+        assert_eq!(p.notify_persistent, Some(false));
+        assert_eq!(p.notify_live_status, Some(false));
+    }
+
+    /// 未知键必须报错而不是被静默丢弃（静默丢弃正是四开关失效的机制）。
+    #[test]
+    fn unknown_option_key_is_rejected() {
+        let r = serde_json::from_str::<OptionsPatch>(r#"{"nope": true}"#);
+        assert!(r.is_err(), "未知键必须让 set_options 失败，而不是悄悄丢掉");
     }
 }
 
@@ -631,7 +679,9 @@ pub(crate) fn save_window_position(app: &tauri::AppHandle) {
             cfg.win_h = Some(hq);
         }
     }
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
 }
 
 /// 防抖版窗口几何保存：拖动/缩放事件密集，最多每 800ms 落盘一次；
@@ -712,7 +762,9 @@ async fn refresh_official_unames(
             .config
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = cfg.save();
+        if let Err(e) = cfg.save() {
+            log::warn!("保存配置失败: {e}");
+        }
         let _ = app.emit("accounts-updated", ());
     }
     Ok(())
@@ -866,7 +918,9 @@ fn delete_channel_account(
     if stale {
         cfg.active_channel.remove(&game);
     }
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
     Ok(())
 }
 
@@ -890,7 +944,9 @@ fn select_account(
         if !cfg.set_current_channel(&game, key, &uid) {
             return Err("账号不存在".to_string());
         }
-        let _ = cfg.save();
+        if let Err(e) = cfg.save() {
+            log::warn!("保存配置失败: {e}");
+        }
         return Ok(());
     }
     let channel = Channel::parse(&channel).ok_or_else(|| "未知渠道".to_string())?;
@@ -902,7 +958,9 @@ fn select_account(
     if !cfg.set_current(&game, channel, &uid) {
         return Err("账号不存在".to_string());
     }
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
     drop(cfg);
     // 切换到 B 服账号时立即后台预校验（扫描确认零等待；失败提前暴露）。
     if channel == Channel::Bilibili {
@@ -933,7 +991,9 @@ fn delete_account(
             crate::sdk::mihoyo::clear_bh_info_cache(&uid);
         }
     }
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
     Ok(())
 }
 
@@ -973,7 +1033,9 @@ fn set_account_meta(
     if ok.is_none() {
         return Err("账号不存在".to_string());
     }
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
     Ok(())
 }
 
@@ -1012,7 +1074,9 @@ fn reorder_accounts(
             });
         }
     }
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
     Ok(())
 }
 
@@ -1029,7 +1093,9 @@ fn switch_game(state: tauri::State<'_, AppState>, game: String) -> Result<(), St
     }
     // 各游戏的渠道/账号本就按 game 存储，切换只需改 current_game。
     cfg.current_game = g;
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
     Ok(())
 }
 
@@ -1091,7 +1157,9 @@ fn hypergryph_select(
         return Err("账号不存在".to_string());
     }
     cfg.active_hypergryph.insert(game, phone);
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
     Ok(())
 }
 
@@ -1107,7 +1175,9 @@ fn hypergryph_delete(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     cfg.remove_hypergryph(&game, &phone);
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
     Ok(())
 }
 
@@ -1135,7 +1205,9 @@ fn hypergryph_set_meta(
     if found.is_none() {
         return Err("账号不存在".to_string());
     }
-    let _ = cfg.save();
+    if let Err(e) = cfg.save() {
+        log::warn!("保存配置失败: {e}");
+    }
     Ok(())
 }
 
@@ -1201,7 +1273,9 @@ async fn ensure_device_fp(state: &tauri::State<'_, AppState>) -> Result<String, 
         cfg.device_fp = fp.clone();
         cfg.fp_seed_id = seed_id;
         cfg.fp_seed_time = seed_time;
-        let _ = cfg.save();
+        if let Err(e) = cfg.save() {
+            log::warn!("保存配置失败: {e}");
+        }
     }
     Ok(fp)
 }
@@ -1308,7 +1382,9 @@ async fn apply_cred_outcome(
                 last_login_succ: true,
                 last_used_at: 0,
             });
-            let _ = cfg.save();
+            if let Err(e) = cfg.save() {
+                log::warn!("保存配置失败: {e}");
+            }
             Ok(serde_json::json!({ "status": "ok" }))
         }
         CredOutcome::BiliOk { uid, access_key } => {
@@ -1326,7 +1402,9 @@ async fn apply_cred_outcome(
                 last_login_succ: true,
                 last_used_at: 0,
             });
-            let _ = cfg.save();
+            if let Err(e) = cfg.save() {
+                log::warn!("保存配置失败: {e}");
+            }
             Ok(serde_json::json!({ "status": "ok" }))
         }
     }
@@ -1364,7 +1442,9 @@ async fn hypergryph_login(
             last_login_succ: true,
             last_used_at: sdk::hypergryph::touch_now(),
         });
-        let _ = cfg.save();
+        if let Err(e) = cfg.save() {
+            log::warn!("保存配置失败: {e}");
+        }
     }
     let _ = app.emit("accounts-updated", ());
     Ok(())
@@ -1556,7 +1636,9 @@ async fn login_qr_poll(
                         last_login_succ: true,
                         last_used_at: 0,
                     });
-                    let _ = cfg.save();
+                    if let Err(e) = cfg.save() {
+                        log::warn!("保存配置失败: {e}");
+                    }
                 }
                 state
                     .login_qrs
@@ -1595,7 +1677,9 @@ async fn login_qr_poll(
                         last_login_succ: true,
                         last_used_at: 0,
                     });
-                    let _ = cfg.save();
+                    if let Err(e) = cfg.save() {
+                        log::warn!("保存配置失败: {e}");
+                    }
                 }
                 state
                     .login_qrs
@@ -2070,16 +2154,20 @@ async fn live_refresh_meta(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let plat = crate::live::Platform::parse(&platform);
-    let (tx, rx) = std::sync::mpsc::channel();
+    // 同步 HTTP 放到阻塞线程池，并用超时兜底：此前是「std::thread + mpsc::recv()」
+    // 无超时阻塞，单次刷新可占用一个 tokio worker 10-30 秒，几个房间并行
+    // 就能把 worker 池占满，导致登录/扫码/预览等所有异步命令一起卡住。
     let room_for_fetch = room.clone();
-    std::thread::spawn(move || {
-        let m = crate::live::fetch_meta_strict(plat, &room_for_fetch);
-        let _ = tx.send(m);
-    });
-    let meta = rx
-        .recv()
-        .map_err(|_| "元数据获取失败".to_string())?
-        .map_err(|e| format!("直播间 {room} 元数据获取失败：{e}"))?;
+    let meta = match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::task::spawn_blocking(move || crate::live::fetch_meta_strict(plat, &room_for_fetch)),
+    )
+    .await
+    {
+        Ok(Ok(m)) => m.map_err(|e| format!("直播间 {room} 元数据获取失败：{e}"))?,
+        Ok(Err(e)) => return Err(format!("元数据获取任务失败：{e}")),
+        Err(_) => return Err(format!("直播间 {room} 元数据获取超时，请重试")),
+    };
     let plat_key = plat.key();
     {
         let mut cfg = state
@@ -2096,7 +2184,9 @@ async fn live_refresh_meta(
             meta.live_status,
             meta.live_start,
         );
-        let _ = cfg.save();
+        if let Err(e) = cfg.save() {
+            log::warn!("保存配置失败: {e}");
+        }
     }
     Ok(serde_json::json!({
         "room": room,
@@ -2215,6 +2305,43 @@ fn prewarm_bili_account(app: &tauri::AppHandle) {
 ///
 /// 支持并行：最多 5 路直播 + 1 路桌面 + 1 路摄像头；同一目标重复启动报错。
 /// 直播目标会**保活**该会话（非主画面也保持拉流/解码，停止时解除）。
+/// 扫描任务的收尾守卫：注销注册、解除直播保活、清理扫码 ROI。
+///
+/// 这些清理原先写在 `run_scan(..).await` 之后，只有正常返回才会执行；一旦解码/
+/// 解析 panic（unwind），目标会永远留在 `scans` 里，之后每次 start_scan 都返回
+/// 「该目标已在扫描中」，直播会话也会一直后台拉流。放进 Drop 后异常路径同样收尾。
+struct ScanCleanupGuard {
+    app: tauri::AppHandle,
+    key: String,
+}
+
+impl Drop for ScanCleanupGuard {
+    fn drop(&mut self) {
+        let state = self.app.state::<AppState>();
+        {
+            let mut scans = state
+                .scans
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scans.remove(&self.key);
+        }
+        if let Some(id) = self.key.strip_prefix("live:") {
+            crate::live::set_scan_keepalive(id, false);
+        }
+        // 清理扫码关注区（扫描已结束，残留 ROI 会让脏矩形过滤过于保守）。
+        let region = {
+            let g = state
+                .region
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *g
+        };
+        if let Some(r) = region {
+            crate::duplication::clear_scan_roi(r);
+        }
+    }
+}
+
 fn try_start_scan(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -2288,7 +2415,11 @@ fn try_start_scan(
     let key_for_cleanup = target_key.clone();
 
     tauri::async_runtime::spawn(async move {
-        let cleanup = app.clone();
+        // RAII 收尾：成功/停止/失败/panic（unwind）都会走到 Drop。
+        let _cleanup = ScanCleanupGuard {
+            app: app.clone(),
+            key: key_for_cleanup,
+        };
         scan::run_scan(
             app,
             scan::ScanArgs {
@@ -2307,29 +2438,6 @@ fn try_start_scan(
             },
         )
         .await;
-        // 收尾：解除注册 + 解除保活（成功/停止/失败均经此处）。
-        let state = cleanup.state::<AppState>();
-        {
-            let mut scans = state
-                .scans
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            scans.remove(&key_for_cleanup);
-        }
-        if let Some(id) = key_for_cleanup.strip_prefix("live:") {
-            crate::live::set_scan_keepalive(id, false);
-        }
-        // 清理扫码关注区（扫描已结束，残留 ROI 会让脏矩形过滤过于保守）。
-        let region = {
-            let g = state
-                .region
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *g
-        };
-        if let Some(r) = region {
-            crate::duplication::clear_scan_roi(r);
-        }
     });
     Ok(())
 }
@@ -2432,7 +2540,9 @@ pub fn run() {
     let mut cfg = AppConfig::load();
     if cfg.device_id.is_empty() {
         cfg.device_id = random_uuid_v4();
-        let _ = cfg.save();
+        if let Err(e) = cfg.save() {
+            log::warn!("保存配置失败: {e}");
+        }
     }
     let win_pos = (cfg.win_x, cfg.win_y);
     let win_size = (cfg.win_w, cfg.win_h);
@@ -2456,7 +2566,6 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_config,
-            save_config,
             set_options,
             frontend_log,
             notify_persistent_show,
@@ -2563,7 +2672,9 @@ pub fn run() {
                         let mut cfg = AppConfig::load();
                         if cfg.device_id.is_empty() {
                             cfg.device_id = random_uuid_v4();
-                            let _ = cfg.save();
+                            if let Err(e) = cfg.save() {
+                                log::warn!("保存配置失败: {e}");
+                            }
                         }
                         *app.state::<AppState>()
                             .config
@@ -2642,7 +2753,9 @@ pub fn run() {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     {
                         let g = game_key(cfg.current_game);
-                        cfg.current_uid(&g).is_some()
+                        // 三方渠道（小米/vivo 等）账号不在 current_uid 的覆盖范围内，
+                        // 只判 current_uid 会让这些用户的「启动自动登录」静默失效。
+                        cfg.current_uid(&g).is_some() || cfg.active_channel_account(&g).is_some()
                     }
                 };
                 if has_account {

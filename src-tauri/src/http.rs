@@ -273,7 +273,11 @@ pub fn read_body(
             if size == 0 {
                 return Ok(body);
             }
-            if body.len() + size > MAX_BODY {
+            // 先验单块上限再累加：`size` 是服务器给的 64 位十六进制，直接用于
+            // `body.len() + size` 在上限附近会回绕，使 8MiB 上限被绕过并让
+            // `need(size)` 预留近乎任意大小（Usize::MAX 时 size+2 亦回绕）。
+            // 先卡 `size` 再卡 `len + size`，两处判断都退化为不变量。
+            if size > MAX_BODY || body.len() + size > MAX_BODY {
                 return Err("响应体超过大小上限".to_string());
             }
             body.extend_from_slice(&need(size, &mut prefix)?);
@@ -829,4 +833,98 @@ pub async fn post(url: &str, headers: Headers, body: &str) -> Result<Response, S
     tokio::task::spawn_blocking(move || request_sync("POST", &url, &headers, Some(&body)))
         .await
         .map_err(|e| format!("HTTP 任务失败: {e}"))?
+}
+
+/// 取字符串前 `max` 字节作为摘录，且保证落在 UTF-8 字符边界上。
+///
+/// 直接用 `&s[..n]` 在多字节字符（中文错误页 / 中文错误 JSON）上会 panic：
+/// `byte index N is not a char boundary`。下列调用点全部位于“上游返回非预期内容”
+/// 的错误路径上，panic 会直接打断扫码 / 登录任务，因此必须按字符边界截断。
+pub fn excerpt(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 无界流：读永不返回 0（模拟服务器持续供数）。若大小门禁被绕过
+    /// （`body.len() + size` 回绕，或未先验单块长度），`need(size)` 会一直读到
+    /// 8MiB 才停；修复后应在「单块先验」处立即返回。
+    struct EndlessStream {
+        fill: u8,
+    }
+
+    impl std::io::Read for EndlessStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            buf.fill(self.fill);
+            Ok(buf.len())
+        }
+    }
+
+    fn chunked() -> Headers {
+        vec![("Transfer-Encoding".to_string(), "chunked".to_string())]
+    }
+
+    /// 64 位最大长度帧头：旧实现下 `size + 2` 回绕，读指针直接跨过 8MiB 上限。
+    #[test]
+    fn excerpt_never_splits_a_char_boundary() {
+        let s = "中文abc"; // 中(3) 文(3) a b c
+        assert_eq!(excerpt(s, 0), "");
+        assert_eq!(excerpt(s, 1), "");
+        assert_eq!(excerpt(s, 2), "");
+        assert_eq!(excerpt(s, 3), "中");
+        assert_eq!(excerpt(s, 4), "中");
+        assert_eq!(excerpt(s, 6), "中文");
+        assert_eq!(excerpt(s, 7), "中文a");
+        assert_eq!(excerpt(s, 100), s);
+        assert_eq!(excerpt("", 10), "");
+    }
+
+    #[test]
+    fn chunked_body_rejects_oversized_frame_without_wrapping() {
+        let cr = char::from(13u8);
+        let lf = char::from(10u8);
+        let prefix = format!("ffffffffffffffff{cr}{lf}").into_bytes();
+        let mut s = EndlessStream { fill: b'A' };
+        let err = read_body(&mut s, &chunked(), prefix).expect_err("超限分块必须报错");
+        assert_eq!(err, "响应体超过大小上限");
+    }
+
+    /// 单块 8MiB+1：即使 body 为空也必须拒绝（不得先分配再判）。
+    #[test]
+    fn chunked_body_rejects_frame_larger_than_budget() {
+        let cr = char::from(13u8);
+        let lf = char::from(10u8);
+        let prefix = format!("{:x}{cr}{lf}", 8 * 1024 * 1024 + 1).into_bytes();
+        let mut s = EndlessStream { fill: b'B' };
+        let err = read_body(&mut s, &chunked(), prefix).expect_err("超限分块必须报错");
+        assert_eq!(err, "响应体超过大小上限");
+    }
+
+    /// 合法帧回归：多块拼接 + 头之后已多读的 body 前置字节（`prefix`）必须被
+    /// 正确消费，且 0 长度终止块处立即收尾。
+    #[test]
+    fn chunked_body_accepts_valid_framing() {
+        let cr = char::from(13u8);
+        let lf = char::from(10u8);
+        let raw =
+            format!("5{cr}{lf}hello{cr}{lf}5{cr}{lf}world{cr}{lf}0{cr}{lf}{cr}{lf}").into_bytes();
+        let mut s = std::io::Cursor::new(raw);
+        let body = read_body(&mut s, &chunked(), Vec::new()).expect("正常分块应解析成功");
+        assert_eq!(body, b"helloworld");
+        // 头之后已多读的字节作为 prefix 传入（真实调用形态）：前缀里的整块必须被消费，
+        // 后续块从流中续读。
+        let head = format!("5{cr}{lf}hello{cr}{lf}").into_bytes();
+        let tail = format!("5{cr}{lf}world{cr}{lf}0{cr}{lf}{cr}{lf}").into_bytes();
+        let mut s2 = std::io::Cursor::new(tail);
+        let body2 = read_body(&mut s2, &chunked(), head).expect("分块头跨读取边界");
+        assert_eq!(body2, b"helloworld");
+    }
 }

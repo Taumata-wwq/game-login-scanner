@@ -90,6 +90,8 @@
     return false;
   }
   document.addEventListener('mousedown', (e) => {
+    // 移动端无桌面窗口：不接管拖窗（与文件内其余同类调用一致）。
+    if (window.__MOBILE__) return;
     if (e.button !== 0) return;
     if (e.detail > 1) return;  // 双击不触发拖拽
     if (isInteractive(e.target)) return;
@@ -412,7 +414,16 @@
       const radio = document.createElement('span');
       radio.className = 'radio';
       radio.title = '设为当前账号';
+      // 键盘可达：Tab 聚焦，Enter/空格与点击同效（只补语义，不改视觉）。
+      radio.tabIndex = 0;
+      radio.setAttribute('role', 'button');
       radio.addEventListener('click', (e) => { e.stopPropagation(); selectAccount(ch, key); });
+      radio.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        e.stopPropagation();
+        selectAccount(ch, key);
+      });
       const chip = document.createElement('span');
       chip.className = 'chip';
       chip.textContent = channelLabel(ch);
@@ -569,7 +580,11 @@
 
   // 设置项更新：走字段级命令（不整份回写配置），避免与账号类命令并发互相覆盖。
   // patch 的键名与 set_options 的补丁结构体字段一致（蛇形）。
+  // 白名单必须与后端 OptionsPatch 的字段集合完全一致：漏一个键 = 该开关静默不落盘
+  // （历史上 screen_scan_auto_bg / screen_scan_stop_on_resume / notify_persistent /
+  // notify_live_status 四项就是这样失效的）。失败时回滚镜像并提示，避免 UI 说谎。
   async function saveCfg(patch) {
+    const prev = config;
     config = Object.assign({}, config, patch);
     const args = {};
     if ('auto_login_last' in patch) args.auto_login_last = patch.auto_login_last;
@@ -579,7 +594,17 @@
     if ('auto_check_update' in patch) args.auto_check_update = patch.auto_check_update;
     if ('display_fps' in patch) args.display_fps = patch.display_fps;
     if ('display_name' in patch) args.display_name = patch.display_name;
-    await invoke('set_options', { patch: args });
+    if ('screen_scan_auto_bg' in patch) args.screen_scan_auto_bg = patch.screen_scan_auto_bg;
+    if ('screen_scan_stop_on_resume' in patch) args.screen_scan_stop_on_resume = patch.screen_scan_stop_on_resume;
+    if ('notify_persistent' in patch) args.notify_persistent = patch.notify_persistent;
+    if ('notify_live_status' in patch) args.notify_live_status = patch.notify_live_status;
+    try {
+      await invoke('set_options', { patch: args });
+    } catch (e) {
+      config = prev;
+      renderOptions();
+      log('保存设置失败: ' + e, 'error');
+    }
   }
 
   async function selectAccount(ch, uid) {
@@ -1720,7 +1745,10 @@
       }
       for (const r of byId.values()) merged.push(r);
       liveRooms = merged;
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {
+      // 拉取失败：保留现有列表，但必须让用户知道界面可能已与后端不一致。
+      log('加载直播间列表失败: ' + e, 'error');
+    }
     renderLiveTabs();
     syncWatchers();
   }
@@ -1813,7 +1841,8 @@
       x.title = '移除该直播间';
       x.addEventListener('mousedown', (ev) => { ev.stopPropagation(); removeRoom(id); });
       card.append(thumb, meta, x);
-      card.addEventListener('mousedown', (ev) => {
+      // 点击切换：不用 mousedown——拖动排序按下时也会触发 mousedown，会在拖动途中把画面切走。
+      card.addEventListener('click', (ev) => {
         if (ev.target === x) return;
         // 立即切换：有会话直接切画面；未连接/未开播先显示封面占位（首帧到达自动揭除）。
         switchLive(id);
@@ -1829,14 +1858,17 @@
           openLiveNoteDialog(s);
         });
       }
-      // 拖拽排序（持久化到 config 顺序）。
+      // 拖拽排序（持久化到 config 顺序）。与账号列表同构：dragstart 只记录源，
+      // dragover 只放行，drop 里才重排并保存（dragover 里重建列表会让被拖动的卡片
+      // 中途被替换 → 列表抖动、拖拽事件丢失）。
       card.addEventListener('dragstart', (ev) => {
         dragSrcId = id;
         card.classList.add('dragging');
         ev.dataTransfer.effectAllowed = 'move';
       });
       card.addEventListener('dragend', () => { card.classList.remove('dragging'); dragSrcId = null; });
-      card.addEventListener('dragover', (ev) => {
+      card.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; });
+      card.addEventListener('drop', (ev) => {
         ev.preventDefault();
         if (!dragSrcId || dragSrcId === id) return;
         const from = liveRooms.findIndex((x) => (x.platform + ':' + x.room) === dragSrcId);
@@ -1845,7 +1877,9 @@
         const [moved] = liveRooms.splice(from, 1);
         liveRooms.splice(to, 0, moved);
         renderLiveTabs();
-        invoke('live_history_reorder', { order: liveRooms.map((x) => x.platform + ':' + x.room) }).catch(() => {});
+        // 失败不吞：提示并回滚为后端真实顺序（否则本地顺序只在本次会话内成立）。
+        invoke('live_history_reorder', { order: liveRooms.map((x) => x.platform + ':' + x.room) })
+          .catch((e) => { log('保存房间顺序失败: ' + e, 'error'); reloadLiveRooms(); });
       });
       box.appendChild(card);
     }
@@ -2083,32 +2117,43 @@
   function saveLiveNote() {
     if (!liveNoteRoom) return;
     const note = $('liveNoteInput').value.trim();
-    liveNoteRoom.note = note;
-    renderLiveTabs();
-    invoke('live_history_set_note', {
-      room: liveNoteRoom.room, platform: liveNoteRoom.platform, note,
-    }).catch(() => {});
-    updateVpInfo();
+    const room = liveNoteRoom;
     $('liveNoteOverlay').hidden = true;
     liveNoteRoom = null;
+    // 不做乐观更新：后端写成功后本地才生效；失败时回滚为后端真实备注。
+    invoke('live_history_set_note', {
+      room: room.room, platform: room.platform, note,
+    }).then(() => {
+      room.note = note;
+      renderLiveTabs();
+      updateVpInfo();
+    }).catch((e) => {
+      log('保存备注失败: ' + e, 'error');
+      reloadLiveRooms();
+    });
   }
   $('btnLiveNoteSave').addEventListener('click', saveLiveNote);
   $('liveNoteInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') saveLiveNote();
   });
 
-  // 移除已保存直播间（停会话 + 从 config 删除 + 刷新）。
+  // 移除已保存直播间（先删后端，成功后才停会话 + 从本地删除 + 刷新）。
   async function removeRoom(id) {
     const sep = id.indexOf(':');
     const platform = id.slice(0, sep);
     const room = id.slice(sep + 1);
+    // 不做乐观更新：后端删除失败时本地不能先消失（否则下次刷新条目又「复活」）。
+    try {
+      await invoke('live_history_remove', { room, platform });
+    } catch (e) {
+      log('删除房间失败: ' + e, 'error');
+      await reloadLiveRooms();   // 回滚为后端真实列表
+      return;
+    }
     if (liveSessions.some((s) => s.id === id)) closeLive(id);
     liveRooms = liveRooms.filter((r) => !(r.platform === platform && r.room === room));
     renderLiveTabs();
-    try {
-      await invoke('live_history_remove', { room, platform });
-      await reloadLiveRooms();
-    } catch (e) { /* 忽略 */ }
+    await reloadLiveRooms();
   }
 
   // 关闭指定会话（前端调后端停止，再刷新列表）。
@@ -2160,7 +2205,6 @@
   // 添加直播间弹窗：平台 + 房间号 + 备注。
   let addLivePlatform = 'bilibili';
   let addLiveNote = '';
-  let liveHistory = [];
   function showAddLiveDialog() {
     $('addLiveRoom').value = '';
     $('addLiveNote').value = '';
@@ -2200,7 +2244,15 @@
   async function connectLive(platform, room, note) {
     const id = platform + ':' + room;
     // 先持久化该房间（无论开播与否），保证左栏始终可见。
-    try { await invoke('live_history_push', { room, platform, note: note || '' }); } catch (e) {}
+    // 失败：后端并没有这个房间——不建立会话（否则会连出一个列表里不存在的直播间），
+    // 并把界面回滚为后端真实列表。
+    try {
+      await invoke('live_history_push', { room, platform, note: note || '' });
+    } catch (e) {
+      log('保存直播间失败: ' + e, 'error');
+      await reloadLiveRooms();
+      return;
+    }
     // 立即拉取一次元数据（标题/封面/主播名），不等轮询。
     try {
       const m = await invoke('live_refresh_meta', { platform, room });
@@ -2982,6 +3034,12 @@
       startPreview();
     }
   });
+  // 键盘可达：Tab 聚焦后 Enter/空格等价于点击（暂停/继续）。
+  $('fpsMeter').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    $('fpsMeter').click();
+  });
 
   // ---------- 渲染 ----------
   function renderScan() {
@@ -3321,9 +3379,6 @@
     let swipeCurrent = 0; // 当前实际位移（逻辑值，由 applySwipe 维护）
     let dragState = null;
 
-    function curSwipe() {
-      return parseFloat(getComputedStyle(mobileRoot).getPropertyValue("--m-swipe")) || 0;
-    }
     function applySwipe(tx) {
       swipeCurrent = tx;
       mobileRoot.style.setProperty("--m-swipe", tx + "px");

@@ -58,7 +58,6 @@ fn parse_dib(b: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let height = i32_at(8)?;
     let bit_count = u16_at(14)? as usize;
     let compression = u32_at(16)?;
-    let clr_used = u32_at(32)? as usize;
     if width <= 0 || height == 0 || !(bit_count == 24 || bit_count == 32) {
         return None;
     }
@@ -71,19 +70,16 @@ fn parse_dib(b: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     if compression == 3 && header == 40 {
         offset += 12;
     }
-    if compression == 0 && bit_count <= 8 {
-        offset += if clr_used > 0 {
-            clr_used * 4
-        } else {
-            (1usize << bit_count) * 4
-        };
-    }
-
+    // 上面的 bit_count 校验只放行 24/32bpp，因此 bit_count<=8 的颜色表分支不可达，已删除。
+    // 宽高都来自剪贴板头，可能被伪造：先做溢出检查再分配，避免 usize 回绕绕过长度校验。
     let stride = (width * bit_count).div_ceil(32) * 4;
-    if offset + stride * height > b.len() {
+    let need = stride
+        .checked_mul(height)
+        .and_then(|n| offset.checked_add(n))?;
+    if need > b.len() {
         return None;
     }
-    let mut out = Vec::with_capacity(width * height * 4);
+    let mut out = Vec::with_capacity(width.checked_mul(height)?.checked_mul(4)?);
     for y in 0..height {
         let src_y = if top_down { y } else { height - 1 - y };
         let row = &b[offset + src_y * stride..][..width * (bit_count / 8)];

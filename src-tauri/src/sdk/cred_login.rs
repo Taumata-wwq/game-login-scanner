@@ -264,7 +264,7 @@ pub async fn mihoyo_login_sms(
         .await
         .map_err(|e| format!("请求失败: {e}"))?;
     let json: Value = serde_json::from_str(&resp.body)
-        .map_err(|_| format!("响应非 JSON: {}", &resp.body[..resp.body.len().min(200)]))?;
+        .map_err(|_| format!("响应非 JSON: {}", crate::http::excerpt(&resp.body, 200)))?;
     // 极验触发。
     if let Some(a) = extract_aigis(&resp.headers) {
         return Ok(CredOutcome::NeedCaptcha(a));
@@ -348,7 +348,7 @@ pub async fn mihoyo_login_pwd(
         .await
         .map_err(|e| format!("请求失败: {e}"))?;
     let json: Value = serde_json::from_str(&resp.body)
-        .map_err(|_| format!("响应非 JSON: {}", &resp.body[..resp.body.len().min(200)]))?;
+        .map_err(|_| format!("响应非 JSON: {}", crate::http::excerpt(&resp.body, 200)))?;
     parse_mihoyo_login(&json, &resp.headers)
 }
 
@@ -379,7 +379,7 @@ pub async fn bili_login_pwd(
     let resp = crate::sdk::bili::bili_sdk_login(account, password, cap_ref).await?;
     log::info!(
         "[B站SDK登录] {}",
-        &resp.to_string()[..resp.to_string().len().min(600)]
+        crate::http::excerpt(&resp.to_string(), 600)
     );
     // 成功：含 access_key。
     if let Some(ak) = resp.get("access_key").and_then(|v| v.as_str()) {

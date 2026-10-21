@@ -47,6 +47,9 @@ node_modules/
 *.tmp
 *.json.tmp
 *.json.corrupt.*
+# DSH 文件编辑工具（ops_write_file / ops_edit_file 原子写）的进程被强杀时残留的空锁文件，
+# 由工具自身创建、无持久含义，会在 git status 里以未跟踪文件形式噪声化工作区。
+.dsh-ops-update-*.lock
 
 # Python 字节码缓存（scripts/android/check_channel_deps.py 运行后产生）
 __pycache__/

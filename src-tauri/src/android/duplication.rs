@@ -64,20 +64,23 @@ pub fn clear_scan_roi(_region: MonitorKey) {}
 /// 扫码取帧：画面内容自上次调用以来有变化时返回灰度帧；无变化返回 `None`。
 ///
 /// `scale` 为步长降采样倍率（1 = 原分辨率，2 = 1/2；转换与降采样合并为一趟）。
-/// 变化检测用采样指纹（全帧内容未变 → 一定无变化；全帧变了但区域内未变时
-/// 至多多解码一次，无害）。Err = 帧总线不可用（未授权 / 首帧未到）。
+/// 变化检测用采样指纹，且**按 scale 分档**（与 Windows `scan_seen[scale]` 对齐）：
+/// 主档与兜底档各自判「内容相比本档上次消费时是否变化」，否则主档消费指纹后
+/// 兜底档会被永久判为无变化（全分辨率兜底＝死代码）。同档语义：全帧内容未变
+/// → 一定无变化；全帧变了但区域内未变时至多多解码一次，无害。
+/// Err = 帧总线不可用（未授权 / 首帧未到）。
 pub fn scan_frame(
     region: MonitorKey,
     scale: u32,
 ) -> Result<Option<crate::screenshot::GrayFrame>, Unavailable> {
     let g = capture::lock();
     let f = g.as_ref().ok_or(Unavailable)?;
-    if f.fingerprint == capture::last_scan_fp() {
+    if f.fingerprint == capture::last_scan_fp(scale) {
         return Ok(None);
     }
     let (x, y, w, h) = capture::crop_of(region, f.w, f.h);
     let (gray, ow, oh) =
         capture::rgba_gray_stride(&f.data, f.w as usize * 4, x, y, w, h, scale as usize);
-    capture::set_last_scan_fp(f.fingerprint);
+    capture::set_last_scan_fp(scale, f.fingerprint);
     Ok(Some(crate::screenshot::GrayFrame { gray, w: ow, h: oh }))
 }

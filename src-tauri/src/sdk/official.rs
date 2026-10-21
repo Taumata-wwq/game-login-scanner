@@ -80,12 +80,8 @@ async fn post_json(
     let resp = crate::http::post(url, headers, body)
         .await
         .map_err(|e| format!("官服请求失败: {e}"))?;
-    let json = serde_json::from_str(&resp.body).map_err(|_| {
-        format!(
-            "官服响应非 JSON: {}",
-            &resp.body[..resp.body.len().min(200)]
-        )
-    })?;
+    let json = serde_json::from_str(&resp.body)
+        .map_err(|_| format!("官服响应非 JSON: {}", crate::http::excerpt(&resp.body, 200)))?;
     Ok((json, resp.headers))
 }
 
@@ -234,12 +230,8 @@ pub async fn get_uname(uid: &str, stoken: &str, mid: &str) -> Result<String, Str
     let resp = crate::http::get(&url, headers)
         .await
         .map_err(|e| format!("获取昵称请求失败: {e}"))?;
-    let json: Value = serde_json::from_str(&resp.body).map_err(|_| {
-        format!(
-            "昵称响应非 JSON: {}",
-            &resp.body[..resp.body.len().min(200)]
-        )
-    })?;
+    let json: Value = serde_json::from_str(&resp.body)
+        .map_err(|_| format!("昵称响应非 JSON: {}", crate::http::excerpt(&resp.body, 200)))?;
     json["data"]["user_info"]["nickname"]
         .as_str()
         .map(|s| s.to_string())

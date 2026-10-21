@@ -91,7 +91,7 @@
     <!-- 右栏：上视窗 + 下账号区 -->
     <section class="main-col">
       <div class="viewport">
-        <div class="vp-info" id="vpInfo">
+        <div class="vp-info">
           <span class="ttl" id="vpTitle">屏幕预览</span>
           <span class="sep">·</span>
           <span id="vpSub">未连接直播</span>
@@ -109,7 +109,7 @@
               <div class="vp-cover-tip" id="vpCoverTip"></div>
             </div>
             <span class="vp-toast" id="vpToast"></span>
-            <span class="fps" id="fpsMeter" title="预览帧率（点击暂停/继续）。直播模式跟随直播流帧率，上限为设置中的「显示区域帧率」">--</span>
+            <span class="fps" id="fpsMeter" tabindex="0" role="button" title="预览帧率（点击暂停/继续）。直播模式跟随直播流帧率，上限为设置中的「显示区域帧率」">--</span>
             <button class="region-reset" id="btnRegionReset" title="重置视图">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/><path d="M3 12h18"/></svg>
             </button>
@@ -341,7 +341,7 @@
   <div class="overlay" id="captchaOverlay" hidden>
     <div class="dialog">
       <div class="dhead">
-        <span id="captchaTitle">人机验证</span>
+        <span>人机验证</span>
         <span class="spacer"></span>
         <button class="ibtn" data-close="captchaOverlay" title="关闭">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>

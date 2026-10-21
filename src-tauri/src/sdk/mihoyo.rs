@@ -110,7 +110,7 @@ async fn send_post_json_str(url: &str, body: &str) -> Result<Value, String> {
     serde_json::from_str(&resp.body).map_err(|_| {
         format!(
             "米哈游响应非 JSON: {}",
-            &resp.body[..resp.body.len().min(200)]
+            crate::http::excerpt(&resp.body, 200)
         )
     })
 }
@@ -222,7 +222,7 @@ async fn fetch_oa_hellocraft(bh_ver: &str, openid: &str) -> Result<String, Strin
     let v: Value = serde_json::from_str(&resp.body).map_err(|_| {
         format!(
             "hellocraft 响应非 JSON: {}",
-            &resp.body[..resp.body.len().min(120)]
+            crate::http::excerpt(&resp.body, 120)
         )
     })?;
     if v.get("retcode").and_then(|x| x.as_i64()) != Some(0) {
