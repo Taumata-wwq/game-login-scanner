@@ -41,6 +41,13 @@ object CameraCaptureService {
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
 
+    /**
+     * 帧回调与 ImageReader 关闭互斥：帧线程可能正在 [onFrameAvailable] 里
+     * 拷贝 YUV direct buffer，此刻 close(reader) 会 munmap 底层缓冲 → memcpy 段错误。
+     * 与 ScreenCaptureService.frameLock 同一处理。
+     */
+    private val frameLock = Any()
+
     /** 相机是否已授权。 */
     fun hasPermission(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -78,12 +85,12 @@ object CameraCaptureService {
 
             override fun onDisconnected(cam: CameraDevice) {
                 cam.close()
-                stopInternal()
+                stopAndNotify()
             }
 
             override fun onError(cam: CameraDevice, error: Int) {
                 cam.close()
-                stopInternal()
+                stopAndNotify()
             }
         }
         return try {
@@ -91,15 +98,19 @@ object CameraCaptureService {
             isRunning = true
             true
         } catch (e: Exception) {
-            stopInternal()
+            stopAndNotify()
             false
         }
     }
 
     /** 停止相机（幂等）。 */
     fun stop() {
+        stopAndNotify()
+    }
+
+    /** 停止并通知 Rust 清理帧槽与去重状态（正常停止与错误路径共用）。 */
+    private fun stopAndNotify() {
         stopInternal()
-        // 通知 Rust 清理帧槽与去重状态。
         try {
             CameraCaptureBridge.onCameraStopped()
         } catch (_: Throwable) {
@@ -123,39 +134,43 @@ object CameraCaptureService {
                         }
                         s.setRepeatingRequest(req.build(), null, h)
                     } catch (e: Exception) {
-                        stopInternal()
+                        stopAndNotify()
                     }
                 }
 
                 override fun onConfigureFailed(s: CameraCaptureSession) {
-                    stopInternal()
+                    stopAndNotify()
                 }
             }, h)
         } catch (e: Exception) {
-            stopInternal()
+            stopAndNotify()
         }
     }
 
     private fun onFrameAvailable(r: ImageReader) {
-        val image: Image = try {
-            r.acquireLatestImage()
-        } catch (e: Exception) {
-            null
-        } ?: return
-        try {
-            val planes = image.planes
-            if (planes.size < 3) return
-            // 推 YUV 三平面：Y 用于扫码（灰度），U/V 用于彩色预览。
-            CameraCaptureBridge.onFrame(
-                planes[0].buffer, planes[1].buffer, planes[2].buffer,
-                image.width, image.height,
-                planes[0].rowStride, planes[1].rowStride, planes[1].pixelStride,
-            )
-            // 注：U/V 的 pixelStride 常为 2（交错）——Rust 侧按其采样，见 camera.rs。
-        } catch (_: Throwable) {
-            // 帧路径不允许异常穿透（否则回调被移除）。
-        } finally {
-            image.close()
+        // 与 stopInternal 的 close(reader) 互斥：copy 期间不允许释放底层缓冲。
+        synchronized(frameLock) {
+            if (!isRunning) return
+            val image: Image = try {
+                r.acquireLatestImage()
+            } catch (e: Exception) {
+                null
+            } ?: return
+            try {
+                val planes = image.planes
+                if (planes.size < 3) return
+                // 推 YUV 三平面：Y 用于扫码（灰度），U/V 用于彩色预览。
+                CameraCaptureBridge.onFrame(
+                    planes[0].buffer, planes[1].buffer, planes[2].buffer,
+                    image.width, image.height,
+                    planes[0].rowStride, planes[1].rowStride, planes[1].pixelStride,
+                )
+                // 注：U/V 的 pixelStride 常为 2（交错）——Rust 侧按其采样，见 camera.rs。
+            } catch (_: Throwable) {
+                // 帧路径不允许异常穿透（否则回调被移除）。
+            } finally {
+                image.close()
+            }
         }
     }
 
@@ -186,8 +201,11 @@ object CameraCaptureService {
         }
         device = null
         reader?.setOnImageAvailableListener(null, null)
-        reader?.close()
-        reader = null
+        // 与帧回调互斥：等正在进行的拷贝结束后再关（否则 close 释放缓冲 → memcpy 崩溃）。
+        synchronized(frameLock) {
+            reader?.close()
+            reader = null
+        }
         handler = null
         thread?.quitSafely()
         thread = null

@@ -684,10 +684,11 @@ impl AppConfig {
     /// 配置目录名。
     const DIR: &'static str = "游戏扫码器";
 
-    /// 配置文件路径：%APPDATA%\<AppName>\config.json
+    /// 配置文件路径：Android 用注入的应用数据目录；桌面用 `%APPDATA%\<AppName>\config.json`。
     ///
-    /// 直接取 `%APPDATA%`（= `dirs::config_dir()` 在 Windows 上的取值）：本工具
-    /// 仅支持 Windows，去掉 `dirs` 依赖（省一个 crate 的体积与依赖面）。
+    /// 桌面直接取 `%APPDATA%`（= `dirs::config_dir()` 在 Windows 上的取值），去掉
+    /// `dirs` 依赖（省一个 crate 的体积与依赖面）。Android 的 `%APPDATA%` 不存在、
+    /// 当前目录也不可写，路径由 lib.rs 在 setup 阶段注入（见 [`set_data_dir`]）。
     pub fn path() -> PathBuf {
         // Android：用注入的应用数据目录（app_data_dir 已含应用标识，不再拼 DIR）。
         if let Some(dir) = DATA_DIR.get() {
@@ -860,6 +861,14 @@ impl AppConfig {
     /// 保存到磁盘（原子写：先写临时文件再 rename，避免写一半崩溃损坏配置）。
     /// Windows 上 rename 通过 MoveFileEx(REPLACE_EXISTING) 实现，可安全覆盖目标。
     pub fn save(&self) -> std::io::Result<()> {
+        // Android：数据目录要等 setup 注入 AppHandle 后才可用。注入前 path() 会落到桌面
+        // 兜底路径（相对当前目录 "/"，只读），写盘必然 EROFS——这类「尚未就绪」的保存直接
+        // 跳过：setup 注入后会重新加载并落盘（见 lib.rs::run 与 setup）。
+        #[cfg(target_os = "android")]
+        if DATA_DIR.get().is_none() {
+            log::debug!("配置目录尚未注入，跳过本次保存");
+            return Ok(());
+        }
         let path = Self::path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

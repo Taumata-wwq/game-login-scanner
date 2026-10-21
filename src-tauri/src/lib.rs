@@ -2680,6 +2680,9 @@ pub fn run() {
                             .config
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg;
+                    } else {
+                        // 数据目录解析失败＝本次会话所有配置都不落盘，必须显式告警（此前静默）。
+                        log::warn!("应用数据目录解析失败，配置无法持久化");
                     }
                 }
             }

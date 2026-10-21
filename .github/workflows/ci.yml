@@ -8,6 +8,12 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    # rust-toolchain.toml 声明的是 "stable"，其优先级高于 rustup 的 default，
+    # 会让下面 dtolnay/rust-toolchain@1.98.1 的版本固定失效。RUSTUP_TOOLCHAIN
+    # 的优先级高于 rust-toolchain.toml（低于命令行 +toolchain），显式设置才能
+    # 保证 CI 真用 1.98.1；本地开发不受影响（仍按 rust-toolchain.toml 走 stable）。
+    env:
+      RUSTUP_TOOLCHAIN: "1.98.1"
     steps:
       - uses: actions/checkout@v4
 

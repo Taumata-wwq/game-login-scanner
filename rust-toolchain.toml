@@ -4,6 +4,9 @@
 # 实为 build.rs 在无 tests/ 目录时发出 cargo:rustc-link-arg-tests，被 cargo 以
 # "does not have a test target" 拒绝；已修复（build.rs 先判断 tests/ 存在性）。
 # 2026-10-17：tests/unit.rs + smoke.rs 白名单入库（CI 质量门真实运行 113 个用例）；
-# CI 仍固定 1.98.1（见 .github/workflows/ci.yml），作为稳定性偏好保留。
+# CI 仍固定 1.98.1（见 .github/workflows/ci.yml 的 env.RUSTUP_TOOLCHAIN=1.98.1）。
+# 注意（2026-10-21 实测）：本文件的优先级高于 rustup 的 default，会让 CI 里
+# dtolnay/rust-toolchain@1.98.1 的固定失效；故 CI 侧用 RUSTUP_TOOLCHAIN 显式覆盖
+# （rustup 优先级：+toolchain > RUSTUP_TOOLCHAIN > 目录 override > 本文件 > default）。
 channel = "stable"
 components = ["rustfmt", "clippy"]
