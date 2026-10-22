@@ -658,11 +658,109 @@ struct Frames {
     next_seq: u64,
 }
 
-/// 队列硬上限（≈133ms 显示缓冲；防极端突发撑爆内存，超出丢弃最旧帧）。
-/// 2026-10-11：由 6 降至 4——MF 硬解吞吐充分（远快于流帧率），不再需要
-/// 以深缓冲吸收解码抖动；队列深度直接叠加在端到端延迟上（每帧 16.7ms@60fps），
-/// 减 2 帧即省 ~33~67ms 延迟。
-const FRAME_BUFFER_MAX: usize = 4;
+/// 队列硬上限（≈400ms@30fps；防极端突发撑爆内存，超出丢弃最旧帧）。
+///
+/// 2026-10-11 曾由 6 降到 4（当时想省 ~33~67ms 延迟）。2026-10-22 实测发现
+/// 这个深度**不足以吸收 CDN 的突发投递**：同一会话里解码侧稳定 27~30 帧/秒、
+/// 前端也在 52 次/秒地取帧，但队列一到 5 帧就丢最旧帧 → 实测「取帧 52/s、
+/// 新帧只有 17/s、队列常满」。丢的是**本可以播出的帧**，画面因此发顿。
+///
+/// 现在前面还有一层前端抖动缓冲（display_delay_ms，默认 300ms）负责播出节拍，
+/// 这层队列只需「不丢帧」：消费端（前端 30~60 次/秒）快于生产端（27~30 帧/秒），
+/// 稳态下队列长期接近空，加深**不会**增加稳态延迟，只在突发时不再丢帧。
+const FRAME_BUFFER_MAX: usize = 12;
+
+/// 允许跳过 disposable 帧（frame_type=3）的落后量阈值（毫秒）。
+///
+/// 这类帧不影响后续解码的参考链，跳过可省一半解码量；但带时间分层的流里它可能
+/// 占到一半的帧——无条件跳过等于把 30fps 砍成 15fps（2026-10-22 复核：这是
+/// 「画面只有十几帧」的另一条可能成因）。因此只在**确实落后**（解码跟不上、
+/// socket 在积压）时才跳，正常状态全帧解码。
+const DISPOSABLE_SKIP_LAG_MS: i64 = 150;
+
+/// 直播帧统计（进程级累计，诊断用；Relaxed 原子，逐帧 3~5 次自增，成本可忽略）。
+///
+/// 用途：回答「解码到底出没出帧、有多少帧被主动丢弃」这类只能实测的问题——
+/// 出帧率、主动丢弃、解码调用/产出比都必须有真值，否则只能靠猜。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameStats {
+    /// 视频 tag 总数（含非 AVC 与不可解码的）。
+    pub video_tags: u64,
+    /// H.264 关键帧（frame_type=1）数。
+    pub key: u64,
+    /// 普通参考帧（frame_type=2）数。
+    pub inter: u64,
+    /// 可丢弃参考帧（frame_type=3，时间分层）数。
+    pub disposable: u64,
+    /// 其中被本实现主动跳过（未送解码器）的数量。
+    pub disposable_skipped: u64,
+    /// 送入解码器的访问单元数。
+    pub decode_calls: u64,
+    /// 解码器实际产出的帧数（一次调用可能产出多帧）。
+    pub decode_out: u64,
+    /// 预览取帧调用数（前端 capture_live_frame）。
+    pub preview_calls: u64,
+    /// 其中真正拿到新帧的调用数。
+    pub preview_frame: u64,
+    /// 其中「队列空 / 帧未变」的调用数（欠载或去重）。
+    pub preview_empty: u64,
+    /// 其中「会话不存在」的调用数。
+    pub preview_nosession: u64,
+}
+
+mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static VIDEO_TAGS: AtomicU64 = AtomicU64::new(0);
+    pub static KEY: AtomicU64 = AtomicU64::new(0);
+    pub static INTER: AtomicU64 = AtomicU64::new(0);
+    pub static DISPOSABLE: AtomicU64 = AtomicU64::new(0);
+    pub static DISPOSABLE_SKIPPED: AtomicU64 = AtomicU64::new(0);
+    pub static DECODE_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub static DECODE_OUT: AtomicU64 = AtomicU64::new(0);
+    pub static PREVIEW_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub static PREVIEW_FRAME: AtomicU64 = AtomicU64::new(0);
+    pub static PREVIEW_EMPTY: AtomicU64 = AtomicU64::new(0);
+    pub static PREVIEW_NOSESSION: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn bump(c: &AtomicU64, n: u64) {
+        c.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(super) fn get(c: &AtomicU64) -> u64 {
+        c.load(Ordering::Relaxed)
+    }
+}
+
+/// 读取当前进程的直播帧统计（诊断/探针用）。
+pub fn frame_stats() -> FrameStats {
+    FrameStats {
+        video_tags: stats::get(&stats::VIDEO_TAGS),
+        key: stats::get(&stats::KEY),
+        inter: stats::get(&stats::INTER),
+        disposable: stats::get(&stats::DISPOSABLE),
+        disposable_skipped: stats::get(&stats::DISPOSABLE_SKIPPED),
+        decode_calls: stats::get(&stats::DECODE_CALLS),
+        decode_out: stats::get(&stats::DECODE_OUT),
+        preview_calls: stats::get(&stats::PREVIEW_CALLS),
+        preview_frame: stats::get(&stats::PREVIEW_FRAME),
+        preview_empty: stats::get(&stats::PREVIEW_EMPTY),
+        preview_nosession: stats::get(&stats::PREVIEW_NOSESSION),
+    }
+}
+
+/// 清零直播帧统计（探针在每轮测量前调用）。
+pub fn reset_frame_stats() {
+    for c in [
+        &stats::VIDEO_TAGS,
+        &stats::KEY,
+        &stats::INTER,
+        &stats::DISPOSABLE,
+        &stats::DISPOSABLE_SKIPPED,
+        &stats::DECODE_CALLS,
+        &stats::DECODE_OUT,
+    ] {
+        c.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// 扫码灰度缓存：键为 (帧序号, 裁剪区)，视口不变且无新帧时直接复用。
 /// gray 用 Arc：命中时只克隆指针（零拷贝），避免在持锁路径上复制整块图像。
@@ -1346,7 +1444,9 @@ pub enum FrameOut {
 }
 
 pub fn crop_frame(id: &str, x: i32, y: i32, w: i32, h: i32, max_width: u32) -> FrameOut {
+    stats::bump(&stats::PREVIEW_CALLS, 1);
     let Some(s) = get_session(id) else {
+        stats::bump(&stats::PREVIEW_NOSESSION, 1);
         return FrameOut::NoSession;
     };
     *s.last_view.lock().unwrap_or_else(PoisonError::into_inner) = if w > 0 && h > 0 {
@@ -1360,6 +1460,7 @@ pub fn crop_frame(id: &str, x: i32, y: i32, w: i32, h: i32, max_width: u32) -> F
     let (frame, cx, cy, cw, ch, tw, th, step) = {
         let mut f = s.frames.lock().unwrap_or_else(PoisonError::into_inner);
         if f.queue.is_empty() {
+            stats::bump(&stats::PREVIEW_EMPTY, 1);
             return FrameOut::Empty;
         }
         // 弹出节拍 = 显示节拍（前端按设置的 30/60/120fps 轮询）：每轮询至多弹出一个
@@ -1398,9 +1499,11 @@ pub fn crop_frame(id: &str, x: i32, y: i32, w: i32, h: i32, max_width: u32) -> F
     {
         let mut last = s.last_sent.lock().unwrap_or_else(PoisonError::into_inner);
         if *last == Some(key) {
+            stats::bump(&stats::PREVIEW_EMPTY, 1);
             return FrameOut::Empty;
         }
         *last = Some(key);
+        stats::bump(&stats::PREVIEW_FRAME, 1);
     }
     // 锁外转换：只转换输出像素所需的源区域。
     let rgba = yuv_crop_to_rgba(
@@ -2177,6 +2280,9 @@ fn decode_session(
     let mut last_catchup_at: Option<std::time::Instant> = None;
     // 缓存的 SPS/PPS（追帧重建解码器后需重喂）。
     let mut param_sets: Vec<u8> = Vec::new();
+    // 心跳窗口的增量快照：把「后端解出多少帧」与「前端取走多少帧」放在同一行，
+    // 直播帧率上不去时一眼能分出是解码侧还是消费侧（2026-10-22 加）。
+    let mut prev_stats = frame_stats();
     loop {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
@@ -2236,9 +2342,16 @@ fn decode_session(
         }
         last_data_at = std::time::Instant::now();
         window_frames += 1;
+        stats::bump(&stats::VIDEO_TAGS, 1);
         let body = &tag[..data_size];
         let first = body[0];
         let frame_type = first >> 4;
+        match frame_type {
+            1 => stats::bump(&stats::KEY, 1),
+            2 => stats::bump(&stats::INTER, 1),
+            3 => stats::bump(&stats::DISPOSABLE, 1),
+            _ => {}
+        }
         if first & 0x0F != 7 {
             continue; // 非 AVC
         }
@@ -2265,11 +2378,14 @@ fn decode_session(
         // 解码吞吐不足时 socket 缓冲持续积压、落后量单调增长 → 触发追帧；
         // 追帧后锚点重置。asm 生效后正常流落后量恒 0（实测 35 秒零触发）。
         let now = std::time::Instant::now();
+        // 落后量（>0 = 解码落后于推流）。下面「跳 disposable 帧」也用它做判据。
+        let mut lag_ms: i64 = 0;
         match anchor {
             None => anchor = Some((media_ts, now)),
             Some((a_ts, a_at)) => {
                 let expected = a_ts as i64 + a_at.elapsed().as_millis() as i64;
                 let lag = expected - media_ts as i64;
+                lag_ms = lag;
                 if !skipping && lag > CATCHUP_LAG_MS {
                     skipping = true;
                     skip_since = Some(now);
@@ -2313,10 +2429,12 @@ fn decode_session(
             }
         }
 
-        // 非参考帧（frame_type=3，disposable inter）不影响后续解码的参考链，
-        // 直接跳过解码：若 60fps 流用它做时间分层，可近乎减半解码负载（1080p60
-        // 单线程跟不上时尤为关键）。扫码/预览少这些帧无碍。
-        if frame_type == 3 && body[1] == 1 {
+        // 非参考帧（frame_type=3，disposable inter）不影响后续解码的参考链，跳过
+        // 可近乎减半解码负载；但它同样是一帧画面——正常状态下必须解码，否则带时间
+        // 分层的流（30fps 金字塔编码）会被砍成 15fps。只在本轮已经落后（解码跟不上）
+        // 时跳过，作为「不解清晰度也先追上」的软阀门。
+        if frame_type == 3 && body[1] == 1 && lag_ms > DISPOSABLE_SKIP_LAG_MS {
+            stats::bump(&stats::DISPOSABLE_SKIPPED, 1);
             continue;
         }
 
@@ -2349,6 +2467,7 @@ fn decode_session(
                 // 组合时间（body[2..5]）忽略——显示延迟可接受。
                 // 解码错误不静默：持续失败（编码不兼容等）由上层降级清晰度。
                 let decode_t = std::time::Instant::now();
+                stats::bump(&stats::DECODE_CALLS, 1);
                 match decoder.decode(&annexb, media_ts) {
                     Ok(list) => {
                         decode_ns_total += decode_t.elapsed().as_nanos();
@@ -2357,6 +2476,7 @@ fn decode_session(
                             out_none += 1;
                         } else {
                             out_ok += 1;
+                            stats::bump(&stats::DECODE_OUT, list.len() as u64);
                             for of in list {
                                 push_decoded(frames, media_ts, of);
                             }
@@ -2398,9 +2518,23 @@ fn decode_session(
                     } else {
                         0.0
                     };
+                    let st = frame_stats();
+                    let d = |a: u64, b: u64| b.saturating_sub(a);
                     log::info!(
-                        "解码心跳: 出帧 {out_ok} / 无输出 {out_none} / 错误 {out_err}，队列 {qlen}，输入滞后 {in_lag}ms，输出滞后 {out_lag}ms，平均单帧解码 {avg_ms:.2}ms"
+                        "解码心跳: 出帧 {out_ok} / 无输出 {out_none} / 错误 {out_err}，队列 {qlen}，输入滞后 {in_lag}ms，输出滞后 {out_lag}ms，平均单帧解码 {avg_ms:.2}ms │ 本轮 tag {} key {} inter {} disp {} 跳disp {} │ 解码调用 {} 产出 {} │ 预览调用 {} 新帧 {} 空 {} 无会话 {}",
+                        d(prev_stats.video_tags, st.video_tags),
+                        d(prev_stats.key, st.key),
+                        d(prev_stats.inter, st.inter),
+                        d(prev_stats.disposable, st.disposable),
+                        d(prev_stats.disposable_skipped, st.disposable_skipped),
+                        d(prev_stats.decode_calls, st.decode_calls),
+                        d(prev_stats.decode_out, st.decode_out),
+                        d(prev_stats.preview_calls, st.preview_calls),
+                        d(prev_stats.preview_frame, st.preview_frame),
+                        d(prev_stats.preview_empty, st.preview_empty),
+                        d(prev_stats.preview_nosession, st.preview_nosession),
                     );
+                    prev_stats = st;
                 }
                 // 每 300 个视频 tag（约 5 秒）摘要一次解码结果分布（诊断用）。
                 if (out_ok + out_none + out_err) % 300 == 0 {

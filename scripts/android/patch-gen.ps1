@@ -154,10 +154,19 @@ Write-Host "== 3b. 资源裁剪（release 体积） =="
 # 幂等：按标记行判断，已存在则跳过。
 $agRc = [System.IO.File]::ReadAllText($appGradle)
 $nlRc = if ($agRc.Contains("`r`n")) { "`r`n" } else { "`n" }
-if ($agRc -notmatch 'isShrinkResources') {
-    $agRc = Set-Patch -Text $agRc -Anchor 'isMinifyEnabled = true' -Label "isShrinkResources = true（release）" -Insert ('isMinifyEnabled = true' + $nlRc + '            isShrinkResources = true')
+# 2026-10-22 起**关闭** isShrinkResources：AGP 的资源裁剪会把「代码里按字符串
+# 动态引用」的 assets 一并删掉。UC/九游 SDK 正是这种形态——它靠 DexClassLoader 从
+# getAssets() 读 assets/ucgamesdk/lib/ucsdk.apk 与各 ABI 的 lib_ucsdk_*.so，字符串
+# 拼接而成，裁剪器看不到引用 → 实测 release 包内 assets/ucgamesdk/ 整目录消失
+# （merge 中间产物里还在，说明是裁剪而非合并问题），真机 UC 登录必然失败。
+# 代价：+0.10MB 的未引用资源（此前记的收益），远小于一个渠道不可用。
+if ($agRc -match 'isShrinkResources\s*=\s*true') {
+    $agRc = $agRc -replace 'isShrinkResources\s*=\s*true', 'isShrinkResources = false'
+    Write-Host "  ~ isShrinkResources 由 true 改为 false（保住 UC assets）"
+} elseif ($agRc -notmatch 'isShrinkResources') {
+    $agRc = Set-Patch -Text $agRc -Anchor 'isMinifyEnabled = true' -Label "isShrinkResources = false（保住 UC assets）" -Insert ('isMinifyEnabled = true' + $nlRc + '            isShrinkResources = false')
 } else {
-    Write-Host "  = isShrinkResources 已存在"
+    Write-Host "  = isShrinkResources = false 已存在"
 }
 if ($agRc -notmatch 'resourceConfigurations') {
     $agRc = Set-Patch -Text $agRc -Anchor 'minSdk = 24' -Label 'resourceConfigurations = ["zh", "en"]' -Insert ('minSdk = 24' + $nlRc + '        resourceConfigurations += listOf("zh", "en")')
@@ -812,6 +821,136 @@ if ($mc -notmatch "ChannelWebLoginActivity") {
 if ($mChg) {
     [System.IO.File]::WriteAllText($mf2, $mc, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "  Manifest（渠道段）已更新"
+}
+
+
+Write-Host "== 6c. AndroidManifest：UC / OPPO 渠道声明（条件：vendor/channel_sdk 有对应 aar）=="
+# UC（net-sdk-*.aar）与 OPPO（gamesdk-*.aar）都以 aar 形式引入，清单会自动合并；
+# 但参考项目仍在**主清单**里显式声明这些组件/meta-data，原因是：
+#   - UC 的 PullupActivity 需要 scheme="ng<gameId>"（aar 内只声明 "ng"），且
+#     taskAffinity/theme 与 aar 默认值冲突 → 必须 tools:node="replace" 整条覆盖；
+#   - OPPO 的 debug_mode / is_offline_game / app_key 三条 meta-data 由 SDK 直接读
+#     PackageManager，aar 清单里没有，只能写在主清单。
+# 声明内容照参考项目 AndroidManifest.xml（UC 段 / OPPO 段），逐字对齐。
+$mf3 = Join-Path $gen "app/src/main/AndroidManifest.xml"
+$m3 = [System.IO.File]::ReadAllText($mf3)
+# 自愈：早期版本曾把换行拼成字面量 "\n" 写进清单（XML 解析直接失败）。
+# 这里一次性纠正，避免「清单已损坏 + 幂等检查命中 → 再也不修」的死锁。
+if ($m3.Contains('\n')) {
+    $m3 = $m3.Replace('\n', [string][char]10)
+    [System.IO.File]::WriteAllText($mf3, $m3, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  ~ 清单里发现字面量 \n，已纠正为真实换行"
+}
+$nl3 = if ($m3.Contains($CRLF)) { $CRLF } else { $LF }
+$m3Chg = $false
+
+$ucAar = Get-ChildItem -Path (Join-Path $root "vendor/channel_sdk") -Filter "net-sdk-*.aar" -ErrorAction SilentlyContinue | Select-Object -First 1
+$oppoAar = Get-ChildItem -Path (Join-Path $root "vendor/channel_sdk") -Filter "gamesdk-*.aar" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+if (-not $ucAar -and -not $oppoAar) {
+    Write-Host "  ! vendor/channel_sdk 无 UC/OPPO aar（跳过）"
+} else {
+    if ($ucAar -and $m3 -notmatch 'xmlns:tools=') {
+        $m3 = $m3.Replace('<manifest xmlns:android="http://schemas.android.com/apk/res/android">', '<manifest xmlns:android="http://schemas.android.com/apk/res/android"' + $nl3 + '    xmlns:tools="http://schemas.android.com/tools">')
+        $m3Chg = $true
+        Write-Host "  + manifest 根元素补 xmlns:tools"
+    }
+
+    if ($ucAar) {
+        if ($m3 -notmatch 'cn\.uc\.gamesdk\.activity\.PullupActivity') {
+            $ucBlock = @(
+                '        <!-- UC / 九游（net-sdk aar 清单只声明 scheme="ng"，需整条覆盖为 ng<gameId>） -->',
+                '        <activity',
+                '            android:name="cn.gundam.sdk.shell.activity.ThemeProxyActivity"',
+                '            android:exported="true" />',
+                '        <activity',
+                '            android:name="cn.uc.gamesdk.activity.PullupActivity"',
+                '            android:excludeFromRecents="true"',
+                '            android:exported="true"',
+                '            android:label="PullupActivity"',
+                '            android:launchMode="singleTop"',
+                '            android:taskAffinity="cn.uc.gamesdk.demo.diff"',
+                '            android:theme="@android:style/Theme.Translucent"',
+                '            tools:node="replace">',
+                '            <intent-filter>',
+                '                <action android:name="android.intent.action.VIEW" />',
+                '',
+                '                <category android:name="android.intent.category.DEFAULT" />',
+                '                <category android:name="android.intent.category.BROWSABLE" />',
+                '',
+                '                <data android:scheme="ng654463" />',
+                '            </intent-filter>',
+                '        </activity>',
+                '        <activity',
+                '            android:name="cn.gundam.sdk.shell.activity.ProxyActivity"',
+                '            android:configChanges="keyboardHidden|orientation|screenSize"',
+                '            android:exported="true"',
+                '            android:theme="@android:style/Theme.Translucent.NoTitleBar"',
+                '            android:windowSoftInputMode="adjustResize">',
+                '            <intent-filter>',
+                '                <action android:name="cn.uc.gamesdk.sdkweb" />',
+                '',
+                '                <category android:name="android.intent.category.DEFAULT" />',
+                '            </intent-filter>',
+                '        </activity>',
+                '        <service',
+                '            android:name="cn.gundam.sdk.shell.service.ProxyService"',
+                '            android:exported="true"',
+                '            android:process=":bgservice" />',
+                '    </application>'
+            ) -join $nl3
+            $m3 = Set-Patch -Text $m3 -Anchor '    </application>' -Insert $ucBlock -Label "UC 组件声明（4 条）"
+            $m3Chg = $true
+        } else {
+            Write-Host "  = UC 组件声明已存在"
+        }
+    }
+
+    if ($oppoAar) {
+        if ($m3 -notmatch 'android:name="app_key"') {
+            $oppoMeta = @(
+                '        <!-- OPPO：SDK 直接读 PackageManager 的 meta-data（aar 清单里没有） -->',
+                '        <meta-data',
+                '            android:name="debug_mode"',
+                '            android:value="true" />',
+                '        <meta-data',
+                '            android:name="is_offline_game"',
+                '            android:value="false" />',
+                '        <meta-data',
+                '            android:name="app_key"',
+                '            android:value="7NEgcusdF1ss0cK8CSwo8Ksk0" />',
+                '    </application>'
+            ) -join $nl3
+            $m3 = Set-Patch -Text $m3 -Anchor '    </application>' -Insert $oppoMeta -Label "OPPO meta-data（app_key / debug_mode / is_offline_game）"
+            $m3Chg = $true
+        } else {
+            Write-Host "  = OPPO meta-data 已存在"
+        }
+
+        if ($m3 -notmatch 'com\.heytap\.htms') {
+            $q = @(
+                '    <!-- Android 11+ 包可见性：渠道 SDK 需要查询的第三方包（照参考项目 queries） -->',
+                '    <queries>',
+                '        <package android:name="com.heytap.htms" />',
+                '        <package android:name="com.heytap.openid" />',
+                '        <package android:name="com.miHoYo.bh3.nearme.gamecenter" />',
+                '        <package android:name="com.xiaomi.gamecenter.sdk.service" />',
+                '        <package android:name="com.huawei.hwid" />',
+                '        <package android:name="com.huawei.hms" />',
+                '    </queries>',
+                '    <application'
+            ) -join $nl3
+            $m3 = Set-Patch -Text $m3 -Anchor '    <application' -Insert $q -Label "queries（渠道 SDK 包可见性）"
+            $m3Chg = $true
+        } else {
+            Write-Host "  = queries 已存在"
+        }
+    }
+
+    if ($m3Chg) {
+        [System.IO.File]::WriteAllText($mf3, $m3, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "  Manifest（UC/OPPO 段）已更新"
+    }
 }
 
 Write-Host "== 7. gradle.properties：ABI 裁剪（APK 体积） =="

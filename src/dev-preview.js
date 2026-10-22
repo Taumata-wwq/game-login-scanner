@@ -29,7 +29,7 @@
     always_on_top: false,
     auto_close: false,
     display_fps: 60,
-    display_delay_ms: 0,
+    display_delay_ms: 300,
     win_x: null, win_y: null, win_w: null, win_h: null,
     last_live_id: "",
     sidebar_w: null, game_col_w: null,

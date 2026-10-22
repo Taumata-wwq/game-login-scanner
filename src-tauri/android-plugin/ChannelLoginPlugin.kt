@@ -2,6 +2,7 @@ package com.taumata.scanner.plugins
 
 import android.app.Activity
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
@@ -16,12 +17,22 @@ import com.bsgamesdk.android.callbacklistener.BSGameSdkError
 import com.bsgamesdk.android.callbacklistener.CallbackListener
 import com.bsgamesdk.android.callbacklistener.ExitCallbackListener
 import com.bsgamesdk.android.callbacklistener.InitCallbackListener
+import com.nearme.game.sdk.GameCenterSDK
+import com.nearme.game.sdk.callback.ApiCallback
 import com.vivo.unionsdk.open.VivoAccountCallback
 import com.vivo.unionsdk.open.VivoUnionSDK
 import com.xiaomi.gamecenter.sdk.MiCommplatform
 import com.xiaomi.gamecenter.sdk.MiErrorCode
 import com.xiaomi.gamecenter.sdk.OnInitProcessListener
 import com.xiaomi.gamecenter.sdk.entry.MiAppInfo
+import cn.gundam.sdk.shell.even.SDKEventKey
+import cn.gundam.sdk.shell.even.SDKEventReceiver
+import cn.gundam.sdk.shell.even.Subscribe
+import cn.gundam.sdk.shell.open.ParamInfo
+import cn.gundam.sdk.shell.open.UCOrientation
+import cn.gundam.sdk.shell.param.SDKParamKey
+import cn.gundam.sdk.shell.param.SDKParams
+import cn.uc.gamesdk.UCGameSdk
 import org.json.JSONObject
 
 @InvokeArg
@@ -83,6 +94,10 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
             "wegame" -> startWebLogin(invoke, "wegame")
             // 华为：条件启用（HMS SDK + 自有 AGC 配置），内部反射调用 HuaweiLogin。
             "huawei" -> loginHuawei(invoke)
+            // OPPO（channel_id=18，GameCenterSDK；照参考项目 login/Oppo.java）。
+            "oppo" -> loginOppo(invoke)
+            // UC / 九游（channel_id=20，UCGameSdk；照参考项目 login/UC.java）。
+            "uc" -> loginUC(invoke)
             else -> invoke.reject("暂不支持的渠道：${args.channel}")
         }
     }
@@ -458,11 +473,202 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
         })
     }
 
+    // ---------- UC / 九游（照参考项目 login/UC.java） ----------
+
+    /**
+     * 当前等待 UC 回调的 invoke（单次消费，照 vivoInvoke 的写法）。
+     * UC 的回调注册在 SDK 内部且可能重复投递 → 消费后立即置空，重复回调被丢弃。
+     */
+    @Volatile
+    private var ucInvoke: Invoke? = null
+
+    /** UC SDK 是否已初始化（`ON_INIT_SUCC` 只回一次）。 */
+    @Volatile
+    private var ucInit = false
+
+    private var ucSdk: UCGameSdk? = null
+
+    /**
+     * UC 事件接收器（`cn.gundam.sdk.shell.even.SDKEventReceiver`）。
+     *
+     * 与参考项目 login/UC.java 完全一致：`initSdk` 成功（ON_INIT_SUCC）后才
+     * `login`；登录成功回调给出 `sid`，作为渠道凭证 `{"sid":..}` 交 Rust 侧以
+     * channel_id=20 走 combo/granter 换取 combo 凭证。
+     * 事件方法**不能是 private**：SDK 按注解分发，私有方法在部分实现上取不到
+     * （参考项目是 Java 匿名类；Kotlin 侧显式放开可见性更稳）。
+     */
+    private val ucReceiver = object : SDKEventReceiver() {
+        @Subscribe(event = intArrayOf(SDKEventKey.ON_INIT_SUCC))
+        fun onInitSucc() {
+            ucInit = true
+            try {
+                ucSdk?.login(activity, null)
+            } catch (e: Exception) {
+                finishUc(null, "UC 登录调用失败：${e.message}")
+            }
+        }
+
+        @Subscribe(event = intArrayOf(SDKEventKey.ON_LOGIN_SUCC))
+        fun onLoginSucc(sid: String) {
+            if (sid.isEmpty()) {
+                finishUc(null, "UC 登录返回空 sid")
+                return
+            }
+            val cred = JSONObject().put("sid", sid)
+            finishUc(cred, null, sid, sid)
+        }
+
+        @Subscribe(event = intArrayOf(SDKEventKey.ON_LOGIN_FAILED))
+        fun onLoginFailed() {
+            finishUc(null, "UC 登录失败（用户取消或渠道拒绝）")
+        }
+
+        @Subscribe(event = intArrayOf(SDKEventKey.ON_INIT_FAILED))
+        fun onInitFailed() {
+            finishUc(null, "UC SDK 初始化失败")
+        }
+    }
+
+    private fun loginUC(invoke: Invoke) {
+        ucInvoke?.reject("UC 登录被新的登录请求取代")
+        ucInvoke = invoke
+        try {
+            if (!ucInit) {
+                val sdk = UCGameSdk.defaultSdk()
+                sdk.registerSDKEventReceiver(ucReceiver)
+                val gpi = ParamInfo()
+                // 参照实现：UC 只有 gameId（无 appId/appKey/密钥）。
+                gpi.setGameId(UC_GAME_ID)
+                gpi.setOrientation(
+                    if (activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) {
+                        UCOrientation.PORTRAIT
+                    } else {
+                        UCOrientation.LANDSCAPE
+                    }
+                )
+                val params = SDKParams()
+                params.put(SDKParamKey.GAME_PARAMS, gpi)
+                sdk.initSdk(activity, params)
+                ucSdk = sdk
+            } else {
+                ucSdk?.login(activity, null)
+            }
+        } catch (e: Exception) {
+            finishUc(null, "UC SDK 初始化失败：${e.message}")
+        }
+    }
+
+    /** 单次消费 UC 登录结果（与 finishVivo 同构）。 */
+    private fun finishUc(cred: JSONObject?, error: String?, uid: String = "", name: String = "") {
+        val inv = ucInvoke ?: return
+        ucInvoke = null
+        activity.runOnUiThread {
+            if (error != null) {
+                inv.reject(error)
+            } else if (cred != null) {
+                val obj = JSObject()
+                obj.put("cred", cred.toString())
+                obj.put("uid", uid)
+                obj.put("name", name)
+                inv.resolve(obj)
+            }
+        }
+    }
+
+    // ---------- OPPO（照参考项目 login/Oppo.java） ----------
+
+    @Volatile
+    private var oppoInvoke: Invoke? = null
+
+    @Volatile
+    private var oppoInit = false
+
+    private var oppoSdk: GameCenterSDK? = null
+
+    /**
+     * OPPO 渠道登录。
+     *
+     * 链路照参考项目 login/Oppo.java：
+     *   GameCenterSDK.init(OPPO_APP_KEY, activity) → getInstance()
+     *   → doLogin(activity, cb) → onSuccess → doGetTokenAndSsoid(cb)
+     *   → {token, ssoid} 作为渠道凭证（channel_id=18）交 Rust 侧换 combo 凭证。
+     *
+     * **与参考实现的默认路径一致，不做 PMS 伪装**：参考的 `OPPO_ADV_MODE` 默认为
+     * false，此时 `Tools.verifyOfficialPack` 直接返回 true（不检测本体、不启用
+     * `PmsHooker`）。本项目照此默认路径实现，不引入「把自家包伪装成
+     * com.miHoYo.bh3.nearme.gamecenter」的钩子——那既是高风险反射改写，也与本项目
+     * 「不伪装成其它应用」的取向冲突。
+     */
+    private fun loginOppo(invoke: Invoke) {
+        oppoInvoke?.reject("OPPO 登录被新的登录请求取代")
+        oppoInvoke = invoke
+        if (!oppoInit) {
+            GameCenterSDK.init(OPPO_APP_KEY, activity)
+            oppoSdk = GameCenterSDK.getInstance()
+            oppoInit = true
+        }
+        oppoSdk?.doLogin(activity, object : ApiCallback {
+            override fun onSuccess(s: String?) {
+                oppoSdk?.doGetTokenAndSsoid(object : ApiCallback {
+                    override fun onSuccess(json: String?) {
+                        try {
+                            val o = JSONObject(json ?: "")
+                            val token = o.getString("token")
+                            val ssoid = o.getString("ssoid")
+                            val cred = JSONObject().put("token", token).put("ssoid", ssoid)
+                            finishOppo(cred, null, ssoid, ssoid)
+                        } catch (e: Exception) {
+                            // 参考实现在这里只打印、漏了失败回调；照抄流程但补上 reject，
+                            // 否则 UI 会永远停在「登录中」。
+                            finishOppo(null, "OPPO 登录返回内容无法解析：${e.message}")
+                        }
+                    }
+
+                    override fun onFailure(msg: String?, code: Int) {
+                        finishOppo(null, "OPPO 换取登录态失败：$msg（code=$code）")
+                    }
+                })
+            }
+
+            override fun onFailure(msg: String?, code: Int) {
+                // 照参考实现：清掉 SDK 插件框架的缓存文件，避免上一次失败状态粘住。
+                runCatching {
+                    val f = java.io.File(activity.filesDir.parentFile, "shared_prefs/plugin_framework.xml")
+                    if (f.exists()) f.delete()
+                }
+                finishOppo(null, "OPPO 登录失败：$msg（code=$code）")
+            }
+        })
+    }
+
+    /** 单次消费 OPPO 登录结果（与 finishVivo 同构）。 */
+    private fun finishOppo(cred: JSONObject?, error: String?, uid: String = "", name: String = "") {
+        val inv = oppoInvoke ?: return
+        oppoInvoke = null
+        activity.runOnUiThread {
+            if (error != null) {
+                inv.reject(error)
+            } else if (cred != null) {
+                val obj = JSObject()
+                obj.put("cred", cred.toString())
+                obj.put("uid", uid)
+                obj.put("name", name)
+                inv.resolve(obj)
+            }
+        }
+    }
+
     companion object {
         /** vivo 渠道 appKey（参考项目 Constant.VIVO_APP_KEY）。 */
         private const val VIVO_APP_KEY = "94c93e8ac604d1909943862f12803ac9"
 
         /** B 站 SDK appKey（参考项目 Constant.BILI_APP_KEY）。 */
         private const val BILI_APP_KEY = "dbf8f1b4496f430b8a3c0f436a35b931"
+
+        /** UC（九游）游戏 id（参考项目 login/UC.java 的 `gpi.setGameId(...)`）。 */
+        private const val UC_GAME_ID = 654463
+
+        /** OPPO 渠道 AppKey（参考项目 Constant.OPPO_APP_KEY）。 */
+        private const val OPPO_APP_KEY = "f303388D89043bfEB1A667cfE42ea47E"
     }
 }

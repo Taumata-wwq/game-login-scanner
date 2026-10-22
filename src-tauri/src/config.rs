@@ -286,13 +286,20 @@ pub struct AppConfig {
     /// 显示区域（预览）目标帧率：30 / 60 / 120。默认 60。
     #[serde(default = "default_display_fps")]
     pub display_fps: u32,
-    /// 显示画面延迟（毫秒，0–2000，0 = 不延迟）。默认 0。
+    /// 直播画面缓冲（毫秒，0–2000，0 = 不缓冲）。默认 300。
     ///
-    /// **只影响画面呈现**：前端把取回的画面帧按到达时间排队，画布只呈现
-    /// 「已到期」的帧；扫码走的是后端独立任务（直接读最新帧），时序完全不受
-    /// 影响。用于让画面与外部时间轴对齐（如直播回看/录屏对时）。
-    #[serde(default)]
+    /// **只作用于「直播间画面」的呈现**，语义是抖动缓冲而不是延迟显示器：
+    /// 帧到达后先入队，按「到达时刻 + 缓冲」逐帧等间隔播出（每个收到的帧都上屏
+    /// 一次，不抽稀、不并帧），把网络/解码的短暂抖动挡在显示之外 → 观感更连续；
+    /// 代价是画面整体晚「缓冲」毫秒。
+    /// 桌面/屏幕预览**不走缓冲**（保持实时）；扫码取帧是后端独立任务（直接读
+    /// 最新帧），与本缓冲完全无关。
+    #[serde(default = "default_display_delay")]
     pub display_delay_ms: u32,
+    /// 设置项迁移版本号（见 [`AppConfig::load`]）：旧配置缺该字段时为 0，
+    /// 用来把「历史上写入的旧默认值」一次性纠正为新默认值。
+    #[serde(default)]
+    pub settings_rev: u32,
     pub win_x: Option<i32>,
     pub win_y: Option<i32>,
     /// 主窗口尺寸（逻辑像素；None = 用默认 760×520）。恢复时由 min/max 约束夹取。
@@ -370,6 +377,35 @@ pub fn normalize_display_fps(v: u32) -> u32 {
 /// 显示画面延迟上限（毫秒）。超过上限按上限处理（UI 滑杆同为 0–2000）。
 pub const MAX_DISPLAY_DELAY_MS: u32 = 2000;
 
+/// 直播画面缓冲默认值（毫秒）。300ms 是直播抖动缓冲的常用档位：足以吸收
+/// 秒级以下的网络/解码抖动，叠加在本就 <0.5s 的直播链路上仍可接受。
+pub const DEFAULT_DISPLAY_DELAY_MS: u32 = 300;
+
+/// `display_delay_ms` 的 serde 默认值（旧配置无此字段时按 300ms 缓冲）。
+fn default_display_delay() -> u32 {
+    DEFAULT_DISPLAY_DELAY_MS
+}
+
+/// 设置项迁移版本号（当前值）。加载到更低版本的配置时执行一次性迁移，
+/// 迁移后立即落盘，避免每次启动重复改写用户后来的手动选择。
+pub const SETTINGS_REV: u32 = 1;
+
+/// 一次性设置项迁移（纯函数，便于单测）：返回是否发生了变化。
+///
+/// 目前只有一条：`display_delay_ms` 早期默认值 0（= 关掉抖动缓冲），现在默认
+/// 300ms。**只纠正「等于旧默认值 0」的配置**——用户自己设过的非 0 值一律不动；
+/// 迁移后打上 `settings_rev`，用户之后手动调回 0（追求最低延迟）不会被再次改写。
+pub fn migrate_settings(cfg: &mut AppConfig) -> bool {
+    if cfg.settings_rev >= SETTINGS_REV {
+        return false;
+    }
+    if cfg.display_delay_ms == 0 {
+        cfg.display_delay_ms = DEFAULT_DISPLAY_DELAY_MS;
+    }
+    cfg.settings_rev = SETTINGS_REV;
+    true
+}
+
 /// 显示画面延迟收敛：夹到 [0, MAX_DISPLAY_DELAY_MS]，并对齐到 50ms 档位
 /// （与设置界面滑杆步长一致，手改配置里的零头也会被吸附）。
 pub fn normalize_display_delay(v: u32) -> u32 {
@@ -394,7 +430,8 @@ impl Default for AppConfig {
             always_on_top: false,
             auto_close: false,
             display_fps: default_display_fps(),
-            display_delay_ms: 0,
+            display_delay_ms: default_display_delay(),
+            settings_rev: SETTINGS_REV,
             win_x: None,
             win_y: None,
             win_w: None,
@@ -727,6 +764,15 @@ impl AppConfig {
                     cfg.decrypt_secrets();
                     cfg.display_fps = normalize_display_fps(cfg.display_fps);
                     cfg.display_delay_ms = normalize_display_delay(cfg.display_delay_ms);
+                    // 一次性设置项迁移（2026-10-22）：display_delay_ms 是「直播抖动
+                    // 缓冲」，早期默认值 0 等于关掉缓冲；旧配置里的 0 一律按旧默认值
+                    // 处理并提升到 300ms。迁移后写盘并打上 settings_rev，用户之后手动
+                    // 调回 0（最低延迟）不会被再次改写。
+                    if migrate_settings(&mut cfg) {
+                        if let Err(e) = cfg.save() {
+                            log::warn!("保存配置失败（设置项迁移）: {e}");
+                        }
+                    }
                     cfg
                 }
                 Err(_) => {
@@ -1059,7 +1105,7 @@ mod current_account_tests {
         );
     }
 
-    /// 显示画面延迟：夹到 0–2000 并对齐 50ms 档位（手改配置也不会生效越界值）。
+    /// 直播画面缓冲：夹到 0–2000 并对齐 50ms 档位（手改配置也不会生效越界值）。
     #[test]
     fn display_delay_is_clamped_and_snapped() {
         assert_eq!(super::normalize_display_delay(0), 0);
@@ -1069,7 +1115,40 @@ mod current_account_tests {
         assert_eq!(super::normalize_display_delay(2000), 2000);
         // 越界：夹到上限（而不是回绕或归零）。
         assert_eq!(super::normalize_display_delay(9999), 2000);
-        // 默认值必须是 0（不延迟），否则升级用户会莫名多出延迟。
-        assert_eq!(super::AppConfig::default().display_delay_ms, 0);
+        // 默认 300ms（抖动缓冲档位）：0 是「最低延迟」而不是默认值。
+        assert_eq!(
+            super::AppConfig::default().display_delay_ms,
+            super::DEFAULT_DISPLAY_DELAY_MS
+        );
+        assert_eq!(super::DEFAULT_DISPLAY_DELAY_MS, 300);
+        assert_eq!(super::normalize_display_delay(300), 300);
+    }
+
+    /// 设置项一次性迁移：只把「旧默认值 0」提升为 300，且只做一次。
+    #[test]
+    fn settings_migration_lifts_old_zero_buffer_once() {
+        // 旧配置（没有 settings_rev 字段 → 0）且缓冲为旧默认 0 → 提升到 300。
+        let mut old = super::AppConfig {
+            settings_rev: 0,
+            display_delay_ms: 0,
+            ..Default::default()
+        };
+        assert!(super::migrate_settings(&mut old));
+        assert_eq!(old.display_delay_ms, super::DEFAULT_DISPLAY_DELAY_MS);
+        assert_eq!(old.settings_rev, super::SETTINGS_REV);
+        // 迁移过之后，用户手动调回 0（最低延迟）不再被改写。
+        old.display_delay_ms = 0;
+        assert!(!super::migrate_settings(&mut old));
+        assert_eq!(old.display_delay_ms, 0);
+        // 用户自己设过的非 0 值不动（只打版本号）。
+        let mut own = super::AppConfig {
+            settings_rev: 0,
+            display_delay_ms: 900,
+            ..Default::default()
+        };
+        assert!(super::migrate_settings(&mut own));
+        assert_eq!(own.display_delay_ms, 900);
+        // 新配置（Default 已带当前版本）不做任何事。
+        assert!(!super::migrate_settings(&mut super::AppConfig::default()));
     }
 }

@@ -403,15 +403,17 @@
             <button data-fps="120">120</button>
           </div>
         </div>
-        <!-- 显示画面延迟：只把「画面呈现」推后，取帧与扫码时序不变（扫码走后端
-             独立任务，直接读最新帧）。滑杆 0–2000ms，步长 50。 -->
+        <!-- 直播画面缓冲：抖动缓冲（不是延迟显示器）——帧按「到达 + 缓冲」逐帧等间隔
+             上屏，吸收网络/解码抖动，观感更连续。只作用于直播间画面：桌面/屏幕预览
+             保持实时，扫码取帧走后端独立任务（直接读最新帧）。
+             滑杆 0–2000ms，步长 50；0 = 不缓冲（最低延迟），默认 300。 -->
         <div class="opt-row delay-row">
-          <span class="lbl">显示画面延迟
-            <small>只延后画面显示，不影响扫码</small>
+          <span class="lbl">直播画面缓冲
+            <small>只影响直播间画面，越大越抗抖动</small>
           </span>
           <div class="delay-ctl">
-            <input type="range" id="delayRange" min="0" max="2000" step="50" value="0" aria-label="显示画面延迟（毫秒）" />
-            <span class="delay-val" id="delayVal">0 ms</span>
+            <input type="range" id="delayRange" min="0" max="2000" step="50" value="300" aria-label="直播画面缓冲（毫秒）" />
+            <span class="delay-val" id="delayVal">300 ms</span>
           </div>
         </div>
 

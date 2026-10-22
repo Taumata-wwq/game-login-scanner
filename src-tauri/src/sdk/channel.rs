@@ -5,14 +5,15 @@
 //! 本模块负责 channel_id 映射与统一入口，实际请求复用 [super::mihoyo] 的实现
 //! （B 服 verify 与第三方渠道同一端点、同一签名）。
 //!
-//! 首批渠道（依赖齐备，2026-10-17）：小米 / 应用宝 / 华为 / vivo / Wegame。
-//! channel_id 映射与参考项目一致；官服(1) / B站(14) 走各自已有链路，不在此表。
-//! UC(20) / OPPO(18) 尚未移植——2026-10-19 复核参考快照 `app/libs` 后确认
-//! **SDK 发布件实际可得**（`net-sdk-9.2.4.4.aar` 6.2 MB 含 `UCGameSdk`；
-//! `gamesdk-20220915.aar` 10.5 MB 含 `GameCenterSDK`），此前「不可得」的记载有误。
-//! 二者迁移成本主要在 Kotlin 侧（UC 需 assets 自解压 loader；OPPO 需已装
-//! OPPO 渠道游戏本体），Rust 侧无需改动：接入后只需在本表补 ChannelInfo。
-//! 魅族(16) / 360(17) 参考项目源码全文为注释、无二进制，确属已弃。
+//! 已实装渠道（channel_id 与参考项目逐字一致）：小米(11) / 应用宝(13) / 华为(15) /
+//! OPPO(18) / vivo(19) / UC 九游(20) / Wegame(27)。官服(1) / B站(14) 走各自已有
+//! 链路，不在此表；接入新渠道只需在本表补 ChannelInfo（Rust 侧其余零改动）。
+//!
+//! 2026-10-22 补齐 UC(20) / OPPO(18)：SDK 来自参考快照 `app/libs`
+//! （UC `net-sdk-9.2.4.4.aar` 6.2 MB 含 `UCGameSdk`；OPPO `gamesdk-20220915.aar`
+//! 10.5 MB + `gamesdk-common-20220915.aar` 含 `GameCenterSDK`），放在
+//! `vendor/channel_sdk/`（不入库）；Kotlin 侧实现见 `ChannelLoginPlugin.kt`。
+//! 魅族(16) / 360(17) 参考项目源码全文为注释、无二进制，确属已弃，不做。
 
 /// 渠道元数据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,16 @@ pub const CHANNELS: &[ChannelInfo] = &[
         id: 19,
         key: "vivo",
         label: "vivo",
+    },
+    ChannelInfo {
+        id: 18,
+        key: "oppo",
+        label: "OPPO",
+    },
+    ChannelInfo {
+        id: 20,
+        key: "uc",
+        label: "UC（九游）",
     },
     ChannelInfo {
         id: 27,
