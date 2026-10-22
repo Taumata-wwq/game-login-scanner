@@ -28,7 +28,7 @@ jobs:
         # 真实运行用例（此前因无测试目标而空转）。
         # 同日恢复 [lib] test=true（watch.rs / lib.rs 内联测试重新执行），并新增
         # [[test]] bench_qr_live（required-features = "bench-qr"，CI 不启用 → 不参与）。
-        # 当前共 114 个用例（lib 18 + smoke 1 + unit 95）。
+        # 当前共 115 个用例（lib 19 + smoke 1 + unit 95）。
         #
         # 必须显式列出 components：该 action 默认 --profile minimal（不含 rustfmt/clippy）。
         # 2026-10-21 更正：此前能过是因为 rust-toolchain.toml 里的 stable + components
