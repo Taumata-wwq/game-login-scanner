@@ -1972,19 +1972,62 @@
   const LIVE_BUF_BUDGET_BYTES = (window.__ANDROID__ ? 24 : 64) * 1024 * 1024;
   let bufQ = [];                            // [{ at, apply, bytes }]，按到达时刻升序
   let bufBytes = 0;
+  // ---- 离屏画布池：缓冲里存「已画好像素的画布」，不存原始 ArrayBuffer ----
+  // 动机（2026-10-22 实测）：队列里直接放 ArrayBuffer 时，缓冲越深持有的大对象越多
+  // （1600ms 时队列占 31.5MB），V8 每 1~2 秒就有一次大回收 → 画面出现 0.5~4.8 秒的
+  // 「加载式」停顿，而且**缓冲越大越频繁**。改成池化画布后，像素落在画布的像素存储
+  // 里（不计入 JS 堆），每帧的 IPC 缓冲写完即弃 → 这类停顿消失。
+  let poolFree = [];                        // 空闲画布（同尺寸复用）
+  let poolW = 0, poolH = 0;
+  let frameImg = null, frameImgW = 0, frameImgH = 0;   // 复用的 ImageData
+  function liveBufPoolReset() {
+    poolFree = [];
+    poolW = 0;
+    poolH = 0;
+    frameImg = null;
+    frameImgW = 0;
+    frameImgH = 0;
+  }
+  function liveBufAcquire(w, h) {
+    if (w !== poolW || h !== poolH) { poolW = w; poolH = h; poolFree = []; }
+    let cv = poolFree.pop();
+    if (!cv) {
+      cv = document.createElement('canvas');
+      cv.width = w;
+      cv.height = h;
+    }
+    return cv;
+  }
+  function liveBufRelease(cv) {
+    if (!cv || cv.width !== poolW || cv.height !== poolH) return;
+    if (poolFree.length < LIVE_BUF_MAX_FRAMES) poolFree.push(cv);
+  }
+  /** 把一帧像素写进画布（复用同一份 ImageData，避免每帧新建 600KB 对象）。 */
+  function putFramePixels(cv, buf, pw, ph) {
+    if (!frameImg || frameImgW !== pw || frameImgH !== ph) {
+      frameImg = new ImageData(pw, ph);
+      frameImgW = pw;
+      frameImgH = ph;
+    }
+    frameImg.data.set(new Uint8ClampedArray(buf, 24, pw * ph * 4));
+    cv.getContext('2d').putImageData(frameImg, 0, 0);
+  }
   function liveBufReset() {
     bufQ = [];
     bufBytes = 0;
+    liveBufPoolReset();
   }
-  /** 直播帧入队；缓冲为 0 时直通（零额外开销）。 */
-  function liveBufPush(apply, bytes) {
+  /** 直播帧入队（cv = 该帧所在的池化画布，丢帧时要归还池）；缓冲 0 时直通。 */
+  function liveBufPush(apply, bytes, cv) {
     if (!liveBufMs) { diagDrawn++; apply(); return; }
     const now = performance.now();
-    bufQ.push({ at: now, apply, bytes: bytes || 0 });
+    bufQ.push({ at: now, apply, bytes: bytes || 0, cv: cv || null });
     bufBytes += bytes || 0;
     while (bufQ.length > 1
       && (bufQ.length > LIVE_BUF_MAX_FRAMES || bufBytes > LIVE_BUF_BUDGET_BYTES)) {
-      bufBytes -= bufQ.shift().bytes;
+      const d = bufQ.shift();
+      bufBytes -= d.bytes;
+      liveBufRelease(d.cv);
       diagDropped++;
     }
     liveBufDrain(now);
@@ -1995,14 +2038,16 @@
     const now = nowIn === undefined ? performance.now() : nowIn;
     const maxAge = liveBufMs + LIVE_BUF_DRIFT_MAX_MS;
     while (bufQ.length > 1 && now - bufQ[0].at > maxAge) {
-      bufBytes -= bufQ.shift().bytes;
+      const d = bufQ.shift();
+      bufBytes -= d.bytes;
+      liveBufRelease(d.cv);
       diagDropped++;
     }
     if (bufQ.length && now - bufQ[0].at >= liveBufMs) {
       const f = bufQ.shift();
       bufBytes -= f.bytes;
       diagDrawn++;
-      f.apply();
+      f.apply();   // 该帧的画布随 srcCanvas 继续使用，换帧时再归还池
     }
   }
 
@@ -2459,13 +2504,23 @@
     const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
     const mon = { x: 0, y: 0, w: dv.getInt32(16, true), h: dv.getInt32(20, true) };
     if (!pw || !ph || 24 + pw * ph * 4 > buf.byteLength) throw new Error('直播数据异常');
+    // 入队前就把像素写进池化画布：下面的闭包不再持有 buf（ArrayBuffer），
+    // 缓冲再深也不会在 JS 堆里堆积大对象（这正是「越调越卡」的根因）。
+    let pooled = null;
+    if (liveBufMs) {
+      pooled = liveBufAcquire(pw, ph);
+      putFramePixels(pooled, buf, pw, ph);
+    }
     // 呈现段整体进入直播缓冲：下面读写的都是「画布侧」状态
     // （preview / view / srcCanvas / 锚定帧 / 封面 / 缩略图），延后执行不会让
     // 取帧逻辑看到陈旧值。返回值仍表示「本轮到新帧」，AIMD 节拍不受影响。
     liveBufPush(() => {
       // 排队期间可能已切走直播间：旧会话的帧不能画到新会话的画布上。
       const cur = activeSession();
-      if (!cur || cur.id !== s.id) return;
+      if (!cur || cur.id !== s.id) {
+        if (pooled) liveBufRelease(pooled);
+        return;
+      }
       if (!preview || preview.mon.w !== mon.w || preview.mon.h !== mon.h) {
         preview = { mon };
         view = { scale: 1, fx: 0.5, fy: 0.5 };
@@ -2473,13 +2528,18 @@
         liveAnchor = null;   // 流规格变化（换流）：旧锚定帧作废
         liveAnchorPrev = null;
       }
-      if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
-        srcCanvas = document.createElement('canvas');
-        srcCanvas.width = pw;
-        srcCanvas.height = ph;
+      if (pooled) {
+        // 池化画布已含本帧像素：直接当源画布（零拷贝），上一张归还池。
+        if (srcCanvas && srcCanvas !== pooled) liveBufRelease(srcCanvas);
+        srcCanvas = pooled;
+      } else {
+        if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
+          srcCanvas = document.createElement('canvas');
+          srcCanvas.width = pw;
+          srcCanvas.height = ph;
+        }
+        putFramePixels(srcCanvas, buf, pw, ph);
       }
-      const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
-      srcCanvas.getContext('2d').putImageData(img, 0, 0);
       // 记录本帧覆盖的 mon 矩形（= 请求时的视口）：拖拽/缩放期按此锚定绘制；
       // 上一帧保留作垫底（运动补白）。
       if (liveAnchor) liveAnchorPrev = liveAnchor;
@@ -2495,7 +2555,7 @@
         const t = captureThumb();
         if (t) frameThumbs.set(s.id, t);
       }
-    }, buf.byteLength);
+    }, buf.byteLength, pooled);
     return true;
   }
 
