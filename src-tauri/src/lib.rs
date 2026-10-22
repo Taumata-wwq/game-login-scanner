@@ -128,6 +128,8 @@ struct OptionsPatch {
     always_on_top: Option<bool>,
     auto_close: Option<bool>,
     display_fps: Option<u32>,
+    /// 显示画面延迟（毫秒，0–2000；只影响画面呈现，不影响扫码取帧）。
+    display_delay_ms: Option<u32>,
     display_name: Option<String>,
     stop_others_on_scan_success: Option<bool>,
     auto_check_update: Option<bool>,
@@ -154,6 +156,7 @@ fn set_options(
         always_on_top,
         auto_close,
         display_fps,
+        display_delay_ms,
         display_name,
         stop_others_on_scan_success,
         auto_check_update,
@@ -192,6 +195,9 @@ fn set_options(
     }
     if let Some(v) = display_fps {
         cfg.display_fps = config::normalize_display_fps(v);
+    }
+    if let Some(v) = display_delay_ms {
+        cfg.display_delay_ms = config::normalize_display_delay(v);
     }
     if let Some(v) = display_name {
         cfg.display_name = v;
@@ -417,7 +423,7 @@ mod update_tests {
 mod options_patch_tests {
     use super::OptionsPatch;
 
-    /// 用前端实际提交的全部 11 个键驱动反序列化，逐项断言都被接住。
+    /// 用前端实际提交的全部 12 个键驱动反序列化，逐项断言都被接住。
     /// 少一个键 = 该开关静默不落盘（历史上四项移动端开关就是这样失效的）。
     #[test]
     fn all_frontend_option_keys_are_accepted() {
@@ -426,6 +432,7 @@ mod options_patch_tests {
             "always_on_top": false,
             "auto_close": true,
             "display_fps": 120,
+            "display_delay_ms": 300,
             "display_name": "测试",
             "stop_others_on_scan_success": false,
             "auto_check_update": true,
@@ -440,6 +447,7 @@ mod options_patch_tests {
         assert_eq!(p.always_on_top, Some(false));
         assert_eq!(p.auto_close, Some(true));
         assert_eq!(p.display_fps, Some(120));
+        assert_eq!(p.display_delay_ms, Some(300));
         assert_eq!(p.display_name.as_deref(), Some("测试"));
         assert_eq!(p.stop_others_on_scan_success, Some(false));
         assert_eq!(p.auto_check_update, Some(true));

@@ -593,6 +593,7 @@
     if ('stop_others_on_scan_success' in patch) args.stop_others_on_scan_success = patch.stop_others_on_scan_success;
     if ('auto_check_update' in patch) args.auto_check_update = patch.auto_check_update;
     if ('display_fps' in patch) args.display_fps = patch.display_fps;
+    if ('display_delay_ms' in patch) args.display_delay_ms = patch.display_delay_ms;
     if ('display_name' in patch) args.display_name = patch.display_name;
     if ('screen_scan_auto_bg' in patch) args.screen_scan_auto_bg = patch.screen_scan_auto_bg;
     if ('screen_scan_stop_on_resume' in patch) args.screen_scan_stop_on_resume = patch.screen_scan_stop_on_resume;
@@ -1753,6 +1754,42 @@
     syncWatchers();
   }
 
+  // 刷新单个直播间的权威元数据（标题 / 主播 / 封面 / 开播状态）。
+  //
+  // 调用方通常不 await：失败多为瞬时网络问题，静默即可（30s 兜底轮询会补上），
+  // 唯一要显式处理的是「房间不存在」这个终态——落到 missing 占位并提示用户。
+  // （此前 switchLive / 开播推送 / 画面刷新三处各写一份，本函数即其合并。）
+  function refreshRoomMeta(id) {
+    const sep = id.indexOf(':');
+    const platform = id.slice(0, sep);
+    const room = id.slice(sep + 1);
+    return invoke('live_refresh_meta', { platform, room }).then((m) => {
+      const local = liveRooms.find((x) => (x.platform + ':' + x.room) === id);
+      if (local && m) {
+        local.title = m.title || local.title;
+        local.nickname = m.nickname || local.nickname;
+        local.cover = m.cover || local.cover;
+        local.room_id = m.room_id || local.room_id;
+        local.live_status = m.live_status;
+      }
+      // 拿到数据即撤掉占位（顺带让「不存在」的房间在改名后恢复正常）。
+      if (roomFetchState.delete(id)) renderLiveTabs();
+      if (activeLiveId === id) {
+        updateVpInfo();
+        if (coverShown) showCover(id);   // 仍在占位态：同步刷新封面/状态文案
+      }
+      return m;
+    }).catch((e) => {
+      // 点开一个已存的坏房间（房间号被删/填错）：同样落到「房间不存在，请检查」。
+      if (isRoomMissingError(e)) {
+        roomFetchState.set(id, 'missing');
+        renderLiveTabs();
+        if (activeLiveId === id) { updateVpInfo(); if (coverShown) showCover(id); }
+      }
+      return null;
+    });
+  }
+
   // 渲染侧栏直播间列表（"桌面"卡片 + 已保存直播间卡片 + 添加按钮）。
   function renderLiveTabs() {
     const box = $('roomList');
@@ -1911,6 +1948,47 @@
   // 拖拽排序源会话 id。
   let dragSrcId = null;
 
+  // ---- 显示画面延迟（0–2000ms）----------------------------------------
+  // 取帧与呈现解耦：帧到达时压入队列并记下到达时刻，画布只呈现「到期」的帧
+  // （now - at >= delayMs）。扫码不受影响：后端 run_scan 是独立任务，直接读最新帧。
+  //
+  // 队列封顶而不是无限增长：按帧数与字节双重预算，超预算时**隔帧抽稀**
+  // （丢掉队列里的隔一帧），保住时间跨度、牺牲时间分辨率——反过来丢最旧帧
+  // 会让实际延迟缩水到设定值以下，与设置项语义相悖。
+  let delayMs = 0;
+  const DELAY_QUEUE_MAX = 96;
+  const DELAY_BUDGET_BYTES = (window.__ANDROID__ ? 20 : 48) * 1024 * 1024;
+  let delayQ = [];        // [{ at, apply, bytes }]，按到达时刻升序
+  let delayBytes = 0;
+  function delayQueueReset() {
+    delayQ = [];
+    delayBytes = 0;
+  }
+  function delayPush(apply, bytes) {
+    if (!delayMs) { apply(); return; }   // 不延迟：直通（零额外开销）
+    delayQ.push({ at: performance.now(), apply, bytes: bytes || 0 });
+    delayBytes += bytes || 0;
+    while (delayQ.length > 1 && (delayQ.length > DELAY_QUEUE_MAX || delayBytes > DELAY_BUDGET_BYTES)) {
+      delayBytes -= delayQ[1].bytes;
+      delayQ.splice(1, 1);   // 抽稀第二帧，保住首帧的时间基准
+    }
+    delayDrain();
+  }
+  function delayDrain() {
+    if (!delayQ.length) return;
+    const cutoff = performance.now() - delayMs;
+    let due = null;
+    while (delayQ.length && delayQ[0].at <= cutoff) {
+      due = delayQ.shift();
+      delayBytes -= due.bytes;
+    }
+    // 只呈现到期帧里最新的一帧：更早的帧已经过时，追着画只会白烧 CPU/GPU。
+    if (due) due.apply();
+  }
+
+  // 观测用：延迟队列状态（与 window.__gsNotifyStats 同类，供脚本/真机核对）。
+  window.__gsDelayStats = () => ({ ms: delayMs, queued: delayQ.length, bytes: delayBytes });
+
   // ---------- 封面占位（切换直播间/未开播时先显示封面，首帧到达后揭除） ----------
   let coverShown = false;
   function showCover(roomId) {
@@ -1968,29 +2046,7 @@
     // ② 无会话：先上封面占位（连线成功、首帧到达后自动揭除）。
     if (hasSession) hideCover(); else showCover(id);
     // ③ 后台刷新一次元数据（标题/封面按需更新）。
-    invoke('live_refresh_meta', { platform, room }).then((m) => {
-      const local = liveRooms.find((x) => (x.platform + ':' + x.room) === id);
-      if (local && m) {
-        local.title = m.title || local.title;
-        local.nickname = m.nickname || local.nickname;
-        local.cover = m.cover || local.cover;
-        local.room_id = m.room_id || local.room_id;
-        local.live_status = m.live_status;
-      }
-      // 拿到数据即撤掉占位（顺带让「不存在」的房间在改名后恢复正常）。
-      if (roomFetchState.delete(id)) renderLiveTabs();
-      if (activeLiveId === id) {
-        updateVpInfo();
-        if (coverShown) showCover(id);   // 仍在占位态：同步刷新封面/状态文案
-      }
-    }).catch((e) => {
-      // 点开一个已存的坏房间（房间号被删/填错）：同样落到「房间不存在，请检查」。
-      if (isRoomMissingError(e)) {
-        roomFetchState.set(id, 'missing');
-        renderLiveTabs();
-        if (activeLiveId === id) { updateVpInfo(); if (coverShown) showCover(id); }
-      }
-    });
+    refreshRoomMeta(id);
     // ④ 未连接：后台连接（成功 → 首帧到达揭除封面；失败 → 保持封面）。
     if (!hasSession) {
       await connectLive(platform, room, '');
@@ -2186,6 +2242,7 @@
     invoke('live_set_active', { id: '' }).catch(() => {});
     invoke('set_preview_active', { active: true }).catch(() => {});
     activeLiveId = null;
+    delayQueueReset();   // 回到桌面：丢弃直播间残留的延迟帧
     preview = null;
     view = { scale: 1, fx: 0.5, fy: 0.5 };
     viewT = { scale: 1, fx: 0.5, fy: 0.5 };
@@ -2309,6 +2366,7 @@
   // 仅切换主画面（不触发连接）——供 connectLive 成功后调用，避免递归。
   function switchLiveNow(id) {
     if (activeLiveId === id) return;
+    delayQueueReset();   // 换源：上一路排队的帧不能漏到新画面上
     if (activeLiveId) liveViews.set(activeLiveId, { ...view });
     activeLiveId = id;
     invoke('live_set_active', { id }).catch(() => {});
@@ -2358,35 +2416,43 @@
     const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
     const mon = { x: 0, y: 0, w: dv.getInt32(16, true), h: dv.getInt32(20, true) };
     if (!pw || !ph || 24 + pw * ph * 4 > buf.byteLength) throw new Error('直播数据异常');
-    if (!preview || preview.mon.w !== mon.w || preview.mon.h !== mon.h) {
-      preview = { mon };
-      view = { scale: 1, fx: 0.5, fy: 0.5 };
-      viewT = { scale: 1, fx: 0.5, fy: 0.5 };
-      liveAnchor = null;   // 流规格变化（换流）：旧锚定帧作废
-      liveAnchorPrev = null;
-    }
-    if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
-      srcCanvas = document.createElement('canvas');
-      srcCanvas.width = pw;
-      srcCanvas.height = ph;
-    }
-    const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
-    srcCanvas.getContext('2d').putImageData(img, 0, 0);
-    // 记录本帧覆盖的 mon 矩形（= 请求时的视口）：拖拽/缩放期按此锚定绘制；
-    // 上一帧保留作垫底（运动补白）。
-    if (liveAnchor) liveAnchorPrev = liveAnchor;
-    liveAnchor = { rect: region };
-    clearPendingRealtime();
-    viewDirty = false;
-    drawView();
-    if (coverShown) hideCover();   // 首帧到达：揭除封面占位
-    previewErrShown = false;
-    // 无封面房间：首次进入记录首帧缩略图。
-    const room = liveRooms.find((r) => (r.platform + ':' + r.room) === s.id);
-    if (room && !room.cover && !frameThumbs.has(s.id)) {
-      const t = captureThumb();
-      if (t) frameThumbs.set(s.id, t);
-    }
+    // 呈现段整体推迟（显示画面延迟）：下面读写的都是「画布侧」状态
+    // （preview / view / srcCanvas / 锚定帧 / 封面 / 缩略图），延后执行不会让
+    // 取帧逻辑看到陈旧值。返回值仍表示「本轮到新帧」，AIMD 节拍不受影响。
+    delayPush(() => {
+      // 排队期间可能已切走直播间：旧会话的帧不能画到新会话的画布上。
+      const cur = activeSession();
+      if (!cur || cur.id !== s.id) return;
+      if (!preview || preview.mon.w !== mon.w || preview.mon.h !== mon.h) {
+        preview = { mon };
+        view = { scale: 1, fx: 0.5, fy: 0.5 };
+        viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+        liveAnchor = null;   // 流规格变化（换流）：旧锚定帧作废
+        liveAnchorPrev = null;
+      }
+      if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
+        srcCanvas = document.createElement('canvas');
+        srcCanvas.width = pw;
+        srcCanvas.height = ph;
+      }
+      const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
+      srcCanvas.getContext('2d').putImageData(img, 0, 0);
+      // 记录本帧覆盖的 mon 矩形（= 请求时的视口）：拖拽/缩放期按此锚定绘制；
+      // 上一帧保留作垫底（运动补白）。
+      if (liveAnchor) liveAnchorPrev = liveAnchor;
+      liveAnchor = { rect: region };
+      clearPendingRealtime();
+      viewDirty = false;
+      drawView();
+      if (coverShown) hideCover();   // 首帧到达：揭除封面占位
+      previewErrShown = false;
+      // 无封面房间：首次进入记录首帧缩略图。
+      const room = liveRooms.find((r) => (r.platform + ':' + r.room) === s.id);
+      if (room && !room.cover && !frameThumbs.has(s.id)) {
+        const t = captureThumb();
+        if (t) frameThumbs.set(s.id, t);
+      }
+    }, buf.byteLength);
     return true;
   }
 
@@ -2420,27 +2486,32 @@
         w: dv.getInt32(16, true), h: dv.getInt32(20, true),
       };
       if (!pw || !ph || 24 + pw * ph * 4 > buf.byteLength) throw new Error('预览数据异常');
-      const monChanged = !!preview && (preview.mon.x !== mon.x || preview.mon.y !== mon.y
-        || preview.mon.w !== mon.w || preview.mon.h !== mon.h);
-      if (monChanged) {
-        view = { scale: 1, fx: 0.5, fy: 0.5 };
-        viewT = { scale: 1, fx: 0.5, fy: 0.5 };
-      }
-      if (!preview || monChanged) {
-        preview = { mon };
-      }
-      if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
-        srcCanvas = document.createElement('canvas');
-        srcCanvas.width = pw;
-        srcCanvas.height = ph;
-      }
-      const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
-      srcCanvas.getContext('2d').putImageData(img, 0, 0);
-      clearPendingRealtime();
-      viewDirty = false;
-      drawView();
-      updateRegion();
-      previewErrShown = false;
+      // 呈现段推迟（显示画面延迟），与直播路径同构。
+      delayPush(() => {
+        // 排队期间切进了直播间：屏幕帧不能盖到直播画布上。
+        if (liveOn()) return;
+        const monChanged = !!preview && (preview.mon.x !== mon.x || preview.mon.y !== mon.y
+          || preview.mon.w !== mon.w || preview.mon.h !== mon.h);
+        if (monChanged) {
+          view = { scale: 1, fx: 0.5, fy: 0.5 };
+          viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+        }
+        if (!preview || monChanged) {
+          preview = { mon };
+        }
+        if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
+          srcCanvas = document.createElement('canvas');
+          srcCanvas.width = pw;
+          srcCanvas.height = ph;
+        }
+        const img = new ImageData(new Uint8ClampedArray(buf, 24, pw * ph * 4), pw, ph);
+        srcCanvas.getContext('2d').putImageData(img, 0, 0);
+        clearPendingRealtime();
+        viewDirty = false;
+        drawView();
+        updateRegion();
+        previewErrShown = false;
+      }, buf.byteLength);
       return true;
     } catch (e) {
       if (!previewErrShown) {
@@ -2511,6 +2582,9 @@
   let previewGen = 0;
   async function previewLoop(gen) {
     if (!previewActive || gen !== previewGen) return;
+    // 先把「已到期」的延迟帧呈现出去：本轮到期的帧可能在上一轮就入队了，
+    // 而下一轮要等 refreshPreview 返回后才调度，不在这里补一次会多积一周期。
+    delayDrain();
     const t0 = performance.now();
     const changed = await refreshPreview();
     tickFps(changed);
@@ -3009,6 +3083,70 @@
     ensureViewAnim();
   });
 
+  // ---------- 画面刷新（右下角按钮）：重置当前画面源的全部状态 ----------
+  //
+  // 一次点击 = 三层重置：
+  //   视图层：缩放/平移回中、锚定帧作废、延迟队列清空、错误提示复位；
+  //   呈现层：srcCanvas 丢弃 + viewDirty，下一帧必然是整幅重绘（不会拿旧垫底帧混画）；
+  //   数据源层：直播 → 重发 live_start（后端 start() 对同一 id 是「先停旧会话、
+  //     再建新会话」，即解析/连接/解码全部重来），并就地更新会话信息 + 房间元数据；
+  //     桌面 → set_preview_active 关再开，清掉预览关注区，帧总线下一帧必然重拷。
+  // 直播重连失败时本地丢弃该会话并回退，避免永久停在封面占位上。
+  // 摄像头模式没有「画面源」可刷新，直接忽略。
+  let stageRefreshing = false;
+  async function refreshStage() {
+    if (cameraMode || stageRefreshing) return;
+    stageRefreshing = true;
+    const btn = $('btnVpRefresh');
+    if (btn) btn.classList.add('spin');
+    try {
+      delayQueueReset();
+      clearPendingRealtime();
+      view = { scale: 1, fx: 0.5, fy: 0.5 };
+      viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+      ensureViewAnim();
+      liveAnchor = null;
+      liveAnchorPrev = null;
+      srcCanvas = null;
+      viewDirty = true;
+      previewErrShown = false;
+      if (liveOn()) {
+        const s = activeSession();
+        if (!s) { exitLiveMode(); return; }
+        showCover(s.id);   // 重取期间回到封面（文案反映真实状态）
+        const info = await invoke('live_start', { platform: s.platform, room: s.room });
+        // 新会话的连接信息（分辨率/时长/标题都可能已变）：就地合并回会话条目，
+        // note 等本地字段保留（Object.assign 只覆盖列出的键）。
+        Object.assign(s, {
+          w: info.w, h: info.h, title: info.title, nickname: info.nickname,
+          cover: info.cover, room_id: info.room_id, duration: info.duration, status: 'live',
+        });
+        refreshRoomMeta(s.id);   // 侧栏标题/封面/开播状态同步（不阻塞重连后的取帧）
+        renderLiveTabs();
+        log('已刷新直播间 ' + s.room, 'info');
+      } else {
+        // 清一次预览关注区：帧总线下一帧必然重拷该区域（而不是复用缓存瓦片）。
+        await invoke('set_preview_active', { active: false });
+        await invoke('set_preview_active', { active: true });
+        log('已刷新画面', 'info');
+      }
+      refreshPreview().catch(() => {});
+    } catch (e) {
+      log('刷新失败: ' + e, 'error');
+      if (liveOn()) {
+        const s = activeSession();
+        if (s) closeLive(s.id);   // 重连失败：丢弃会话，回到桌面或剩余会话
+      }
+    } finally {
+      if (btn) btn.classList.remove('spin');
+      stageRefreshing = false;
+    }
+  }
+  $('btnVpRefresh').addEventListener('click', (e) => {
+    e.stopPropagation();
+    refreshStage();
+  });
+
   // ---------- FPS 徽标：暂停/恢复预览 ----------
   const PAUSE_ICON = '<svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>';
   $('fpsMeter').addEventListener('click', async (e) => {
@@ -3102,6 +3240,12 @@
     document.querySelectorAll('#fpsSeg button').forEach((b) => {
       b.classList.toggle('on', Number(b.dataset.fps) === fps);
     });
+    // 显示画面延迟（0–2000ms，步长 50；0 = 不延迟）。
+    delayMs = Math.max(0, Math.min(2000, Number(config.display_delay_ms) || 0));
+    const dRange = $('delayRange');
+    if (dRange) dRange.value = String(delayMs);
+    const dVal = $('delayVal');
+    if (dVal) dVal.textContent = delayMs + ' ms';
   }
 
   function renderAll() {
@@ -3188,6 +3332,22 @@
         restartPreviewTiming();
       });
     });
+    // 显示画面延迟：拖动时只更新读数（零 IPC），松手才落盘。
+    const dRange = $('delayRange');
+    if (dRange) {
+      dRange.addEventListener('input', () => {
+        const v = Math.max(0, Math.min(2000, Math.round((Number(dRange.value) || 0) / 50) * 50));
+        delayMs = v;
+        const el = $('delayVal');
+        if (el) el.textContent = v + ' ms';
+      });
+      dRange.addEventListener('change', () => {
+        delayMs = Math.max(0, Math.min(2000, Number(dRange.value) || 0));
+        // 延迟口径变了：旧队列按新口径重排没有意义，直接清空（下一帧按新延迟入队）。
+        delayQueueReset();
+        saveCfg({ display_delay_ms: delayMs });
+      });
+    }
     const dn = $('displayName');
     dn.addEventListener('change', () => saveCfg({ display_name: dn.value.trim() }));
     dn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dn.blur(); } });

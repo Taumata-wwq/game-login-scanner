@@ -286,6 +286,13 @@ pub struct AppConfig {
     /// 显示区域（预览）目标帧率：30 / 60 / 120。默认 60。
     #[serde(default = "default_display_fps")]
     pub display_fps: u32,
+    /// 显示画面延迟（毫秒，0–2000，0 = 不延迟）。默认 0。
+    ///
+    /// **只影响画面呈现**：前端把取回的画面帧按到达时间排队，画布只呈现
+    /// 「已到期」的帧；扫码走的是后端独立任务（直接读最新帧），时序完全不受
+    /// 影响。用于让画面与外部时间轴对齐（如直播回看/录屏对时）。
+    #[serde(default)]
+    pub display_delay_ms: u32,
     pub win_x: Option<i32>,
     pub win_y: Option<i32>,
     /// 主窗口尺寸（逻辑像素；None = 用默认 760×520）。恢复时由 min/max 约束夹取。
@@ -360,6 +367,15 @@ pub fn normalize_display_fps(v: u32) -> u32 {
     }
 }
 
+/// 显示画面延迟上限（毫秒）。超过上限按上限处理（UI 滑杆同为 0–2000）。
+pub const MAX_DISPLAY_DELAY_MS: u32 = 2000;
+
+/// 显示画面延迟收敛：夹到 [0, MAX_DISPLAY_DELAY_MS]，并对齐到 50ms 档位
+/// （与设置界面滑杆步长一致，手改配置里的零头也会被吸附）。
+pub fn normalize_display_delay(v: u32) -> u32 {
+    (v.min(MAX_DISPLAY_DELAY_MS) / 50) * 50
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -378,6 +394,7 @@ impl Default for AppConfig {
             always_on_top: false,
             auto_close: false,
             display_fps: default_display_fps(),
+            display_delay_ms: 0,
             win_x: None,
             win_y: None,
             win_w: None,
@@ -709,6 +726,7 @@ impl AppConfig {
                 Ok(mut cfg) => {
                     cfg.decrypt_secrets();
                     cfg.display_fps = normalize_display_fps(cfg.display_fps);
+                    cfg.display_delay_ms = normalize_display_delay(cfg.display_delay_ms);
                     cfg
                 }
                 Err(_) => {
@@ -1039,5 +1057,19 @@ mod current_account_tests {
             c.game_channel.get("bh3").copied().flatten(),
             Some(Channel::Bilibili)
         );
+    }
+
+    /// 显示画面延迟：夹到 0–2000 并对齐 50ms 档位（手改配置也不会生效越界值）。
+    #[test]
+    fn display_delay_is_clamped_and_snapped() {
+        assert_eq!(super::normalize_display_delay(0), 0);
+        assert_eq!(super::normalize_display_delay(120), 100);
+        assert_eq!(super::normalize_display_delay(149), 100);
+        assert_eq!(super::normalize_display_delay(150), 150);
+        assert_eq!(super::normalize_display_delay(2000), 2000);
+        // 越界：夹到上限（而不是回绕或归零）。
+        assert_eq!(super::normalize_display_delay(9999), 2000);
+        // 默认值必须是 0（不延迟），否则升级用户会莫名多出延迟。
+        assert_eq!(super::AppConfig::default().display_delay_ms, 0);
     }
 }

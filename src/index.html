@@ -113,6 +113,11 @@
             <button class="region-reset" id="btnRegionReset" title="重置视图">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/><path d="M3 12h18"/></svg>
             </button>
+            <!-- 画面刷新（右下角）：重连当前直播间 / 重开屏幕预览，并把视图与显示
+                 状态全部复位。详见 app.js refreshStage()。 -->
+            <button class="vp-refresh" id="btnVpRefresh" title="刷新画面（重置视图并重新连接当前画面源）">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.1-6.8"/><path d="M21 3v6h-6"/></svg>
+            </button>
             <!-- 摄像头取景层（移动端「摄像头扫码」模式：中间区域扩展覆盖账号/区服区） -->
             <div class="m-camera-view" id="mCameraView" hidden>
               <canvas id="mcCanvas" class="mc-canvas" width="480" height="270"></canvas>
@@ -396,6 +401,17 @@
             <button data-fps="30">30</button>
             <button data-fps="60" class="on">60</button>
             <button data-fps="120">120</button>
+          </div>
+        </div>
+        <!-- 显示画面延迟：只把「画面呈现」推后，取帧与扫码时序不变（扫码走后端
+             独立任务，直接读最新帧）。滑杆 0–2000ms，步长 50。 -->
+        <div class="opt-row delay-row">
+          <span class="lbl">显示画面延迟
+            <small>只延后画面显示，不影响扫码</small>
+          </span>
+          <div class="delay-ctl">
+            <input type="range" id="delayRange" min="0" max="2000" step="50" value="0" aria-label="显示画面延迟（毫秒）" />
+            <span class="delay-val" id="delayVal">0 ms</span>
           </div>
         </div>
 
