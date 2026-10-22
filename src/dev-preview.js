@@ -140,7 +140,7 @@
         console.log("[mock invoke]", cmd, args || "");
         switch (cmd) {
           case "get_config": return Promise.resolve(clone(cfg));
-          case "get_app_version": return Promise.resolve("0.3.2-preview");
+          case "get_app_version": return Promise.resolve("0.3.3-preview");
           case "set_options":
             if (args && args.patch) { for (var k in args.patch) cfg[k] = args.patch[k]; }
             return Promise.resolve();
