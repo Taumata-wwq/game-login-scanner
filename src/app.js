@@ -2016,6 +2016,7 @@
     bufQ = [];
     bufBytes = 0;
     liveBufPoolReset();
+    liveBufClockStop();
   }
   /** 直播帧入队（cv = 该帧所在的池化画布，丢帧时要归还池）；缓冲 0 时直通。 */
   function liveBufPush(apply, bytes, cv) {
@@ -2030,12 +2031,42 @@
       liveBufRelease(d.cv);
       diagDropped++;
     }
-    liveBufDrain(now);
   }
-  /** 播出节拍：一次至多放行一帧（等间隔），并做延迟上界的追帧丢帧。 */
-  function liveBufDrain(nowIn) {
+  // ---- 播出时钟（与取帧循环解耦）--------------------------------------
+  // 历史教训（2026-10-06「固定节拍弹出」）：播出节拍必须由独立时钟决定，不能跟着
+  // 取帧循环走——否则「取一帧的耗时」（IPC + 渲染约 15~20ms）会直接变成显示间隔，
+  // 网络/渲染抖动全透传到画面。2026-10-13 引入 AIMD 自适应取帧后又把这条丢了，
+  // 于是「缓冲越深越不顺」复现。
+  // 现在：取帧只负责把帧塞进缓冲（**不渲染**），渲染由固定节拍时钟按显示帧率驱动。
+  let bufClock = null;
+  let bufNextTick = 0;
+  function liveBufClockStop() {
+    if (bufClock) { clearTimeout(bufClock); bufClock = null; }
+  }
+  function liveBufClockEnsure() {
+    if (bufClock || !liveBufMs) return;
+    // 注：节拍只在直播缓冲启用时运行；缓冲为 0 时走「到达即呈现」的最低延迟路径。
+    if (!previewActive || paused || dragging || baseMapActive) return;
+    bufNextTick = performance.now();
+    const step = () => {
+      const period = Math.max(4, 1000 / (fpsSetting || 60));
+      const now = performance.now();
+      if (now - bufNextTick > 500) bufNextTick = now;    // 页面被挂起过：不补播，重排节拍
+      const wait = Math.max(0, bufNextTick - now);
+      bufClock = setTimeout(() => {
+        bufClock = null;
+        if (!previewActive || paused || dragging || baseMapActive) return;
+        liveBufTick();
+        bufNextTick += period;
+        step();
+      }, wait);
+    };
+    step();
+  }
+  /** 一个节拍：追帧丢帧 + 至多弹出一帧。 */
+  function liveBufTick() {
     if (!bufQ.length) return;
-    const now = nowIn === undefined ? performance.now() : nowIn;
+    const now = performance.now();
     const maxAge = liveBufMs + LIVE_BUF_DRIFT_MAX_MS;
     while (bufQ.length > 1 && now - bufQ[0].at > maxAge) {
       const d = bufQ.shift();
@@ -2043,6 +2074,9 @@
       liveBufRelease(d.cv);
       diagDropped++;
     }
+    // 只在「队首已攒够设定缓冲时长」时弹出：源比节拍慢时不会 2 倍速播放
+    // （30fps 源 + 60Hz 节拍实际仍只弹 30 帧/秒）；源与节拍同为 60 时，
+    // 每个节拍弹一帧 = 均匀 60fps。
     if (bufQ.length && now - bufQ[0].at >= liveBufMs) {
       const f = bufQ.shift();
       bufBytes -= f.bytes;
@@ -2661,7 +2695,13 @@
       liveMiss = 0;
       liveEstInterval = Math.min(24, liveEstInterval ? liveEstInterval * 2 : 4);
     }
-    return Math.max(liveEstInterval, previewIntervalMs());
+    // 开了直播缓冲时，取帧只做「塞进缓冲」（不渲染），成本低很多；此时把取帧节拍
+    // 提到显示帧率的 2 倍，保证缓冲始终先于播出攒够（否则 60Hz 播出 + 60/s 取帧
+    // 只能勉强 1:1，任何一次抖动就会欠载）。
+    const floor = liveBufMs
+      ? Math.max(4, previewIntervalMs() / 2)
+      : previewIntervalMs();
+    return Math.max(liveEstInterval, floor);
   }
   const PREVIEW_IDLE_INTERVAL = 140;
   let idleFrames = 0;
@@ -2688,7 +2728,7 @@
     // 先按播出节拍放行一条已到期的直播缓冲帧：本轮到期的帧可能在上一轮就入队了，
     // 而下一轮要等 refreshPreview 返回后才调度，不在这里补一次会多积一周期。
     // （本循环同时充当播出时钟：它的节拍由设置里的显示帧率决定。）
-    liveBufDrain();
+    liveBufClockEnsure();
     const t0 = performance.now();
     diagPolls++;
     const changed = await refreshPreview();
@@ -2722,6 +2762,7 @@
   function stopPreview() {
     previewActive = false;
     previewGen++;
+    liveBufClockStop();
     if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
   }
   // 屏幕扫码「自动切后台」标志：回到前台时据此自动停止屏幕扫码（用完即止）。
