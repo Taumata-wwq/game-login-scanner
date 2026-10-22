@@ -201,7 +201,7 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_HttpBridge_nativeInit<'l
 ///
 /// Kotlin `ClipboardBridge.attach()`（由 ScreenCapturePlugin 注册时调用）触发：
 /// 注册 JavaVM 与类全局引用，供后续 native 线程读取剪贴板位图
-/// （扫码「剪贴板优先」路径；2026-10-17 新增）。
+/// （扫码「剪贴板优先」路径； 新增）。
 #[no_mangle]
 pub extern "system" fn Java_com_taumata_scanner_plugins_ClipboardBridge_nativeInit<'local>(
     mut unowned_env: EnvUnowned<'local>,
@@ -218,7 +218,7 @@ pub extern "system" fn Java_com_taumata_scanner_plugins_ClipboardBridge_nativeIn
 ///
 /// Kotlin `NotifyBridge.attach()`（由 ScreenCapturePlugin 注册时调用）触发：
 /// 注册 JavaVM 与类全局引用，供后续 native 线程发常驻/即时通知
-/// （后台扫码状态与扫码结果提醒；2026-10-18 新增）。
+/// （后台扫码状态与扫码结果提醒； 新增）。
 #[no_mangle]
 pub extern "system" fn Java_com_taumata_scanner_plugins_NotifyBridge_nativeInit<'local>(
     mut unowned_env: EnvUnowned<'local>,

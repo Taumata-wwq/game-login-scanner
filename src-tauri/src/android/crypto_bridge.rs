@@ -1,6 +1,6 @@
 //! Android Keystore 密钥保护桥：Rust 经 JNI 调用 Kotlin `CryptoBridge`。
 //!
-//! 动机见 [CryptoBridge.kt]：Android 无 DPAPI，敏感字段（access_key/stoken）原先
+//! 动机见 [CryptoBridge.kt]：Android 无 DPAPI，敏感字段（access_key/stoken）
 //! **明文落盘**。改用 AndroidKeyStore 的 AES-256-GCM（密钥不出 TEE）加密。
 //!
 //! 与 [http_bridge] 同：不依赖 ndk_context，Kotlin object 初始化时 nativeInit 注册类引用。

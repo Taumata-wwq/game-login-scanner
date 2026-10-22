@@ -10,7 +10,7 @@ import android.os.Build
 import androidx.annotation.Keep
 import androidx.core.app.NotificationCompat
 // MainActivity 在主包 com.taumata.game_scanner 下，本文件在 .scanner.plugins 包——
-// 通知的点击跳转需要它，故显式导入（2026-10-18 编译期实测报 Unresolved reference）。
+// 通知的点击跳转需要它，故显式导入（编译期实测报 Unresolved reference）。
 import com.taumata.game_scanner.MainActivity
 
 /**

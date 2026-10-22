@@ -63,7 +63,7 @@ object StreamTunnel {
                 down.join()
             } catch (_: Exception) {
             } finally {
-                // 审计 P3-15：两端必须在这里关。原来 close 写在 try 末尾，握手失败/异常
+                // 两端必须在这里关。原来 close 写在 try 末尾，握手失败/异常
                 // 路径会跳过它，逐次遗留 fd。读方向不设超时是刻意的——FLV 长连接允许空闲。
                 try { client?.close() } catch (_: Exception) {}
                 try { tls?.close() } catch (_: Exception) {}

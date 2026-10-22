@@ -280,10 +280,10 @@ pub async fn bili_sdk_captcha() -> Result<Value, String> {
 ///
 /// B站游戏 SDK（`api/client/login`）的成功判定是 body 里出现非空 `access_key`；
 /// 但「没有 access_key」并不等于「需要验证码」——账号密码错误、风控拒绝、字段缺失
-/// 都会走到这里。此前调用方无条件转入极验，于是**任何**失败都表现为「弹验证窗，
+/// 都会走到这里。调用方无条件转入极验，于是**任何**失败都表现为「弹验证窗，
 /// 填完仍登不进去」，把真正的失败原因彻底盖掉（真机反馈）。
 ///
-/// 真机实测（2026-10-18，Redmi K40）该接口索要验证码时的**权威响应**：
+/// 真机实测（Redmi K40）该接口索要验证码时的**权威响应**
 /// ```json
 /// {"code":200000,"message":"trigger account secondary verify","need_captch":"1",
 ///  "requestId":"…","server_message":"","timestamp":"…"}
@@ -299,7 +299,7 @@ pub async fn bili_sdk_captcha() -> Result<Value, String> {
 ///   - 回显 `validate` / `seccode` 要求补交。
 pub fn bili_login_needs_captcha(resp: &Value) -> bool {
     /// `need_captch` / `need_captcha` 的宽松真值判定：字符串 "1"、数字 1、布尔 true
-    /// 都算（服务端历史上两种类型都用过，不能只认一种）。
+    /// 都算（服务端两种类型都用过，不能只认一种）。
     fn truthy(v: Option<&Value>) -> bool {
         match v {
             Some(Value::String(s)) => !matches!(s.trim(), "" | "0" | "false"),
@@ -398,7 +398,7 @@ mod captcha_gate_tests {
         assert!(!bili_login_needs_captcha(&json!({ "need_captch": "" })));
     }
 
-    /// 真机实测的原始响应（2026-10-18 Redmi K40）——回归锚点。
+    /// 真机实测的原始响应（Redmi K40）——回归锚点。
     ///
     /// 这是**权威样本**：服务端字段名拼作 `need_captch`（少一个 a），值以字符串
     /// `"1"` 表示需要二次验证。只认业务码的实现会漏掉它，把正常流程误判成失败。

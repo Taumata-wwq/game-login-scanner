@@ -42,9 +42,9 @@ class ScreenCapturePlugin(private val activity: Activity) : Plugin(activity) {
         StreamTunnel
         CryptoBridge
         // 剪贴板桥需要 Context：注册时注入 Application Context 并触发其 JNI 注册
-        // （扫码「剪贴板优先」路径；2026-10-17 新增）。
+        // （扫码「剪贴板优先」路径； 新增）。
         ClipboardBridge.attach(activity.applicationContext)
-        // 通知桥同样需要 Context（建渠道 + 发常驻/即时通知；2026-10-18 新增）。
+        // 通知桥同样需要 Context（建渠道 + 发常驻/即时通知； 新增）。
         NotifyBridge.attach(activity.applicationContext)
     }
 

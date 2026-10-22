@@ -128,8 +128,6 @@ struct OptionsPatch {
     always_on_top: Option<bool>,
     auto_close: Option<bool>,
     display_fps: Option<u32>,
-    /// 显示画面延迟（毫秒，0–2000；只影响画面呈现，不影响扫码取帧）。
-    display_delay_ms: Option<u32>,
     display_name: Option<String>,
     stop_others_on_scan_success: Option<bool>,
     auto_check_update: Option<bool>,
@@ -142,7 +140,7 @@ struct OptionsPatch {
 
 /// 字段级更新设置项（不触碰账号列表）。
 ///
-/// 前端设置项（自动登录/置顶/自动退出/显示帧率/登入名）此前走 save_config 整份回写（该命令已因该竞态删除），
+/// 前端设置项（自动登录/置顶/自动退出/显示帧率/登入名）走 save_config 整份回写（该命令已因该竞态删除），
 /// 其 payload 是可能已过时的前端快照 → 与后端 select/delete 等账号命令并发时会互相
 /// 覆盖（后到的旧快照抹掉账号改动）。改为只提交本次变更的字段，从根上消除该竞态。
 #[tauri::command]
@@ -156,7 +154,6 @@ fn set_options(
         always_on_top,
         auto_close,
         display_fps,
-        display_delay_ms,
         display_name,
         stop_others_on_scan_success,
         auto_check_update,
@@ -195,9 +192,6 @@ fn set_options(
     }
     if let Some(v) = display_fps {
         cfg.display_fps = config::normalize_display_fps(v);
-    }
-    if let Some(v) = display_delay_ms {
-        cfg.display_delay_ms = config::normalize_display_delay(v);
     }
     if let Some(v) = display_name {
         cfg.display_name = v;
@@ -423,8 +417,8 @@ mod update_tests {
 mod options_patch_tests {
     use super::OptionsPatch;
 
-    /// 用前端实际提交的全部 12 个键驱动反序列化，逐项断言都被接住。
-    /// 少一个键 = 该开关静默不落盘（历史上四项移动端开关就是这样失效的）。
+    /// 用前端实际提交的全部 11 个键驱动反序列化，逐项断言都被接住。
+    /// 少一个键 = 该开关静默不落盘四项移动端开关就是这样失效的）。
     #[test]
     fn all_frontend_option_keys_are_accepted() {
         let json = r#"{
@@ -432,7 +426,6 @@ mod options_patch_tests {
             "always_on_top": false,
             "auto_close": true,
             "display_fps": 120,
-            "display_delay_ms": 300,
             "display_name": "测试",
             "stop_others_on_scan_success": false,
             "auto_check_update": true,
@@ -447,7 +440,6 @@ mod options_patch_tests {
         assert_eq!(p.always_on_top, Some(false));
         assert_eq!(p.auto_close, Some(true));
         assert_eq!(p.display_fps, Some(120));
-        assert_eq!(p.display_delay_ms, Some(300));
         assert_eq!(p.display_name.as_deref(), Some("测试"));
         assert_eq!(p.stop_others_on_scan_success, Some(false));
         assert_eq!(p.auto_check_update, Some(true));
@@ -650,7 +642,7 @@ fn apply_always_on_top(_app: &tauri::AppHandle, _on_top: bool) {}
 /// 记住主窗口当前坐标与尺寸（关闭 / 移动 / 缩放后调用，供下次启动恢复）。
 ///
 /// **最小化时跳过**：最小化会把窗口挪到 (-32000,-32000) 并缩到 160×28，
-/// 若照存，下次启动会恢复成屏幕外的迷你窗口（2026-10-14 实测踩中）。
+/// 若照存，下次启动会恢复成屏幕外的迷你窗口（实测踩中）。
 pub(crate) fn save_window_position(app: &tauri::AppHandle) {
     let Some(w) = app.get_webview_window("main") else {
         return;
@@ -694,7 +686,7 @@ pub(crate) fn save_window_position(app: &tauri::AppHandle) {
 
 /// 防抖版窗口几何保存：拖动/缩放事件密集，最多每 800ms 落盘一次；
 /// 事件停止后再**尾部补存**一次，避免「最后一次事件的值」丢失
-/// （2026-10-14 实测：无尾部补偿时拉伸后的最终尺寸只存到中途值）。
+/// （实测：无尾部补偿时拉伸后的最终尺寸只存到中途值）。
 fn save_window_geometry_throttled(app: &tauri::AppHandle) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
@@ -2162,7 +2154,7 @@ async fn live_refresh_meta(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let plat = crate::live::Platform::parse(&platform);
-    // 同步 HTTP 放到阻塞线程池，并用超时兜底：此前是「std::thread + mpsc::recv()」
+    // 同步 HTTP 放到阻塞线程池，并用超时兜底：是「std::thread + mpsc::recv」
     // 无超时阻塞，单次刷新可占用一个 tokio worker 10-30 秒，几个房间并行
     // 就能把 worker 池占满，导致登录/扫码/预览等所有异步命令一起卡住。
     let room_for_fetch = room.clone();
@@ -2311,7 +2303,7 @@ fn prewarm_bili_account(app: &tauri::AppHandle) {
 
 /// 扫描任务的收尾守卫：注销注册、解除直播保活、清理扫码 ROI。
 ///
-/// 这些清理原先写在 `run_scan(..).await` 之后，只有正常返回才会执行；一旦解码/
+/// 这些清理写在 `run_scan(..).await` 之后，只有正常返回才会执行；一旦解码/
 /// 解析 panic（unwind），目标会永远留在 `scans` 里，之后每次 start_scan 都返回
 /// 「该目标已在扫描中」，直播会话也会一直后台拉流。放进 Drop 后异常路径同样收尾。
 struct ScanCleanupGuard {
@@ -2418,7 +2410,7 @@ fn try_start_scan(
 
     let tried = state.tried_tickets.clone();
     let app = app.clone();
-    // device_id 会 move 进 ScanArgs，display_name 需在其之前取出。
+    // device_id 会 move 进 ScanArgs，display_name 需在其取出。
     let display_name = cfg.effective_display_name();
     let key_for_cleanup = target_key.clone();
 
@@ -2658,7 +2650,7 @@ pub fn run() {
             }
             // 宽度锁定已移除（多直播间阶段1）：宽度可自由调节，尺寸约束由
             // tauri.conf.json 的 min/max（300×500 ~ 720×980）统一控制。旧逻辑每次
-            // Resized 都把宽度设回 300（阶段1 之前遗留），是「只能上下拖、宽度锁死」
+            // Resized 都把宽度设回 300（阶段1遗留），是「只能上下拖、宽度锁死」
             // 的真正根因——commit 38ccb55 仅删除了 setup 中的 set_min/max_size，漏删此处。
             _ => {}
         })
@@ -2689,7 +2681,7 @@ pub fn run() {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg;
                     } else {
-                        // 数据目录解析失败＝本次会话所有配置都不落盘，必须显式告警（此前静默）。
+                        // 数据目录解析失败＝本次会话所有配置都不落盘，必须显式告警静默）。
                         log::warn!("应用数据目录解析失败，配置无法持久化");
                     }
                 }
@@ -2746,7 +2738,7 @@ pub fn run() {
             }
             // 启动自动登录：使用上次使用的账号并开始扫描（需已登录任一渠道）。
             //
-            // **移动端已移除该设置项**（2026-10-18 用户需求）：手机端启动即扫码会在
+            // **移动端已移除该设置项**（用户需求）：手机端启动即扫码会在
             // 用户还没选好账号/直播间时就抢占屏幕捕获与解码，弊大于利。故 Android 上
             // 只保留字段的读写兼容（旧配置仍能反序列化），但**不再据此自动开扫**——
             // 否则升级后的旧配置会把已删掉的功能"复活"。桌面端行为不变。

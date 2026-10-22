@@ -2,7 +2,7 @@
 # 规范的 Android 构建入口：**先跑 patch-gen（Kotlin 插件同步 + gradle 依赖注入），
 # 再 cargo tauri android build**。
 #
-# 为什么要包一层（2026-10-18 实际踩到的坑）：
+# 为什么要包一层（实际踩到的坑）
 #   `src-tauri/gen/` 不入库，且 `tauri android init` 会覆盖它。项目对 gen 的本地化
 #   修改（MainActivity 返回键接管、渠道 SDK、protobuf/gson 依赖、Kotlin 插件源码同步…）
 #   全靠 `patch-gen.ps1` 重放。**如果改了 `src-tauri/android-plugin/*.kt` 却直接
@@ -41,7 +41,7 @@ if (-not $env:JAVA_HOME) { $env:JAVA_HOME = "G:\Java21" }
 $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
 $env:PATH = "$cargoBin;$env:JAVA_HOME\bin;$sdk\platform-tools;$env:PATH"
 
-# ---- 构建产物目录钉在工作区外（2026-10-18 实测教训）----
+# 构建产物目录钉在工作区外（实测教训）----
 # src-tauri/target 曾涨到 70 GB / 10 万文件。DSH 的 workspace preparation 按
 # **文件数**建立沙箱与索引，10 万文件会把准备阶段拖到超时，报
 #   "DSH workspace preparation failed (not a user permission denial):"（原因字段为空）

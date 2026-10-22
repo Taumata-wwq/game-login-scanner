@@ -17,7 +17,7 @@ import androidx.annotation.Keep
  * - 上下文由 ScreenCapturePlugin 注册时经 attach() 注入（该版本 Tauri 不初始化
  *   ndk_context，剪贴板访问必须持有 Context）；
  * - @Keep：JNI 静态符号约定（`Java_com_taumata_scanner_plugins_ClipboardBridge_*`），
- *   R8 必须保留类名与方法名（与 ScreenCaptureBridge 同因，2026-10-17 新增）。
+ * R8 必须保留类名与方法名（与 ScreenCaptureBridge 同因， 新增）。
  *
  * 平台限制：Android 10+ 仅前台应用可读剪贴板（后台调用返回 null）；Android 9 无限制。
  * 后台受限场景由屏幕 / 摄像头路径兜底。

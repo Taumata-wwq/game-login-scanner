@@ -28,8 +28,8 @@ import com.taumata.game_scanner.MainActivity
  * 屏幕捕获前台服务：MediaProjection → VirtualDisplay → ImageReader(RGBA_8888)
  * → 帧经 [ScreenCaptureBridge.onFrame] 直达 Rust 帧总线。
  *
- * 系统约束（2026-10-15 实现依据）：
- * - Android 14（API 34）起：必须在调用 getMediaProjection 之前启动
+ * 系统约束（实现依据）
+ * Android 14（API 34）起：必须在调用 getMediaProjection启动
  *   mediaProjection 类型前台服务，否则抛 SecurityException；
  * - 前台服务类型须在 Manifest 声明 foregroundServiceType=mediaProjection，
  *   并持有 FOREGROUND_SERVICE_MEDIA_PROJECTION 权限；
@@ -88,7 +88,7 @@ class ScreenCaptureService : Service() {
      *
      * 不加锁时二者会撞车：close 会 munmap 掉帧线程正在读的 gralloc 页，
      * 直接 `Fatal signal 11 (SIGSEGV) code 1 (SEGV_MAPERR)` 崩在 memcpy 里
-     * （2026-10-17 真机实证，停止共享与旋转重建均可触发）。
+     * （真机实证，停止共享与旋转重建均可触发）。
      */
     private val frameLock = Any()
 
@@ -206,7 +206,7 @@ class ScreenCaptureService : Service() {
         val h = metrics.heightPixels
         val dpi = metrics.densityDpi
 
-        // **顺序关键**：Android 14（API 34）起，`createVirtualDisplay` 之前必须先
+        // **顺序关键**：Android 14（API 34）起，`createVirtualDisplay`必须先
         // `registerCallback`，否则抛 IllegalStateException（"Must register a
         // callback before starting capture"）→ 授权框点「开始」后直接失败。
         // 旧代码把 registerCallback 放在 createVirtualDisplay 之后，在 API 34+
@@ -260,7 +260,7 @@ class ScreenCaptureService : Service() {
     private fun onFrameAvailable(reader: ImageReader) {
         // 与 cleanup / recreateCapture 串行化。
         //
-        // 为什么必须加锁（2026-10-17 真机实证 SIGSEGV）：帧回调跑在
+        // 为什么必须加锁（真机实证 SIGSEGV）：帧回调跑在
         // "ScreenCaptureFrames" 线程，`ScreenCaptureBridge.onFrame` 会直接 memcpy
         // 这块 gralloc direct buffer；与此同时主线程若 `imageReader.close()`，
         // 该缓冲被 munmap → 帧线程读已释放页 → `Fatal signal 11 (SIGSEGV),

@@ -62,7 +62,7 @@ interface HuaweiLoginSink {
  * 渠道登录插件（控制面）：Rust 经 PluginHandle::run_mobile_plugin 调用 `login`。
  *
  * 与参考项目 login/LoginInstanceManager 的「按 server_type 分发」对位——本插件为
- * 单一分发入口，内部按 channel 参数调用各厂商 SDK（2026-10-17 渠道扩展，首批小米）。
+ * 单一分发入口，内部按 channel 参数调用各厂商 SDK（渠道扩展，首批小米）。
  *
  * 小米链路（照参考项目 login/Xiaomi.java）：
  *   MiCommplatform.Init(appId/appKey) → onUserAgreed → miLogin（SDK 弹登录 UI）
@@ -144,7 +144,7 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
     // ---------- vivo（照参考项目 login/Vivo.java） ----------
 
     /**
-     * 当前等待 vivo 回调的 invoke（审计 P2-11）。
+     * 当前等待 vivo 回调的 invoke。
      *
      * `VivoUnionSDK.registerAccountCallback` 注册进 SDK 内部静态回调表，且 SDK 没有
      * unregister 接口。若每次登录都新建匿名 VivoAccountCallback，回调对象连同它捕获的

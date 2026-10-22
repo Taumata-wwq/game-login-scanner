@@ -18,7 +18,7 @@ import java.nio.ByteBuffer
  * 为什么 @Keep：本类经 JNI **静态符号约定**
  * （`Java_com_taumata_scanner_plugins_ScreenCaptureBridge_*`）从 Rust 侧调用，
  * R8 必须保留类名与方法名，否则符号错位 → UnsatisfiedLinkError。
- * 2026-10-17 真机实证：缺 @Keep 时该类被 R8 移除，预览帧回调链路断裂、
+ * 真机实证：缺 @Keep 时该类被 R8 移除，预览帧回调链路断裂、
  * 屏幕扫码不可用（与 manifest 服务类名错误叠加暴露）。
  */
 @Keep

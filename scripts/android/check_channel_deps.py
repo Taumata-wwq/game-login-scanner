@@ -37,10 +37,10 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 # CONSTANT_Class 里存的是**内部名**（`com/foo/Bar`），不带 `L…;` 描述符外壳；
-# 只有数组类型才写成 `[Lcom/foo/Bar;`。早先按描述符形态匹配，导致一个都没命中、
+# 只有数组类型才写成 `[Lcom/foo/Bar;`。按描述符形态匹配，导致一个都没命中、
 # 检查恒为"通过"（负向测试两次都没报出来就是这个原因）。
 #
-# ⚠️ 捕获组必须是**整条内部名**：早先写成 `([A-Za-z0-9_$]*)(?:/...)` 只捕获到第一段，
+# ⚠️ 捕获组必须是**整条内部名**：写成 `([A-Za-z0-9_$]*)(?:/...)` 只捕获到第一段，
 # 于是包根退化成 "java" / "com" / "org" 这种单段名（实测误报 10 项）。
 CLS_NAME = re.compile(rb"^([A-Za-z0-9_$]+(?:/[A-Za-z0-9_$]+)+)$")
 CLS_ARRAY = re.compile(rb"^\[+L([A-Za-z0-9_$/]+);$")
@@ -304,7 +304,7 @@ def main():
         if args.verbose:
             print(f"   {os.path.basename(j):<46} defs={len(defs):<6} refs={len(refs)}")
 
-    # fail-closed：产物读不全就不能断言「依赖完整」。早先只往 stderr 打一行就按空集继续，
+    # fail-closed：产物读不全就不能断言「依赖完整」。只往 stderr 打一行就按空集继续，
     # 等于把「产物损坏」或「aar 没解包」静默当成通过。
     if scan_errors:
         print("\n[FAIL] 渠道 SDK 产物解析失败，无法判定依赖完整性：")

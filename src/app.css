@@ -193,33 +193,6 @@
   /* 设置区内的登入名输入框：占据行内剩余空间。 */
   .opt-row #displayName { flex: 1 1 auto; min-width: 0; max-width: 170px; height: 24px; }
   .opt-row .lbl small { display: block; color: var(--faint); font-size: 9.5px; margin-top: 1px; }
-  /* 「显示画面延迟」滑杆 + 读数：读数定宽（拖动时行内不跳动），滑杆吃掉剩余宽度。
-     移动端字大、行窄，允许整行换行，控件落到第二行而不是挤出抽屉外。 */
-  .opt-row.delay-row { flex-wrap: wrap; }
-  .opt-row .delay-ctl { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; justify-content: flex-end; min-width: 0; }
-  /* 滑杆本体留 16px 高：轨道只有 4px，但命中区域要够手指点（移动端）。 */
-  .opt-row .delay-ctl input[type="range"] {
-    flex: 1 1 72px; width: 72px; min-width: 56px; max-width: 116px;
-    height: 16px; -webkit-appearance: none; appearance: none;
-    background: transparent; outline: none; cursor: pointer;
-  }
-  .opt-row .delay-ctl input[type="range"]::-webkit-slider-runnable-track {
-    height: 4px; background: var(--line); border-radius: 999px;
-  }
-  .opt-row .delay-ctl input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none; appearance: none; width: 12px; height: 12px; margin-top: -4px;
-    border-radius: 50%; background: var(--text-strong); border: none; cursor: pointer;
-  }
-  .opt-row .delay-ctl input[type="range"]:focus-visible {
-    outline: 1px solid var(--text-strong); outline-offset: 3px;
-  }
-  /* 移动端：抽屉窄、字号大，滑杆独占一行（读数贴右），否则读数会被挤出抽屉。 */
-  html.mobile #toolsOverlay .opt-row.delay-row .delay-ctl { flex: 1 1 100%; justify-content: space-between; }
-  html.mobile #toolsOverlay .opt-row.delay-row .delay-ctl input[type="range"] { max-width: none; }
-  .opt-row .delay-val {
-    font: 10px/1 Consolas, monospace; color: var(--text);
-    min-width: 42px; text-align: right; font-variant-numeric: tabular-nums;
-  }
   .switch { position: relative; width: 30px; height: 17px; flex: none; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .switch .track {

@@ -1,7 +1,7 @@
 //! 剪贴板图片读取 + 二维码解码 + ticket/tk 提取。
 //!
-//! 解码用 rxing（ZXing 的纯 Rust 移植，Apache-2.0；2026-10-13 由 zedbar 换代，
-//! 720p 直播画面 11.3ms → 4.5ms/帧）。更早的 rqrr 已于 2026-10-08 移除——
+//! 解码用 rxing（ZXing 的纯 Rust 移植，Apache-2.0； 由 zedbar 换代，
+//! 720p 直播画面 11.3ms → 4.5ms/帧）。更早的 rqrr 已于 移除——
 //! 其在真实游戏截图上降采样 + 全分辨率两条路径均 0 命中却耗时 ~560ms。
 //! 所有游戏登录码均为白底黑码，无需反色处理。
 //!
@@ -122,14 +122,14 @@ pub struct QrHit {
 /// 直接产出灰度缓冲，避免「RGB 三通道写入 + 二次 RGB→灰度遍历」的重复开销
 /// （1080p 每帧省约 2/3 写入量与一次全图转换）。
 ///
-/// 解码内核为 rxing（QR-only + HybridBinarizer），2026-10-13 实测 4.5ms/帧（720p）。
+/// 解码内核为 rxing（QR-only + HybridBinarizer）， 实测 4.5ms/帧（720p）。
 pub fn decode_gray_hit(gray: &[u8], width: u32, height: u32) -> Option<QrHit> {
     decode_impl(gray, width, height, false)
 }
 
 /// 快档灰度解码（生产逐帧路径）：rxing QR-only 常规模式。
 ///
-/// 2026-10-13 实测：真实 720p 直播画面 **4.5ms/帧**（旧 zedbar `scan_density(2,2)`
+/// 实测：真实 720p 直播画面 **4.5ms/帧**（旧 zedbar `scan_density(2,2)`
 /// 为 11.3ms）；检出矩阵与 70~200px 小码回归样本全过。小码/模糊场景的漏检风险由
 /// 调用方的周期性兜底覆盖（见 scan.rs `decode_full_with_fallback` 与 `decode_gray_hit`）。
 pub fn decode_gray_hit_fast(gray: &[u8], width: u32, height: u32) -> Option<QrHit> {
@@ -138,7 +138,7 @@ pub fn decode_gray_hit_fast(gray: &[u8], width: u32, height: u32) -> Option<QrHi
 
 /// 解码实现：rxing（ZXing 纯 Rust 移植，Apache-2.0）。
 ///
-/// 选型沿革（2026-10-13 实测，24 帧真实 720p 直播画面 + 合成小码回归样本）：
+/// 选型沿革（实测，24 帧真实 720p 直播画面 + 合成小码回归样本）
 /// - 旧实现 zedbar 0.7（ZBar 算法移植）：主扫描 **11.3ms/帧**（无码画面），
 ///   小码兜底依赖「候选区域裁剪放大重扫」（内置版 577.9ms 已改为有界版 +12ms）；
 /// - 新实现 rxing 0.9：**4.5ms/帧（-60%）**，检出矩阵（180/300/120/90px，含左右

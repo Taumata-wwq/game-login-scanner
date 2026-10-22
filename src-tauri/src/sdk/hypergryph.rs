@@ -112,7 +112,7 @@ pub async fn token_by_phone_code(phone: &str, code: &str) -> Result<String, Stri
 /// 提交扫码（scanId + token）。
 ///
 /// 鉴权同时以 cred 头与 body.token 两种方式携带：skland-scan 协议以 cred 头
-/// 鉴权，此处补发（此前传 None 导致 cred 头从未发送）；body 保留 token 以兼容
+/// 鉴权，此处补发传 None 导致 cred 头从未发送）；body 保留 token 以兼容
 /// 接受 body 鉴权的服务端形态。二者并存不冲突。
 pub async fn scan_login(scan_id: &str, token: &str) -> Result<(), String> {
     let body = json!({ "scanId": scan_id, "token": token });

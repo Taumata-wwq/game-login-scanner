@@ -9,7 +9,7 @@
 //! OPPO(18) / vivo(19) / UC 九游(20) / Wegame(27)。官服(1) / B站(14) 走各自已有
 //! 链路，不在此表；接入新渠道只需在本表补 ChannelInfo（Rust 侧其余零改动）。
 //!
-//! 2026-10-22 补齐 UC(20) / OPPO(18)：SDK 来自参考快照 `app/libs`
+//! 补齐 UC(20) / OPPO(18)：SDK 来自参考快照 `app/libs`
 //! （UC `net-sdk-9.2.4.4.aar` 6.2 MB 含 `UCGameSdk`；OPPO `gamesdk-20220915.aar`
 //! 10.5 MB + `gamesdk-common-20220915.aar` 含 `GameCenterSDK`），放在
 //! `vendor/channel_sdk/`（不入库）；Kotlin 侧实现见 `ChannelLoginPlugin.kt`。

@@ -37,7 +37,7 @@ import java.nio.charset.StandardCharsets
  * 5. 组装 `{ts, cpid, playerId, playerLevel, playerSSign, time, is_teenager}` →
  *    Rust 侧以 channel_id=15 走 combo/granter 换米哈游凭证。
  *
- * 与参考项目的三处差异（见 docs/华为渠道AGC申请与接入指引-2026-10-17.md 第 8 节）：
+ * 与参考项目的三处差异（见 docs/华为渠道AGC申请与接入指引-.md 第 8 节）
  * - 防沉迷退出回调不 `System.exit(0)`，改为 `moveTaskToBack`（常驻扫码器不能被杀）；
  * - 不调用 `Games.getBuoyClient(activity).showFloatWindow()`（扫码器不是游戏本体）；
  * - 不做 `silentSignIn`，直接显式授权（扫码器无"上次登录成功"缓存语义）。

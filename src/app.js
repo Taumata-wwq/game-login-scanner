@@ -595,7 +595,6 @@
     if ('stop_others_on_scan_success' in patch) args.stop_others_on_scan_success = patch.stop_others_on_scan_success;
     if ('auto_check_update' in patch) args.auto_check_update = patch.auto_check_update;
     if ('display_fps' in patch) args.display_fps = patch.display_fps;
-    if ('display_delay_ms' in patch) args.display_delay_ms = patch.display_delay_ms;
     if ('display_name' in patch) args.display_name = patch.display_name;
     if ('screen_scan_auto_bg' in patch) args.screen_scan_auto_bg = patch.screen_scan_auto_bg;
     if ('screen_scan_stop_on_resume' in patch) args.screen_scan_stop_on_resume = patch.screen_scan_stop_on_resume;
@@ -1950,164 +1949,30 @@
   // 拖拽排序源会话 id。
   let dragSrcId = null;
 
-  // ---- 直播画面缓冲（0–2000ms，只作用于直播间画面）----------------------
-  // 语义是**抖动缓冲**（jitter buffer），不是「延迟显示器」：
-  //   帧到达 → 入队并记到达时刻 → 按「到达时刻 + 缓冲」**逐帧等间隔**播出。
-  // 每个收到的帧都恰好上屏一次（不抽稀、不并帧），所以播出节奏 ≈ 到达节奏，
-  // 网络/解码的瞬时抖动被缓冲吸收 → 观感连续；代价是画面整体晚「缓冲」毫秒。
-  //
-  // 旧实现（2026-10-22 之前）只呈现「到期帧里最新的那一帧」——在 30fps 流 +
-  // 300ms 缓冲下等于每秒只上屏几次，画面反而更卡；这正是「调了延迟也不流畅」的根因。
-  //
-  // 有界性：延迟上限 = 缓冲 + LIVE_BUF_DRIFT_MAX_MS，超过就从**队首**丢（追帧），
-  // 保证延迟不会随时间单调增长；帧数/字节预算只是内存兜底。
-  //
-  // 作用范围：只有直播间画面走这里。桌面/屏幕预览直接呈现（保持实时），扫码取帧
-  // 在后端独立任务里读最新帧——两者都不受本缓冲影响。
-  // 诊断计数（先声明：下面的缓冲函数与观测钩子都会读写它们）。
-  let diagPolls = 0, diagNew = 0, diagDrawn = 0, diagDropped = 0, diagAt = 0;
-  let liveBufMs = 0;                        // 由 config.display_delay_ms 注入
-  const LIVE_BUF_MAX_FRAMES = 240;          // 内存兜底（240 帧 ≈ 8s@30fps）
-  const LIVE_BUF_DRIFT_MAX_MS = 250;        // 允许比设定缓冲再旧这么多（超出即追帧丢帧）
-  const LIVE_BUF_BUDGET_BYTES = (window.__ANDROID__ ? 24 : 64) * 1024 * 1024;
-  let bufQ = [];                            // [{ at, apply, bytes }]，按到达时刻升序
-  let bufBytes = 0;
-  // ---- 离屏画布池：缓冲里存「已画好像素的画布」，不存原始 ArrayBuffer ----
-  // 动机（2026-10-22 实测）：队列里直接放 ArrayBuffer 时，缓冲越深持有的大对象越多
-  // （1600ms 时队列占 31.5MB），V8 每 1~2 秒就有一次大回收 → 画面出现 0.5~4.8 秒的
-  // 「加载式」停顿，而且**缓冲越大越频繁**。改成池化画布后，像素落在画布的像素存储
-  // 里（不计入 JS 堆），每帧的 IPC 缓冲写完即弃 → 这类停顿消失。
-  let poolFree = [];                        // 空闲画布（同尺寸复用）
-  let poolW = 0, poolH = 0;
+  // 直播取帧诊断：每 10 秒把「取帧 / 新帧」速率写进后端日志（不进应用内日志面板）。
+  // 直播帧率异常时，这一行能区分「后端没出帧」与「前端取帧跟不上」。
+  let diagPolls = 0, diagNew = 0, diagAt = 0;
   let frameImg = null, frameImgW = 0, frameImgH = 0;   // 复用的 ImageData
-  function liveBufPoolReset() {
-    poolFree = [];
-    poolW = 0;
-    poolH = 0;
-    frameImg = null;
-    frameImgW = 0;
-    frameImgH = 0;
-  }
-  function liveBufAcquire(w, h) {
-    if (w !== poolW || h !== poolH) { poolW = w; poolH = h; poolFree = []; }
-    let cv = poolFree.pop();
-    if (!cv) {
-      cv = document.createElement('canvas');
-      cv.width = w;
-      cv.height = h;
-    }
-    return cv;
-  }
-  function liveBufRelease(cv) {
-    if (!cv || cv.width !== poolW || cv.height !== poolH) return;
-    if (poolFree.length < LIVE_BUF_MAX_FRAMES) poolFree.push(cv);
-  }
-  /** 把一帧像素写进画布（复用同一份 ImageData，避免每帧新建 600KB 对象）。 */
-  function putFramePixels(cv, buf, pw, ph) {
+  /** 把一帧 RGBA 写进画布（复用同一份 ImageData，省掉每帧一次大对象分配）。 */
+  function putFramePixels(cv, buf, pw, ph, off) {
     if (!frameImg || frameImgW !== pw || frameImgH !== ph) {
       frameImg = new ImageData(pw, ph);
       frameImgW = pw;
       frameImgH = ph;
     }
-    frameImg.data.set(new Uint8ClampedArray(buf, 24, pw * ph * 4));
+    frameImg.data.set(new Uint8ClampedArray(buf, off, pw * ph * 4));
     cv.getContext('2d').putImageData(frameImg, 0, 0);
   }
-  function liveBufReset() {
-    bufQ = [];
-    bufBytes = 0;
-    liveBufPoolReset();
-    liveBufClockStop();
-  }
-  /** 直播帧入队（cv = 该帧所在的池化画布，丢帧时要归还池）；缓冲 0 时直通。 */
-  function liveBufPush(apply, bytes, cv) {
-    if (!liveBufMs) { diagDrawn++; apply(); return; }
-    const now = performance.now();
-    bufQ.push({ at: now, apply, bytes: bytes || 0, cv: cv || null });
-    bufBytes += bytes || 0;
-    while (bufQ.length > 1
-      && (bufQ.length > LIVE_BUF_MAX_FRAMES || bufBytes > LIVE_BUF_BUDGET_BYTES)) {
-      const d = bufQ.shift();
-      bufBytes -= d.bytes;
-      liveBufRelease(d.cv);
-      diagDropped++;
-    }
-  }
-  // ---- 播出时钟（与取帧循环解耦）--------------------------------------
-  // 历史教训（2026-10-06「固定节拍弹出」）：播出节拍必须由独立时钟决定，不能跟着
-  // 取帧循环走——否则「取一帧的耗时」（IPC + 渲染约 15~20ms）会直接变成显示间隔，
-  // 网络/渲染抖动全透传到画面。2026-10-13 引入 AIMD 自适应取帧后又把这条丢了，
-  // 于是「缓冲越深越不顺」复现。
-  // 现在：取帧只负责把帧塞进缓冲（**不渲染**），渲染由固定节拍时钟按显示帧率驱动。
-  let bufClock = null;
-  let bufNextTick = 0;
-  function liveBufClockStop() {
-    if (bufClock) { clearTimeout(bufClock); bufClock = null; }
-  }
-  function liveBufClockEnsure() {
-    if (bufClock || !liveBufMs) return;
-    // 注：节拍只在直播缓冲启用时运行；缓冲为 0 时走「到达即呈现」的最低延迟路径。
-    if (!previewActive || paused || dragging || baseMapActive) return;
-    bufNextTick = performance.now();
-    const step = () => {
-      const period = Math.max(4, 1000 / (fpsSetting || 60));
-      const now = performance.now();
-      if (now - bufNextTick > 500) bufNextTick = now;    // 页面被挂起过：不补播，重排节拍
-      const wait = Math.max(0, bufNextTick - now);
-      bufClock = setTimeout(() => {
-        bufClock = null;
-        if (!previewActive || paused || dragging || baseMapActive) return;
-        liveBufTick();
-        bufNextTick += period;
-        step();
-      }, wait);
-    };
-    step();
-  }
-  /** 一个节拍：追帧丢帧 + 至多弹出一帧。 */
-  function liveBufTick() {
-    if (!bufQ.length) return;
-    const now = performance.now();
-    const maxAge = liveBufMs + LIVE_BUF_DRIFT_MAX_MS;
-    while (bufQ.length > 1 && now - bufQ[0].at > maxAge) {
-      const d = bufQ.shift();
-      bufBytes -= d.bytes;
-      liveBufRelease(d.cv);
-      diagDropped++;
-    }
-    // 只在「队首已攒够设定缓冲时长」时弹出：源比节拍慢时不会 2 倍速播放
-    // （30fps 源 + 60Hz 节拍实际仍只弹 30 帧/秒）；源与节拍同为 60 时，
-    // 每个节拍弹一帧 = 均匀 60fps。
-    if (bufQ.length && now - bufQ[0].at >= liveBufMs) {
-      const f = bufQ.shift();
-      bufBytes -= f.bytes;
-      diagDrawn++;
-      f.apply();   // 该帧的画布随 srcCanvas 继续使用，换帧时再归还池
-    }
-  }
-
-  // 观测用：缓冲队列状态（与 window.__gsNotifyStats 同类，供脚本/真机核对）。
-  window.__gsDelayStats = () => ({
-    ms: liveBufMs, queued: bufQ.length, bytes: bufBytes,
-    drawn: diagDrawn, dropped: diagDropped, polls: diagPolls, newFrames: diagNew,
-  });
-
-  // ---- 播放诊断（现场排障）--------------------------------------------
-  // 每 10 秒把「取帧 / 新帧 / 上屏 / 丢帧」的真实速率转发到后端日志
-  // （frontend_log 只进文件日志 / logcat，不占用应用内日志面板）。
-  // 直播帧率上不去时，这一行就能区分「后端没出帧 / 前端没取到 / 播出丢帧」。
   function playDiagTick() {
     const now = performance.now();
     if (!diagAt) { diagAt = now; return; }
     if (now - diagAt < 10000) return;
     const secs = (now - diagAt) / 1000;
     diagAt = now;
-    const wasLive = liveOn();
-    const line = '[播放] 取帧 ' + (diagPolls / secs).toFixed(1) + '/s 新帧 '
-      + (diagNew / secs).toFixed(1) + '/s 上屏 ' + (diagDrawn / secs).toFixed(1)
-      + '/s 丢帧 ' + (diagDropped / secs).toFixed(1) + '/s 缓冲 ' + liveBufMs
-      + 'ms 队列 ' + bufQ.length + ' 帧率设置 ' + fpsSetting
-      + (wasLive ? '' : '（非直播态）');
-    diagPolls = diagNew = diagDrawn = diagDropped = 0;
+    const line = '[直播] 取帧 ' + (diagPolls / secs).toFixed(1) + '/s 新帧 '
+      + (diagNew / secs).toFixed(1) + '/s 帧率设置 ' + fpsSetting
+      + (liveOn() ? '' : '（非直播态）');
+    diagPolls = diagNew = 0;
     try { invoke('frontend_log', { level: 'info', msg: line }); } catch (e) {}
   }
 
@@ -2364,7 +2229,6 @@
     invoke('live_set_active', { id: '' }).catch(() => {});
     invoke('set_preview_active', { active: true }).catch(() => {});
     activeLiveId = null;
-    liveBufReset();   // 回到桌面：丢弃直播间残留的延迟帧
     preview = null;
     view = { scale: 1, fx: 0.5, fy: 0.5 };
     viewT = { scale: 1, fx: 0.5, fy: 0.5 };
@@ -2488,7 +2352,6 @@
   // 仅切换主画面（不触发连接）——供 connectLive 成功后调用，避免递归。
   function switchLiveNow(id) {
     if (activeLiveId === id) return;
-    liveBufReset();   // 换源：上一路排队的帧不能漏到新画面上
     if (activeLiveId) liveViews.set(activeLiveId, { ...view });
     activeLiveId = id;
     invoke('live_set_active', { id }).catch(() => {});
@@ -2538,58 +2401,36 @@
     const pw = dv.getUint32(0, true), ph = dv.getUint32(4, true);
     const mon = { x: 0, y: 0, w: dv.getInt32(16, true), h: dv.getInt32(20, true) };
     if (!pw || !ph || 24 + pw * ph * 4 > buf.byteLength) throw new Error('直播数据异常');
-    // 入队前就把像素写进池化画布：下面的闭包不再持有 buf（ArrayBuffer），
-    // 缓冲再深也不会在 JS 堆里堆积大对象（这正是「越调越卡」的根因）。
-    let pooled = null;
-    if (liveBufMs) {
-      pooled = liveBufAcquire(pw, ph);
-      putFramePixels(pooled, buf, pw, ph);
+    // 取帧与呈现同拍：本帧直接上屏（最低延迟）。像素写进复用的 ImageData，
+    // 避免每帧新建 600KB 对象造成 GC 抖动。
+    if (!preview || preview.mon.w !== mon.w || preview.mon.h !== mon.h) {
+      preview = { mon };
+      view = { scale: 1, fx: 0.5, fy: 0.5 };
+      viewT = { scale: 1, fx: 0.5, fy: 0.5 };
+      liveAnchor = null;   // 流规格变化（换流）：旧锚定帧作废
+      liveAnchorPrev = null;
     }
-    // 呈现段整体进入直播缓冲：下面读写的都是「画布侧」状态
-    // （preview / view / srcCanvas / 锚定帧 / 封面 / 缩略图），延后执行不会让
-    // 取帧逻辑看到陈旧值。返回值仍表示「本轮到新帧」，AIMD 节拍不受影响。
-    liveBufPush(() => {
-      // 排队期间可能已切走直播间：旧会话的帧不能画到新会话的画布上。
-      const cur = activeSession();
-      if (!cur || cur.id !== s.id) {
-        if (pooled) liveBufRelease(pooled);
-        return;
-      }
-      if (!preview || preview.mon.w !== mon.w || preview.mon.h !== mon.h) {
-        preview = { mon };
-        view = { scale: 1, fx: 0.5, fy: 0.5 };
-        viewT = { scale: 1, fx: 0.5, fy: 0.5 };
-        liveAnchor = null;   // 流规格变化（换流）：旧锚定帧作废
-        liveAnchorPrev = null;
-      }
-      if (pooled) {
-        // 池化画布已含本帧像素：直接当源画布（零拷贝），上一张归还池。
-        if (srcCanvas && srcCanvas !== pooled) liveBufRelease(srcCanvas);
-        srcCanvas = pooled;
-      } else {
-        if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
-          srcCanvas = document.createElement('canvas');
-          srcCanvas.width = pw;
-          srcCanvas.height = ph;
-        }
-        putFramePixels(srcCanvas, buf, pw, ph);
-      }
-      // 记录本帧覆盖的 mon 矩形（= 请求时的视口）：拖拽/缩放期按此锚定绘制；
-      // 上一帧保留作垫底（运动补白）。
-      if (liveAnchor) liveAnchorPrev = liveAnchor;
-      liveAnchor = { rect: region };
-      clearPendingRealtime();
-      viewDirty = false;
-      drawView();
-      if (coverShown) hideCover();   // 首帧到达：揭除封面占位
-      previewErrShown = false;
-      // 无封面房间：首次进入记录首帧缩略图。
-      const room = liveRooms.find((r) => (r.platform + ':' + r.room) === s.id);
-      if (room && !room.cover && !frameThumbs.has(s.id)) {
-        const t = captureThumb();
-        if (t) frameThumbs.set(s.id, t);
-      }
-    }, buf.byteLength, pooled);
+    if (!srcCanvas || srcCanvas.width !== pw || srcCanvas.height !== ph) {
+      srcCanvas = document.createElement('canvas');
+      srcCanvas.width = pw;
+      srcCanvas.height = ph;
+    }
+    putFramePixels(srcCanvas, buf, pw, ph, 24);
+    // 记录本帧覆盖的 mon 矩形（= 请求时的视口）：拖拽/缩放期按此锚定绘制；
+    // 上一帧保留作垫底（运动补白）。
+    if (liveAnchor) liveAnchorPrev = liveAnchor;
+    liveAnchor = { rect: region };
+    clearPendingRealtime();
+    viewDirty = false;
+    drawView();
+    if (coverShown) hideCover();   // 首帧到达：揭除封面占位
+    previewErrShown = false;
+    // 无封面房间：首次进入记录首帧缩略图。
+    const room = liveRooms.find((r) => (r.platform + ':' + r.room) === s.id);
+    if (room && !room.cover && !frameThumbs.has(s.id)) {
+      const t = captureThumb();
+      if (t) frameThumbs.set(s.id, t);
+    }
     return true;
   }
 
@@ -2695,13 +2536,7 @@
       liveMiss = 0;
       liveEstInterval = Math.min(24, liveEstInterval ? liveEstInterval * 2 : 4);
     }
-    // 开了直播缓冲时，取帧只做「塞进缓冲」（不渲染），成本低很多；此时把取帧节拍
-    // 提到显示帧率的 2 倍，保证缓冲始终先于播出攒够（否则 60Hz 播出 + 60/s 取帧
-    // 只能勉强 1:1，任何一次抖动就会欠载）。
-    const floor = liveBufMs
-      ? Math.max(4, previewIntervalMs() / 2)
-      : previewIntervalMs();
-    return Math.max(liveEstInterval, floor);
+    return Math.max(liveEstInterval, previewIntervalMs());
   }
   const PREVIEW_IDLE_INTERVAL = 140;
   let idleFrames = 0;
@@ -2728,7 +2563,6 @@
     // 先按播出节拍放行一条已到期的直播缓冲帧：本轮到期的帧可能在上一轮就入队了，
     // 而下一轮要等 refreshPreview 返回后才调度，不在这里补一次会多积一周期。
     // （本循环同时充当播出时钟：它的节拍由设置里的显示帧率决定。）
-    liveBufClockEnsure();
     const t0 = performance.now();
     diagPolls++;
     const changed = await refreshPreview();
@@ -2762,7 +2596,6 @@
   function stopPreview() {
     previewActive = false;
     previewGen++;
-    liveBufClockStop();
     if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
   }
   // 屏幕扫码「自动切后台」标志：回到前台时据此自动停止屏幕扫码（用完即止）。
@@ -3248,7 +3081,6 @@
     const btn = $('btnVpRefresh');
     if (btn) btn.classList.add('spin');
     try {
-      liveBufReset();
       clearPendingRealtime();
       view = { scale: 1, fx: 0.5, fy: 0.5 };
       viewT = { scale: 1, fx: 0.5, fy: 0.5 };
@@ -3388,13 +3220,6 @@
     document.querySelectorAll('#fpsSeg button').forEach((b) => {
       b.classList.toggle('on', Number(b.dataset.fps) === fps);
     });
-    // 直播画面缓冲（0–2000ms，步长 50；0 = 不缓冲/最低延迟）。后端已把默认值
-    // 与档位对齐（normalize_display_delay），这里只需兜住「旧配置没有该字段」。
-    liveBufMs = Math.max(0, Math.min(2000, Number(config.display_delay_ms) || 0));
-    const dRange = $('delayRange');
-    if (dRange) dRange.value = String(liveBufMs);
-    const dVal = $('delayVal');
-    if (dVal) dVal.textContent = liveBufMs + ' ms';
   }
 
   function renderAll() {
@@ -3481,22 +3306,6 @@
         restartPreviewTiming();
       });
     });
-    // 直播画面缓冲：拖动时只更新读数（零 IPC），松手才落盘。
-    const dRange = $('delayRange');
-    if (dRange) {
-      dRange.addEventListener('input', () => {
-        const v = Math.max(0, Math.min(2000, Math.round((Number(dRange.value) || 0) / 50) * 50));
-        liveBufMs = v;
-        const el = $('delayVal');
-        if (el) el.textContent = v + ' ms';
-      });
-      dRange.addEventListener('change', () => {
-        liveBufMs = Math.max(0, Math.min(2000, Number(dRange.value) || 0));
-        // 缓冲口径变了：旧队列按新口径重排没有意义，直接清空（下一帧按新口径入队）。
-        liveBufReset();
-        saveCfg({ display_delay_ms: liveBufMs });
-      });
-    }
     const dn = $('displayName');
     dn.addEventListener('change', () => saveCfg({ display_name: dn.value.trim() }));
     dn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dn.blur(); } });

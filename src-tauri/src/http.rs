@@ -4,7 +4,7 @@
 //! ureq 会拖入 `url` → `idna` → `icu_*` 全套 Unicode 表（数百 KB）。而直播拉流
 //! 已手写 rustls + HTTP/1.1 管道（schannel 对 B站 CDN 长连接读乱码，故用纯 Rust
 //! TLS）——把同一管道泛化为请求/响应客户端，零额外依赖。
-//! 连接策略（2026-10-11 起）：API/HLS 均复用 keep-alive 连接（进程级连接池，
+//! 连接策略（起）：API/HLS 均复用 keep-alive 连接（进程级连接池，
 //! 见 `API_CONN_POOL`）——登录/轮询等 HTTPS 请求免除每次的 TCP+TLS 握手；
 //! TLS `ClientConfig` 亦为进程级单例（证书库只加载一次 + 会话恢复缓存生效）。
 //! 阻塞调用运行在 tokio blocking 线程池；停止扫描时 `select!` 丢弃 future，
@@ -104,8 +104,8 @@ pub fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
 
 /// 进程级 TLS 配置单例。
 ///
-/// 两个动机（2026-10-11）：
-/// 1. **证书库只加载一次**：原先每次连接都 `load_native_certs()` 重建
+/// 两个动机
+/// 1. **证书库只加载一次**：每次连接都 `load_native_certs` 重建
 ///    `RootCertStore`——系统证书库读盘 + 解析链，每次请求白付毫秒级开销，
 ///    且 100% 属于重复劳动。
 /// 2. **会话恢复（session resumption）生效**：rustls 的会话票据缓存挂在
@@ -125,7 +125,7 @@ fn tls_config() -> std::sync::Arc<rustls::ClientConfig> {
             // - 桌面（Win/macOS/Linux）：系统证书库（可含企业/自签根，兼容代理环境）。
             // - Android：`rustls-native-certs` **不支持** Android 系统库（返回空集），
             //   而 http.rs 的 schannel 回退是 Windows 独有 → 空库会让每一次握手都
-            //   `UnknownIssuer` 失败（2026-10-16 真机实测：B站元数据/开播监测/登录全废）。
+            // `UnknownIssuer` 失败（真机实测：B站元数据/开播监测/登录全废）。
             //   改为内置 Mozilla 根证书集（webpki-roots）。代价是不支持用户自装根证书
             //   （抓包代理场景），对本应用可接受。
             #[cfg(not(target_os = "android"))]
@@ -413,7 +413,7 @@ impl<T: Read + Write + Send> ReadWrite for T {}
 ///
 /// 与 `api_tls_connect` 同策略，但可指定读超时（FLV 流用 3 秒慢流检测）。
 /// **抖音 CDN 对 rustls ClientHello 指纹回 ProtocolVersion alert**（实测；
-/// curl/OpenSSL/schannel 正常）——B站 CDN 对 rustls 正常，故此前流路径只用
+/// curl/OpenSSL/schannel 正常）——B站 CDN 对 rustls 正常，故流路径只用
 /// rustls 未回退，导致抖音大批节点连接失败。此函数统一补齐回退。
 pub(crate) fn stream_tls_connect(
     host: &str,
@@ -471,8 +471,8 @@ struct PooledConn {
 
 /// API 连接池：按 (host, port) 缓存空闲 keep-alive 连接（借出-归还模型）。
 ///
-/// 动机（2026-10-11）：HTTP/1.1 冷连接 = TCP + TLS 两次握手。登录/轮询/扫码
-/// 确认为 HTTPS 低频串行调用，原先每请求重建连接、重付握手（含证书链处理）。
+/// 动机：HTTP/1.1 冷连接 = TCP + TLS 两次握手。登录/轮询/扫码
+/// 确认为 HTTPS 低频串行调用，每请求重建连接、重付握手（含证书链处理）。
 /// HLS 侧连接复用实测：新建拉取 142~209ms → 复用 29~31ms，收益明确。
 ///
 /// 空闲超时 45s：低于常见 Nginx `keepalive_timeout`（65~75s），降低取出
@@ -717,7 +717,7 @@ pub(crate) fn request_bytes_sync(
 
 /// HLS 持久连接：对同一 host 复用 TCP+TLS，避免每分片/每轮 m3u8 重建连接。
 ///
-/// 动机（2026-10-08 实测，房间 1673630）：
+/// 动机（实测，房间 1673630）
 /// - 新建连接拉 m3u8 142~209ms，复用仅 29~31ms（省 ~120ms/次）；
 /// - CDN 对快速重复新建 TCP+TLS 直接拒绝（SSL: UNEXPECTED_EOF_WHILE_READING）。
 ///

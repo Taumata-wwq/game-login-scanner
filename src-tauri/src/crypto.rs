@@ -36,7 +36,7 @@ pub fn py_quote(s: &str) -> String {
 
 // ---------- DPAPI（Windows 数据保护） ----------
 
-/// DPAPI 密文前缀：带此前缀的字段视为已加密，否则按明文处理（兼容旧配置）。
+/// DPAPI 密文前缀：带缀的字段视为已加密，否则按明文处理（兼容旧配置）。
 pub const DPAPI_PREFIX: &str = "dpapi:";
 
 /// 用 DPAPI 加密明文，返回 base64 密文（带前缀）。失败返回 None（调用方回退明文）。

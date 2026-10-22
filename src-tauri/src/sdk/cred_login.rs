@@ -253,7 +253,7 @@ pub async fn mihoyo_login_sms(
     // stoken（data.token.token），Web 版只返回 Cookie（无 stoken）。
     // 触发极验时（下方 extract_aigis 返回 NeedCaptcha）由前端渲染极验、带 aigis 重试；
     // 重试必须携带 x-rpc-aigis 头（与 mihoyo_login_pwd 一致），否则条件不变会无限
-    // 返回 NeedCaptcha（此前 _aigis 被丢弃，构成死循环）。
+    // 返回 NeedCaptcha_aigis 被丢弃，构成死循环）。
     let mut headers = dsprod_headers(device_id, device_fp);
     headers.push(("Content-Type".to_string(), "application/json".to_string()));
     if !aigis.is_empty() {
@@ -396,7 +396,7 @@ pub async fn bili_login_pwd(
     }
     // 未拿到 access_key：先判断服务端是否**真的**在要验证码。
     //
-    // 这里此前是无条件 `bili_sdk_captcha()` —— 于是任何「响应里没有 access_key」的
+    // 这里是无条件 `bili_sdk_captcha` —— 于是任何「响应里没有 access_key」的
     // 情况都被当成「需要人机验证」：网络/TLS 失败、密码错误、风控拒绝……用户看到的
     // 就是「弹了个验证窗，填完还是登不进去」，而错误原因被彻底掩盖（真机反馈）。
     // 现在只有服务端给出验证码信号（业务码/字段，见 bili::bili_login_needs_captcha）
