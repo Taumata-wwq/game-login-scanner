@@ -37,7 +37,7 @@ pub(crate) async fn open_url(url: String) -> Result<(), String> {
     }
     #[cfg(target_os = "android")]
     {
-        let h = screen_capture_plugin::handle().ok_or("屏幕捕获插件未注册")?;
+        let h = crate::screen_capture_plugin::handle().ok_or("屏幕捕获插件未注册")?;
         h.run_mobile_plugin_async::<serde_json::Value>("openUrl", serde_json::json!({ "url": url }))
             .await
             .map(|_| ())

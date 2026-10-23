@@ -57,7 +57,7 @@ pub(crate) mod prelude {
     pub(crate) use crate::commands::util::random_uuid_v4;
     pub(crate) use crate::commands::window::apply_always_on_top;
 
-    pub(crate) use crate::config::{AppConfig, Channel};
+    pub(crate) use crate::config::Channel;
     pub(crate) use crate::QrLoginSlots;
     pub(crate) use crate::{constants, qr, sdk};
 }

@@ -1,4 +1,4 @@
-use crate::prelude::*;
+use crate::config::AppConfig;
 
 /// 初始化文件日志与 panic 记录。GUI 进程无控制台，闪退 / 异常只有落到文件
 /// 才能事后排查（`%APPDATA%\游戏扫码器\game-login-scanner.log`，超过 2MB 轮转为 .old）。

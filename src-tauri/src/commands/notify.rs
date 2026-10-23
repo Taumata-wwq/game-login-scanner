@@ -46,7 +46,7 @@ pub(crate) fn notify_event(kind: String, title: String, text: String, target: Op
 pub(crate) async fn request_notify_permission() -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        let h = screen_capture_plugin::handle().ok_or("屏幕捕获插件未注册")?;
+        let h = crate::screen_capture_plugin::handle().ok_or("屏幕捕获插件未注册")?;
         h.run_mobile_plugin_async::<serde_json::Value>(
             "requestNotifyPermission",
             serde_json::json!({}),
