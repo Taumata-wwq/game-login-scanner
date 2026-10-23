@@ -127,7 +127,6 @@ struct OptionsPatch {
     auto_login_last: Option<bool>,
     always_on_top: Option<bool>,
     auto_close: Option<bool>,
-    display_fps: Option<u32>,
     display_name: Option<String>,
     stop_others_on_scan_success: Option<bool>,
     auto_check_update: Option<bool>,
@@ -153,7 +152,6 @@ fn set_options(
         auto_login_last,
         always_on_top,
         auto_close,
-        display_fps,
         display_name,
         stop_others_on_scan_success,
         auto_check_update,
@@ -189,9 +187,6 @@ fn set_options(
     }
     if let Some(v) = notify_live_status {
         cfg.notify_live_status = v;
-    }
-    if let Some(v) = display_fps {
-        cfg.display_fps = config::normalize_display_fps(v);
     }
     if let Some(v) = display_name {
         cfg.display_name = v;
@@ -425,7 +420,6 @@ mod options_patch_tests {
             "auto_login_last": true,
             "always_on_top": false,
             "auto_close": true,
-            "display_fps": 120,
             "display_name": "测试",
             "stop_others_on_scan_success": false,
             "auto_check_update": true,
@@ -439,7 +433,6 @@ mod options_patch_tests {
         assert_eq!(p.auto_login_last, Some(true));
         assert_eq!(p.always_on_top, Some(false));
         assert_eq!(p.auto_close, Some(true));
-        assert_eq!(p.display_fps, Some(120));
         assert_eq!(p.display_name.as_deref(), Some("测试"));
         assert_eq!(p.stop_others_on_scan_success, Some(false));
         assert_eq!(p.auto_check_update, Some(true));

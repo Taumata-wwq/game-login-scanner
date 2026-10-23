@@ -529,7 +529,44 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    // ---- 渠道登录「用户中途离开」兜底 ----------------------------------------
+    // 渠道 SDK 的登录界面在**它自己的 Activity** 里（UC 的 ProxyActivity、OPPO 的
+    // ProxyActivity）。用户按返回 / 从最近任务划掉时，SDK 不会回调我们 →
+    // invoke 永远挂着、界面停在「正在登录中」，只能杀进程。
+    // 这里注册应用级生命周期回调：登录期间只要本应用 Activity 被暂停过、又重新
+    // 回到前台，就说明用户已经离开了登录界面 → 按「已取消」收尾。
+    private var loginGuardInstalled = false
+    private var loginSawPause = false
+
+    private fun installLoginGuard() {
+        if (loginGuardInstalled) return
+        loginGuardInstalled = true
+        activity.application.registerActivityLifecycleCallbacks(
+            object : android.app.Application.ActivityLifecycleCallbacks {
+                override fun onActivityCreated(a: Activity, b: Bundle?) {}
+                override fun onActivityStarted(a: Activity) {}
+                override fun onActivitySaveInstanceState(a: Activity, b: Bundle) {}
+                override fun onActivityStopped(a: Activity) {}
+                override fun onActivityDestroyed(a: Activity) {}
+                override fun onActivityPaused(a: Activity) {
+                    if (a === activity && (ucInvoke != null || oppoInvoke != null)) {
+                        loginSawPause = true
+                    }
+                }
+                override fun onActivityResumed(a: Activity) {
+                    if (a !== activity || !loginSawPause) return
+                    if (ucInvoke == null && oppoInvoke == null) return
+                    loginSawPause = false
+                    finishUc(null, "已取消 UC 登录（未完成）")
+                    finishOppo(null, "已取消 OPPO 登录（未完成）")
+                }
+            }
+        )
+    }
+
     private fun loginUC(invoke: Invoke) {
+        installLoginGuard()
+        loginSawPause = false
         ucInvoke?.reject("UC 登录被新的登录请求取代")
         ucInvoke = invoke
         try {
@@ -600,6 +637,8 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
      * 「不伪装成其它应用」的取向冲突。
      */
     private fun loginOppo(invoke: Invoke) {
+        installLoginGuard()
+        loginSawPause = false
         oppoInvoke?.reject("OPPO 登录被新的登录请求取代")
         oppoInvoke = invoke
         if (!oppoInit) {

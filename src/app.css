@@ -885,8 +885,6 @@
   html.mobile .sidebar header h1 { font-size: var(--m-fs-xl); letter-spacing: 0.01em; text-align: center; }
   html.mobile .overlay { z-index: 300; }
   html.mobile .m-game, html.mobile .m-chan { font-weight: 600; }
-  html.mobile #fpsSeg { border-radius: var(--m-r-sm); padding: 3px; }
-  html.mobile #fpsSeg button { border-radius: var(--m-r-xs); }
   html.mobile #toolsOverlay .btn.tiny {
     height: 30px; padding: 0 12px; border-radius: var(--m-r-xs);
     background: var(--panel-2); border: 1px solid var(--border); color: var(--text);

@@ -629,6 +629,24 @@ if (-not (Test-Path $huaweiJson)) {
     }
 }
 
+Write-Host "== 5f. 应用图标同步（src-tauri/android-icons -> app/src/main/res）=="
+# 图标是生成的资源：tauri android init 会写入模板图标，patch-gen 重放时用仓库里的
+# src-tauri/android-icons/（由 icon2.png 生成）覆盖，保证重新 init 后图标不丢。
+$iconSrc = Join-Path $root "src-tauri/android-icons"
+if (Test-Path $iconSrc) {
+    $resDst = Join-Path $gen "app/src/main/res"
+    Get-ChildItem -Path $iconSrc -Directory | ForEach-Object {
+        $dst = Join-Path $resDst $_.Name
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        Get-ChildItem -Path $_.FullName -File | ForEach-Object {
+            Copy-Item $_.FullName -Destination (Join-Path $dst $_.Name) -Force
+        }
+    }
+    Write-Host "  -> mipmap 图标已同步（5 个密度档）"
+} else {
+    Write-Host "  ! 未找到 src-tauri/android-icons（跳过）"
+}
+
 Write-Host "== 6. AndroidManifest：屏幕捕获权限与前台服务声明 =="
 $manifest = Join-Path $gen "app/src/main/AndroidManifest.xml"
 $c = Get-Content $manifest -Raw

@@ -1043,30 +1043,6 @@ fn decode_rgb_rejects_blank() {
     assert!(decode_rgb_t(&rgb, 0, 0).is_none());
 }
 
-// ---------- config::display_fps（显示区域帧率设置）----------
-
-#[test]
-fn display_fps_normalized_to_whitelist() {
-    use game_login_scanner_lib::config::normalize_display_fps;
-    // 仅 30/60/120 有效；其它值（含手改配置）收敛到 60。
-    assert_eq!(normalize_display_fps(30), 30);
-    assert_eq!(normalize_display_fps(60), 60);
-    assert_eq!(normalize_display_fps(120), 120);
-    assert_eq!(normalize_display_fps(0), 60);
-    assert_eq!(normalize_display_fps(15), 60);
-    assert_eq!(normalize_display_fps(240), 60);
-}
-
-#[test]
-fn display_fps_defaults_to_60_for_old_config() {
-    // 旧配置无 display_fps 字段：serde 默认 60。
-    let cfg: AppConfig = serde_json::from_str("{}").unwrap();
-    assert_eq!(cfg.display_fps, 60);
-    // 显式写入也能读回。
-    let cfg2: AppConfig = serde_json::from_str(r#"{"display_fps":120}"#).unwrap();
-    assert_eq!(cfg2.display_fps, 120);
-}
-
 // ---------- http 解析层（mock：本地内存字节，不触网） ----------
 
 #[test]

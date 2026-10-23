@@ -28,7 +28,6 @@
     auto_login_last: false,
     always_on_top: false,
     auto_close: false,
-    display_fps: 60,
     win_x: null, win_y: null, win_w: null, win_h: null,
     last_live_id: "",
     sidebar_w: null, game_col_w: null,

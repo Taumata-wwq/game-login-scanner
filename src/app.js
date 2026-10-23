@@ -594,7 +594,6 @@
     if ('auto_close' in patch) args.auto_close = patch.auto_close;
     if ('stop_others_on_scan_success' in patch) args.stop_others_on_scan_success = patch.stop_others_on_scan_success;
     if ('auto_check_update' in patch) args.auto_check_update = patch.auto_check_update;
-    if ('display_fps' in patch) args.display_fps = patch.display_fps;
     if ('display_name' in patch) args.display_name = patch.display_name;
     if ('screen_scan_auto_bg' in patch) args.screen_scan_auto_bg = patch.screen_scan_auto_bg;
     if ('screen_scan_stop_on_resume' in patch) args.screen_scan_stop_on_resume = patch.screen_scan_stop_on_resume;
@@ -1970,8 +1969,7 @@
     const secs = (now - diagAt) / 1000;
     diagAt = now;
     const line = '[直播] 取帧 ' + (diagPolls / secs).toFixed(1) + '/s 新帧 '
-      + (diagNew / secs).toFixed(1) + '/s 帧率设置 ' + fpsSetting
-      + (liveOn() ? '' : '（非直播态）');
+      + (diagNew / secs).toFixed(1) + '/s' + (liveOn() ? '' : '（非直播态）');
     diagPolls = diagNew = 0;
     try { invoke('frontend_log', { level: 'info', msg: line }); } catch (e) {}
   }
@@ -2502,11 +2500,9 @@
     }
   }
 
-  // 显示区域帧率（设置项 30/60/120，默认 60）：预览轮询间隔上限。
-  let fpsSetting = 60;
-  function previewIntervalMs() {
-    return 1000 / (fpsSetting || 60);
-  }
+  // 显示区域固定 30fps（原「显示区域帧率」设置项已移除）。
+  // 只约束**画面呈现**的轮询节拍；扫码捕获走后端独立链路，不受此值影响。
+  const PREVIEW_INTERVAL_MS = 1000 / 30;
   // 直播预览节拍：**增减式自适应**跟随流帧率。
   //
   // 历史坑：早先固定 40ms（25fps）/闲置 50ms（20fps）；上一版改为「按每秒新帧数
@@ -2536,7 +2532,7 @@
       liveMiss = 0;
       liveEstInterval = Math.min(24, liveEstInterval ? liveEstInterval * 2 : 4);
     }
-    return Math.max(liveEstInterval, previewIntervalMs());
+    return Math.max(liveEstInterval, PREVIEW_INTERVAL_MS);
   }
   const PREVIEW_IDLE_INTERVAL = 140;
   let idleFrames = 0;
@@ -2576,16 +2572,10 @@
       ? liveAdaptiveInterval(changed)
       : idleFrames > 2
         ? PREVIEW_IDLE_INTERVAL
-        : previewIntervalMs();
+        : PREVIEW_INTERVAL_MS;
     if (!liveOn()) liveWasOn = false;   // 退出直播：下次进入时重置统计窗口
     const elapsed = performance.now() - t0;
     previewTimer = setTimeout(() => previewLoop(gen), Math.max(0, interval - elapsed));
-  }
-  /// 设置里切换显示帧率后调用：重启预览循环让新节拍立即生效。
-  function restartPreviewTiming() {
-    if (!previewActive) return;
-    stopPreview();
-    startPreview();
   }
   function startPreview() {
     if (previewActive || paused || dragging || baseMapActive) return;
@@ -3214,12 +3204,6 @@
     if (nl) nl.checked = notifyLiveStatus;
     $('autoCheckUpdate').checked = config.auto_check_update !== false;
     $('displayName').value = config.display_name || '';
-    // 显示帧率页签（30/60/120）。
-    const fps = config.display_fps || 60;
-    fpsSetting = fps;
-    document.querySelectorAll('#fpsSeg button').forEach((b) => {
-      b.classList.toggle('on', Number(b.dataset.fps) === fps);
-    });
   }
 
   function renderAll() {
@@ -3298,14 +3282,6 @@
         invoke('check_update', { manual: true }).catch((e) => log(String(e), 'error'));
       });
     }
-    document.querySelectorAll('#fpsSeg button').forEach((b) => {
-      b.addEventListener('click', () => {
-        fpsSetting = Number(b.dataset.fps) || 60;
-        document.querySelectorAll('#fpsSeg button').forEach((x) => x.classList.toggle('on', x === b));
-        saveCfg({ display_fps: fpsSetting });
-        restartPreviewTiming();
-      });
-    });
     const dn = $('displayName');
     dn.addEventListener('change', () => saveCfg({ display_name: dn.value.trim() }));
     dn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dn.blur(); } });

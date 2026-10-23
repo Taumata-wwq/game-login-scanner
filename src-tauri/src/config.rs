@@ -284,8 +284,6 @@ pub struct AppConfig {
     pub always_on_top: bool,
     pub auto_close: bool,
     /// 显示区域（预览）目标帧率：30 / 60 / 120。默认 60。
-    #[serde(default = "default_display_fps")]
-    pub display_fps: u32,
     pub win_x: Option<i32>,
     pub win_y: Option<i32>,
     /// 主窗口尺寸（逻辑像素；None = 用默认 760×520）。恢复时由 min/max 约束夹取。
@@ -342,22 +340,9 @@ pub struct AppConfig {
     pub live_history: Vec<LiveHistoryEntry>,
 }
 
-/// display_fps 的 serde 默认值（旧配置无此字段时用 60）。
-fn default_display_fps() -> u32 {
-    60
-}
-
 /// bool 类设置项的 serde 默认值（缺省为开；旧配置无该字段时保持现行行为）。
 fn default_true() -> bool {
     true
-}
-
-/// 显示帧率白名单（设置项仅 30/60/120；配置被手改时收敛到 60）。
-pub fn normalize_display_fps(v: u32) -> u32 {
-    match v {
-        30 | 60 | 120 => v,
-        _ => 60,
-    }
 }
 
 impl Default for AppConfig {
@@ -377,7 +362,6 @@ impl Default for AppConfig {
             auto_login_last: false,
             always_on_top: false,
             auto_close: false,
-            display_fps: default_display_fps(),
             win_x: None,
             win_y: None,
             win_w: None,
@@ -708,7 +692,6 @@ impl AppConfig {
             Ok(text) => match serde_json::from_str::<AppConfig>(&text) {
                 Ok(mut cfg) => {
                     cfg.decrypt_secrets();
-                    cfg.display_fps = normalize_display_fps(cfg.display_fps);
                     cfg
                 }
                 Err(_) => {
