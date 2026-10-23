@@ -87,7 +87,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test                      # 见 CI 输出统计
 cd ..
-node --test tests-js/           # 前端纯逻辑：白名单/渠道表直接与 Rust 源码对照
+node --test tests-js/core.test.js   # 前端纯逻辑：白名单/渠道表直接与 Rust 源码对照
 ```
 
 Android 侧另有两条**本地**门禁（CI 无法执行，原因见下）：
@@ -106,15 +106,21 @@ pwsh -File scripts/android/smoke.ps1          # 真机：装包 → 启动 → �
 ```
 src/                      前端（无构建链，直接 <script src>）
   index.html / app.css / app.js / dev-preview.js（浏览器预览 mock）
+  core.js                 纯逻辑（设置白名单、渠道表、时长与错误文本）——可被 node:test 单测
 src-tauri/src/            后端
-  lib.rs                  Tauri 命令接线与运行时状态
-  live.rs                 直播拉流 / 解码 / 追帧 / 帧总线（FLV + HLS）
+  lib.rs                  模块声明 + 共享运行时状态 + 进程装配（run）
+  commands/               Tauri 命令，按领域拆分：config / account / login / live /
+                          preview / scan / window / update / diag / notify / log / applog /
+                          camera / util
+  live/                   直播链路：bili（取流与档位）/ meta / frames / session /
+                          decode / flv_reader / hls_decode / preview / probe / tests
   scan.rs                 扫码主流程（多目标并行）
   duplication.rs          DXGI 桌面复制（Windows）
   android/                Android 侧桥接（MediaProjection / MediaCodec / Keystore）
   sdk/                    各渠道登录协议（官方 / B站 / 米哈游 / 渠道 / 鹰角）
 src-tauri/android-plugin/ Kotlin 插件（渠道登录、屏幕捕获、通知、剪贴板…）
-scripts/android/          patch-gen / build-android / 依赖与 JNI 契约检查
+tests-js/                 前端纯逻辑单测（node:test，无第三方依赖）
+scripts/android/          patch-gen / build-android / check-kotlin / smoke / 依赖与 JNI 契约检查
 vendor/                   渠道 SDK 二进制（不入库）
 ```
 

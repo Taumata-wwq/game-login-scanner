@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "tauri": "tauri",
-    "test:js": "node --test tests-js/",
+    "test:js": "node --test tests-js/core.test.js",
     "test:js:direct": "node tests-js/core.test.js"
   },
   "devDependencies": {

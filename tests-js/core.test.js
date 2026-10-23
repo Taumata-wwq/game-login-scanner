@@ -65,7 +65,10 @@ test('OPTION_KEYS 与 Rust OptionsPatch 字段集合完全一致', () => {
     if (!src.includes('struct OptionsPatch')) continue;
     const body = blockAfter(src, 'struct OptionsPatch');
     assert.ok(body, '无法解析 OptionsPatch 结构体：' + f);
-    fields = [...body.matchAll(/^\s*(?:pub\s+)?([a-z_][a-z0-9_]*)\s*:/gm)].map((m) => m[1]);
+    // 允许 pub / pub(crate) / pub(super) 等可见性修饰（字段可能因模块拆分而收紧）。
+    fields = [
+      ...body.matchAll(/^\s*(?:pub(?:\([a-z]+\))?\s+)?([a-z_][a-z0-9_]*)\s*:/gm),
+    ].map((m) => m[1]);
     break;
   }
   assert.ok(fields, '在 src-tauri/src 下找不到 OptionsPatch 结构体');

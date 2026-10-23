@@ -59,7 +59,9 @@ jobs:
       # 编译不了；但下面两项不变量无需 SDK 即可完整校验（2026-10-21 审计 P3-13 补）。
       # 前端纯逻辑单测：core.js 的白名单/渠道表直接与 Rust 源码对照（跨语言漂移门禁）。
       - name: 前端纯逻辑单测（node:test）
-        run: node --test tests-js/
+        # 显式列出文件：Node 22 的 --test 不接受目录（会当成模块 require 而报
+        # MODULE_NOT_FOUND），Node 24 才支持目录。写死文件名对两个版本都成立。
+        run: node --test tests-js/core.test.js
 
       - name: 校验 Android 构建脚本语法
         shell: pwsh
