@@ -133,10 +133,10 @@ vendor/                   渠道 SDK 二进制（不入库）
 
 - **直播画面帧率**：显示固定 30fps（帧率设置项已移除）；扫码捕获不受影响，仍按源帧率/最高频率取帧。
 - **OPPO 渠道**：走 SDK 授权（`doLogin → doGetTokenAndSsoid`），需先在设备上安装
-  「移动服务框架」（`com.heytap.htms`），否则 SDK 只弹安装提示。**未做网页登录**：参考实现
-  的 `OppoWebLoginActivity` 是硬编码 URL 且整包加固，OPPO SDK 内也没有等价的「传 URL 进
-  WebView 再取 ssoid」接口（3 个 dex 中 `/oauth`、`redirect_uri`、`ssoid=` 模板均 0 命中），
-  故无法在不猜测参数的前提下复刻。
+  「移动服务框架」（`com.heytap.htms`），否则 SDK 只弹安装提示。**不提供网页登录入口**：
+  欢太的网页登录页是 `id.heytap.com/v3/auth/login`，据其页面脚本，成功回调需要
+  `bizAppKey`（由 OPPO 分配给游戏方）与白名单内的 `callback`，而我们没有该密钥，
+  做出来只能登录、拿不到令牌，故不实装。
 - **B 服 / 原神等**：B 服仅崩坏3 实测通过，其余米哈游游戏同源但未实测。
 - **Windows N/K 版**：需安装「媒体功能包」，否则 H.264 解码不可用（应用会给出明确提示）。
 
