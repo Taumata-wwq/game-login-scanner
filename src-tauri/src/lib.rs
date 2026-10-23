@@ -114,6 +114,9 @@ pub(crate) use commands::window::*;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_file_logging();
+    // 上一次更新下载的安装包已用完（安装器读完后就能删了）：启动时清掉，
+    // 免得 temp 目录里越积越多。
+    crate::commands::update::cleanup_stale_setup_files();
 
     let mut cfg = AppConfig::load();
     if cfg.device_id.is_empty() {

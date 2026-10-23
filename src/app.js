@@ -2499,7 +2499,9 @@
     const now = performance.now();
     if (now - fpsLast >= 1000) {
       const el = $('fpsMeter');
-      if (el) el.textContent = fpsFrames;
+      // 暂停态下徽标里显示的是「暂停」图标，不能被帧率数字覆盖掉
+      // （否则用户点了暂停，一秒后又变成数字，看不出当前是暂停还是运行）。
+      if (el && !paused) el.textContent = fpsFrames;
       fpsFrames = 0;
       fpsLast = now;
     }

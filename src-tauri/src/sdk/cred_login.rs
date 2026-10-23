@@ -377,9 +377,18 @@ pub async fn bili_login_pwd(
         .as_ref()
         .map(|(c, u, v)| (c.as_str(), u.as_str(), v.as_str()));
     let resp = crate::sdk::bili::bili_sdk_login(account, password, cap_ref).await?;
+    // 只记「code + message」。这里**绝不能**打印整个响应体：成功时它含 access_key
+    // （B 站登录令牌），失败时也可能回显账号信息。日志会落到 %APPDATA% 文件并长期
+    // 保留，打印整包等于把令牌明文持久化到磁盘。
     log::info!(
-        "[B站SDK登录] {}",
-        crate::http::excerpt(&resp.to_string(), 600)
+        "[B站SDK登录] code={} message={}",
+        resp.get("code")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into()),
+        crate::http::excerpt(
+            resp.get("message").and_then(|v| v.as_str()).unwrap_or("-"),
+            120
+        )
     );
     // 成功：含 access_key。
     if let Some(ak) = resp.get("access_key").and_then(|v| v.as_str()) {

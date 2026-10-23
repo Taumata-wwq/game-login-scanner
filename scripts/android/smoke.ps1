@@ -205,7 +205,9 @@ if (-not $SkipScreenShareCheck) {
     if ($svcOn -lt 1) { Fail "屏幕共享未启动（服务数 $svcOn）——授权框可能没点到，或按钮位置变了" }
     Info ("共享已开启：服务 {0} / screen-capture 通知 {1}" -f $svcOn, $notiOn)
 
-    # 复刻「最近任务划掉」：AMS removeTask 是系统划掉任务时调用的同一入口。
+    # 复刻「最近任务划掉」：用户在 MIUI 上点最近任务界面下方的 X 即可清空，
+    # 系统内部走的就是 AMS removeTask。这里直接调同一入口，不必模拟手势
+    # （adb input swipe 在 MIUI 最近任务上不可靠，早期验证就卡在这）。
     $tid = ([regex]::Match((Adb shell dumpsys activity activities), "Task\{\S+ #(\d+) type=standard A=\d+:($pkg)")).Groups[1].Value
     if (-not $tid) { Fail "找不到本应用 taskId" }
     [void](Adb shell service call activity_task 21 i32 $tid)

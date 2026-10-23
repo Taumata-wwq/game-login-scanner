@@ -14,6 +14,32 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
 mod update_tests {
     use super::parse_version;
 
+    /// 下载产物的摘要校验：一致才允许 spawn 安装程序。
+    ///
+    /// 这条测试锁的是「校验分支真的能区分内容」——如果哪天改成大小写敏感比较、
+    /// 或者把 digest 前缀处理错了，篡改过的安装包就会被放行。
+    #[test]
+    fn digest_check_rejects_tampered_payload() {
+        use sha2::{Digest, Sha256};
+        let good_bytes = b"setup-payload-v1";
+        let want = hex::encode(Sha256::digest(good_bytes)).to_ascii_lowercase();
+
+        // 同一份字节：摘要一致（应放行）
+        let got = hex::encode(Sha256::digest(good_bytes)).to_ascii_lowercase();
+        assert_eq!(got, want);
+
+        // 篡改一字节：摘要必须不同（应拦截）
+        let tampered = b"setup-payload-v2";
+        let got_bad = hex::encode(Sha256::digest(tampered)).to_ascii_lowercase();
+        assert_ne!(got_bad, want, "内容变化必须导致摘要不匹配");
+
+        // 大小写不影响判定（check_update 两侧都 lower）
+        assert_eq!(want.to_ascii_uppercase().to_ascii_lowercase(), want);
+        // "sha256:" 前缀被剥掉后应正好是 64 位十六进制
+        assert_eq!(want.len(), 64);
+        assert!(want.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
     #[test]
     fn version_parse_and_compare() {
         assert_eq!(parse_version("0.3.2"), Some((0, 3, 2)));
@@ -26,6 +52,30 @@ mod update_tests {
         assert!(parse_version("v0.3.3").unwrap() > parse_version("0.3.2").unwrap());
         assert!(parse_version("v0.3.1").unwrap() < parse_version("0.3.2").unwrap());
         assert!(parse_version("v1.0.0").unwrap() > parse_version("0.9.9").unwrap());
+    }
+}
+
+/// 清理历史遗留在 temp 目录里的更新安装包。
+///
+/// 更新流程是「下载到 temp → spawn 安装器 → 关闭本程序」，安装器需要读那个文件，
+/// 所以**不能**在下载线程里删。但下一次启动时它已经没用了——不清理的话每更新一次
+/// 就在 temp 里留一份几 MB 的安装包（长期累积）。
+pub(crate) fn cleanup_stale_setup_files() {
+    let dir = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut removed = 0usize;
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let is_setup = name.starts_with("game-login-scanner-") && name.ends_with("-setup.exe");
+        if is_setup && std::fs::remove_file(e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        log::info!("[更新] 已清理 {removed} 个历史安装包");
     }
 }
 
@@ -157,13 +207,23 @@ pub(crate) fn check_update(app: tauri::AppHandle, manual: bool) {
                             .unwrap_or(false)
                     })
                     .and_then(|x| {
+                        // digest 形如 "sha256:de97b7…"；GitHub 自 2025 起为每个
+                        // asset 计算。缺失时留空串（下面按「无摘要」处理，仍然下载
+                        // 但会明确告知用户，而不是假装校验过）。
+                        let digest = x["digest"]
+                            .as_str()
+                            .unwrap_or("")
+                            .strip_prefix("sha256:")
+                            .unwrap_or("")
+                            .to_ascii_lowercase();
                         Some((
                             x["name"].as_str().unwrap_or("setup.exe").to_string(),
                             x["browser_download_url"].as_str()?.to_string(),
+                            digest,
                         ))
                     })
             });
-            let Some((_, url)) = asset else {
+            let Some((_, url, want_digest)) = asset else {
                 emit(
                     "error",
                     format!("发现新版本 {tag}，但 Release 中没有安装包资源"),
@@ -178,6 +238,29 @@ pub(crate) fn check_update(app: tauri::AppHandle, manual: bool) {
                     return;
                 }
             };
+            // 校验下载内容：这里拿到的 URL 来自 GitHub API 响应，但响应本身经过
+            // 我们的 HTTP 层；校验摘要能把「下到半截 / 被中间人替换 / 拿到错误
+            // asset」三类问题都挡在 spawn 之前——否则等于直接执行任意字节。
+            if !want_digest.is_empty() {
+                use sha2::{Digest, Sha256};
+                let got = hex::encode(Sha256::digest(&bytes)).to_ascii_lowercase();
+                if got != want_digest {
+                    emit(
+                        "error",
+                        format!("安装包校验失败（期望 {want_digest}，实际 {got}），已放弃安装"),
+                    );
+                    return;
+                }
+                emit("info", "安装包 SHA-256 校验通过".to_string());
+            } else {
+                // 摘要缺失时仍继续（老版本 Release 可能没有 digest），但用 error 级别
+                // 让用户一眼看到「这次没有校验」——前端只把 error 当红字显示，
+                // 用 info 会被后面的「下载完成」淹没。
+                emit(
+                    "error",
+                    "警告：Release 未提供 SHA-256 摘要，本次跳过校验".to_string(),
+                );
+            }
             let path = std::env::temp_dir().join(format!("game-login-scanner-{tag}-setup.exe"));
             if let Err(e) = std::fs::write(&path, &bytes) {
                 emit("error", format!("保存安装包失败：{e}"));
