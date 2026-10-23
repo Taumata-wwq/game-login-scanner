@@ -538,6 +538,17 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
     private var loginGuardInstalled = false
     private var loginSawPause = false
 
+    /** 渠道 SDK 自己的登录界面（在本进程内，但不受我们的代码控制）。 */
+    private val sdkLoginActivities = setOf(
+        "cn.gundam.sdk.shell.activity.ProxyActivity",
+        "com.nearme.game.sdk.component.proxy.ProxyActivity",
+    )
+
+    /** 已经挂钩过返回键的 SDK 窗口（弱引用；同一窗口只挂一次）。 */
+    private val hookedWindows = java.util.Collections.newSetFromMap(
+        java.util.WeakHashMap<android.view.Window, Boolean>()
+    )
+
     private fun installLoginGuard() {
         if (loginGuardInstalled) return
         loginGuardInstalled = true
@@ -554,6 +565,8 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
                     }
                 }
                 override fun onActivityResumed(a: Activity) {
+                    // SDK 登录界面回到前台 → 挂返回键（见 hookSdkBackKey）。
+                    hookSdkBackKey(a)
                     if (a !== activity || !loginSawPause) return
                     if (ucInvoke == null && oppoInvoke == null) return
                     loginSawPause = false
@@ -562,6 +575,36 @@ class ChannelLoginPlugin(private val activity: Activity) : Plugin(activity) {
                 }
             }
         )
+    }
+
+    /**
+     * 给渠道 SDK 的登录界面挂上返回键处理。
+     *
+     * 为什么要挂：UC 的「已有账号登录」选择框会把返回键**自己吞掉**（实测 ViewRootImpl
+     * 收到了 KEYCODE_BACK、界面毫无反应，只能杀进程）；OPPO 的 ProxyActivity 同理。
+     * 这两个 Activity 跑在我们进程里但属于 SDK，直接改不了它的代码——只能替换
+     * Window.Callback，在分发前拦下返回键：先 finish 掉 SDK 界面，再按「已取消」收尾，
+     * 于是用户按返回就能回到主界面。
+     */
+    private fun hookSdkBackKey(a: Activity) {
+        if (a.javaClass.name !in sdkLoginActivities) return
+        val w = a.window ?: return
+        if (!hookedWindows.add(w)) return
+        val prev = w.callback ?: return
+        w.callback = object : android.view.Window.Callback by prev {
+            override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+                if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+                    if (event.action == android.view.KeyEvent.ACTION_UP) {
+                        a.finish()
+                        finishUc(null, "已取消 UC 登录（返回）")
+                        finishOppo(null, "已取消 OPPO 登录（返回）")
+                    }
+                    // ACTION_DOWN 也一并吞掉：交给 SDK 只会在它自己的对话框里打转。
+                    return true
+                }
+                return prev.dispatchKeyEvent(event)
+            }
+        }
     }
 
     private fun loginUC(invoke: Invoke) {
