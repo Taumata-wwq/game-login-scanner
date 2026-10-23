@@ -1,5 +1,3 @@
-use crate::config::AppConfig;
-
 /// 初始化文件日志与 panic 记录。GUI 进程无控制台，闪退 / 异常只有落到文件
 /// 才能事后排查（`%APPDATA%\游戏扫码器\game-login-scanner.log`，超过 2MB 轮转为 .old）。
 pub(crate) fn init_file_logging() {
@@ -21,6 +19,9 @@ pub(crate) fn init_file_logging() {
 /// 桌面端文件日志（Windows 专用；Android 走 logcat，见 [`init_file_logging`]）。
 #[cfg(not(target_os = "android"))]
 fn init_file_logging_desktop() {
+    // 只在桌面路径需要：放在函数内而不是文件头，否则 Android 构建会报 unused import。
+    use crate::config::AppConfig;
+
     let path = AppConfig::path().with_file_name("game-login-scanner.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);

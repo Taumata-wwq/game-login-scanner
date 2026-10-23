@@ -1434,6 +1434,9 @@
   // 会话列表：[{ id, room, platform, w, h }]；activeLiveId 为当前主画面。
   let liveSessions = [];
   let activeLiveId = null;
+  /** 刷新（重连）进行中。取帧路径要读它：重连窗口内的 0 字节是过渡态而非下播，
+   *  详见 refreshLiveFrame。声明点必须早于任何一次轮询取帧。 */
+  let stageRefreshing = false;
   // 「当前是否在观看直播会话」（有前台会话），而非「是否有任何会话」。
   // 后者会导致：切到桌面但仍有会话时，预览既不拉直播帧也不拉屏幕帧。
   function liveOn() { return activeLiveId !== null; }
@@ -2167,6 +2170,28 @@
     renderLiveTabs();
   }
 
+  // 重连失败时的「就地退场」：只退掉这一路的会话条目，**保留 activeLiveId 与该房间的选中态**，
+  // 画面回到封面占位。与 closeLive 的区别：不删房间、不切到别的房间、不退直播模式——
+  // 用户看到的就是「这一路还在，但暂时没画面」（正是「刷新不该丢焦点」）。
+  // 后续自愈：房间真下播再开播时由 live-status 事件自动 connectLive（见 bindLiveStatusEvents），
+  // 或用户再点一次刷新（refreshStage 的封面占位分支会走 connectLive）。
+  function abandonLiveSession(id) {
+    const s = liveSessions.find((x) => x.id === id);
+    if (s) invoke('live_stop', { platform: s.platform, room: s.room }).catch(() => {});
+    stopScanTarget('live:' + id);
+    liveSessions = liveSessions.filter((x) => x.id !== id);
+    liveViews.delete(id);
+    preview = null;
+    srcCanvas = null;
+    liveAnchor = null;
+    liveAnchorPrev = null;
+    if (activeLiveId === id) showCover(id);
+    renderLiveTabs();
+    updateVpInfo();
+    renderScan();
+    refreshPreview().catch(() => {});
+  }
+
   // 切回桌面（屏幕预览）：暂停所有会话（省资源），保留会话与视图记忆。
   function exitLiveMode() {
     // 保存当前会话视图，供切回时恢复；并更新末帧缩略图。
@@ -2328,6 +2353,7 @@
   // 因此视口/拖拽/缩放交互完全复用；无需底图（每帧即当前视口裁剪）。
   // 响应长度语义：0 字节 = 会话已关闭（下播/断流）→ 自动切回屏幕；
   // 24 字节 = 缓冲欠载或帧未变 → 沿用上一帧（流帧率低于 30fps 属正常现象）。
+  // 例外：刷新（重连）进行中不收 0 字节——那时后端正在换会话，详见下面分支。
   async function refreshLiveFrame() {
     const s = activeSession();
     // 无会话（选中的未开播房间 / 连线中）：保持封面占位，不在此退出
@@ -2343,6 +2369,13 @@
     });
     if (!(buf instanceof ArrayBuffer)) throw new Error('直播数据异常');
     if (buf.byteLength === 0) {
+      // 刷新（重连）进行中：0 字节是过渡态，不是下播。后端重连时旧会话留在池里当
+      // 占位（见 live/session.rs 的 stop_old_for_reconnect），但旧解码线程若恰好在失败
+      // 清理里调用 remove_session_if，占位仍可能被抢先移除，这段窗口取帧就回 NoSession。
+      // 此时按「已下播」处理会 closeLive()——把正在看的这一路从列表删掉、焦点跳到别的
+      // 房间，正是「刷新就失去当前直播间」。刷新真失败由 refreshStage 的 catch 收尾，
+      // 这里只保留上一帧，等新会话就绪。
+      if (stageRefreshing) return false;
       // 该会话已结束（下播/断流）：从列表移除，回退到剩余会话或屏幕。
       closeLive(s.id);
       log('直播间 ' + s.room + ' 已结束', 'info');
@@ -3013,18 +3046,18 @@
   // ---------- 画面刷新（右下角按钮）：只重连**当前这一路**画面源 ----------
   //
   // 作用范围严格限定在当前画面源本身：
-  //   数据源层：直播 → 重发 live_start（后端 start() 对同一 id 先停旧会话再建新会话，
-  //     即解析/连接/解码全部重来），并就地更新会话信息 + 房间元数据；后端会保留该
-  //     会话原本的前台身份，不会把别的直播间挤成前台。
+  //   数据源层：直播 → 重发 live_start（后端 start() 对同一 id 只停旧解码线程、把旧
+  //     会话留作占位，等新会话首帧就绪再替换，即解析/连接/解码全部重来），并就地更新
+  //     会话信息 + 房间元数据；后端会保留该会话原本的前台身份，不会把别的直播间挤成
+  //     前台。重连窗口内取帧回 24 字节（Empty）而非 0 字节，画面沿用上一帧不闪断。
   //     桌面 → set_preview_active 关再开，清掉预览关注区，帧总线下一帧必然重拷。
   //   呈现层：srcCanvas 丢弃 + viewDirty，下一帧必然是整幅重绘（不会拿旧垫底帧混画）。
   //
   // **不重置视图**：缩放与平移由用户自己调，刷新画面不该把视口拉回居中（那等于
   // 把用户刚调好的取景范围丢掉）。想回中请用右上角的「重置视图」按钮。
   // **不切换当前直播间**：刷新的是「我现在看的这一路」，刷完仍停在这一路。
-  // 直播重连失败时本地丢弃该会话并回退，避免永久停在封面占位上。
+  // 直播重连失败时**不丢焦点**：只退掉这一路的会话条目、回到封面占位（见下面的失败分支）。
   // 摄像头模式没有「画面源」可刷新，直接忽略。
-  let stageRefreshing = false;
   async function refreshStage() {
     if (cameraMode || stageRefreshing) return;
     stageRefreshing = true;
@@ -3041,7 +3074,13 @@
       previewErrShown = false;
       if (liveOn()) {
         const s = activeSession();
-        if (!s) { exitLiveMode(); return; }
+        if (!s) {
+          // 封面占位态（未开播 / 上一次重连失败）：刷新 = 重连这一路，而不是退回桌面。
+          const room = liveRooms.find((r) => (r.platform + ':' + r.room) === activeLiveId);
+          if (!room) { exitLiveMode(); return; }
+          await connectLive(room.platform, room.room, room.note || '');
+          return;
+        }
         // 不盖封面：刷新时画面上还留着上一帧，盖封面会闪一下（用户只是想清掉花屏/
         // 卡顿，不想看自己的画面消失再出现）。真连不上时由下面的失败分支处理。
         const info = await invoke('live_start', { platform: s.platform, room: s.room });
@@ -3065,7 +3104,9 @@
       log('刷新失败: ' + e, 'error');
       if (liveOn()) {
         const s = activeSession();
-        if (s) closeLive(s.id);   // 重连失败：丢弃会话，回到桌面或剩余会话
+        // 重连失败：**不丢焦点**。只退掉这一路的会话条目，画面回到封面占位
+        //（「直播中，等待画面…」），房间仍在列表、仍是当前选中，可再点一次刷新重连。
+        if (s) abandonLiveSession(s.id);
       }
     } finally {
       if (btn) btn.classList.remove('spin');

@@ -146,28 +146,69 @@ pub(super) fn take_all_sessions() -> Vec<Arc<LiveSession>> {
 }
 
 /// 启动直播会话（解析流地址 + 启动解码线程，阻塞至拿到首帧或超时）。
-/// 多路监控：同一房间（同平台）重复调用则替换旧会话；超过 MAX_SESSIONS 报错。
+/// 多路监控：同一房间（同平台）重复调用即**重连**——旧会话保留在池里当占位，
+/// 直到新会话拿到首帧才被替换；超过 MAX_SESSIONS 报错。
+///
+/// 重连准备：停掉同房间的旧会话，但**把它留在会话池里当占位**，返回该占位句柄。
+///
+/// 为什么不能在这里 remove_session（「刷新就丢掉当前直播间」的根因）：新会话要等首帧才
+/// insert_session（通常 1~4 秒，超时 15 秒），这段窗口里 get_session 返回 None →
+/// crop_frame 回 NoSession → capture_live_frame 回 0 字节，而前端协议里「0 字节 = 会话已
+/// 结束」→ closeLive() 把当前直播间从列表删掉、焦点跳到别的房间或桌面。刷新于是变成
+/// 「退出当前直播间」。留着占位：队列里剩的旧帧照常播出，榨干后 crop_frame 回 Empty
+/// （24 字节）→ 前端沿用上一帧，正是刷新期间想要的观感。
+pub(super) fn stop_old_for_reconnect(key: &str) -> Option<Arc<LiveSession>> {
+    let old = get_session(key);
+    if let Some(o) = &old {
+        o.stop.store(true, Ordering::SeqCst);
+    }
+    old
+}
+
+/// 重连失败（解析失败/线程启动失败/超时/取消）的统一出口：清掉占位会话后返回错误。
+///
+/// 占位必须清掉，否则会留下一个永远不出帧的僵尸会话（前端一直停在上次画面）；
+/// 但只在**池里仍是这个占位**时才删，避免误删并发新建的会话。
+fn reconnect_failed(
+    key: &str,
+    placeholder: &Option<Arc<LiveSession>>,
+    msg: String,
+) -> Result<SessionInfo, String> {
+    if let Some(o) = placeholder {
+        let mut guard = lock_sessions();
+        if let Some(map) = guard.as_mut() {
+            if map.get(key).is_some_and(|cur| Arc::ptr_eq(cur, o)) {
+                map.remove(key);
+            }
+        }
+    }
+    Err(msg)
+}
+
 pub async fn start(platform: Platform, room: String) -> Result<SessionInfo, String> {
     let key = session_key(platform, &room);
     // 该会话此前是否就是「当前前台会话」：重连要沿用这个身份，而不是无条件抢占前台
     // （否则刷新一个非前台直播间会把它切成前台，正在看的那一路被暂停）。
     let was_active = active_id().as_deref() == Some(key.as_str());
-    // 同房间已存在：先停旧会话（重连语义）。
-    if let Some(old) = remove_session(&key) {
-        old.stop.store(true, Ordering::SeqCst);
-    }
-    if session_count() >= MAX_SESSIONS {
+    // 同房间已存在 → 重连：停旧解码线程，但保留占位（见 stop_old_for_reconnect）。
+    let old = stop_old_for_reconnect(&key);
+    // 重连同一房间不新增会话，占位不占上限名额。
+    if old.is_none() && session_count() >= MAX_SESSIONS {
         return Err(format!("同时监控的直播间已达上限（{MAX_SESSIONS} 个）"));
     }
     // 初始校验：房间可解析、可开播（失败快速反馈给前端）；
     // 实际拉流地址由解码线程每次连接/重连时重新获取（新 expires，自愈临时故障）。
     match platform {
         Platform::Bilibili => {
-            resolve_stream(&room, 10000).await?;
+            if let Err(e) = resolve_stream(&room, 10000).await {
+                return reconnect_failed(&key, &old, e);
+            }
         }
         Platform::Douyin => {
             // 仅做一次解析校验（能否拿到流）；实际拉流由解码线程每次重连时重新解析。
-            crate::douyin::resolve(&room).await?;
+            if let Err(e) = crate::douyin::resolve(&room).await {
+                return reconnect_failed(&key, &old, e);
+            }
         }
     }
     let stop = Arc::new(AtomicBool::new(false));
@@ -186,10 +227,12 @@ pub async fn start(platform: Platform, room: String) -> Result<SessionInfo, Stri
         fail.clone(),
         paused.clone(),
     );
-    std::thread::Builder::new()
+    if let Err(e) = std::thread::Builder::new()
         .name(format!("live-{room}"))
         .spawn(move || decode_loop(platform, room2, stop2, frames2, fail2, paused2))
-        .map_err(|e| format!("解码线程启动失败: {e}"))?;
+    {
+        return reconnect_failed(&key, &old, format!("解码线程启动失败: {e}"));
+    }
     // 等首帧（流建立 + 关键帧到达，通常 1~4 秒）。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -245,19 +288,23 @@ pub async fn start(platform: Platform, room: String) -> Result<SessionInfo, Stri
             }
         }
         if stop.load(Ordering::SeqCst) {
-            return Err("直播会话已被取消".to_string());
+            return reconnect_failed(&key, &old, "直播会话已被取消".to_string());
         }
         // 解码线程回报致命失败：立即返回明确错误，不必干等 15 秒超时。
         if let Some(reason) = fail.lock().unwrap_or_else(PoisonError::into_inner).take() {
             stop.store(true, Ordering::SeqCst);
-            return Err(reason);
+            return reconnect_failed(&key, &old, reason);
         }
         if tokio::time::Instant::now() >= deadline {
             stop.store(true, Ordering::SeqCst);
-            return Err(format!(
-                "{}直播间 {room} 连接超时（15 秒内未取到画面）",
-                platform.label()
-            ));
+            return reconnect_failed(
+                &key,
+                &old,
+                format!(
+                    "{}直播间 {room} 连接超时（15 秒内未取到画面）",
+                    platform.label()
+                ),
+            );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

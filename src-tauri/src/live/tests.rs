@@ -4,17 +4,22 @@
 //! 档位降级链。曾经的三个真实缺陷（队列丢帧、AVCC 越界、档位降级静默失效）都落在
 //! 这里，且都不是编译期能发现的。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use super::bili::{build_qn_chain, parse_accept_qn};
-use super::decode::push_decoded;
+use super::bili::{build_qn_chain, parse_accept_qn, Platform};
+use super::decode::{push_decoded, remove_session_if};
 use super::frames::{
     avcc_config_to_annexb, avcc_to_annexb, scan_output_size, Frames, FRAME_BUFFER_MAX,
     SCAN_MAX_LONG_SIDE,
 };
+use super::meta::RoomMeta;
 use super::preview::{crop_frame, FrameOut};
+use super::session::{
+    get_session, insert_session, remove_session, session_key, stop_old_for_reconnect, LiveSession,
+};
 use crate::decode::DecodedFrame;
 
 fn nal(data: &[u8]) -> Vec<u8> {
@@ -181,4 +186,83 @@ fn crop_frame_without_session_reports_no_session() {
         crop_frame("bilibili:0", 0, 0, 0, 0, 320),
         FrameOut::NoSession
     ));
+}
+
+/// 解码线程的失败清理（remove_session_if）**不得**移除已置停止位的会话——
+/// 重连占位正是靠停止位存活到新会话首帧就绪。
+#[test]
+fn failed_cleanup_keeps_stopped_placeholder() {
+    let key = session_key(Platform::Bilibili, "999999996");
+    let s = dummy_session(&key, true); // stop=true：正被重连或停止命令收尾
+    insert_session(key.clone(), s.clone());
+    remove_session_if(&s.frames);
+    let kept = get_session(&key).is_some();
+    remove_session(&key);
+    assert!(kept, "已停止的会话（重连占位）不能被解码线程的失败清理移除");
+}
+
+/// 正常失败（stop=false）时解码线程仍必须能自清理，否则会留下永不出帧的僵尸会话。
+#[test]
+fn failed_cleanup_removes_live_session() {
+    let key = session_key(Platform::Bilibili, "999999995");
+    let s = dummy_session(&key, false);
+    insert_session(key.clone(), s.clone());
+    remove_session_if(&s.frames);
+    let gone = get_session(&key).is_none();
+    remove_session(&key); // 兜底清理，避免影响其它用例
+    assert!(gone, "正常失败路径必须自清理会话");
+}
+
+/// 构造一个不接任何流的伪造会话（队列空、无元数据），只用于验证会话池语义。
+fn dummy_session(key: &str, stopped: bool) -> Arc<LiveSession> {
+    Arc::new(LiveSession {
+        id: key.to_string(),
+        stop: Arc::new(AtomicBool::new(stopped)),
+        paused: Arc::new(AtomicBool::new(false)),
+        frames: Arc::new(Mutex::new(Frames {
+            queue: std::collections::VecDeque::new(),
+            latest: None,
+            scan_cache: None,
+            next_seq: 0,
+        })),
+        room: key.split(':').nth(1).unwrap_or("0").to_string(),
+        platform: Platform::Bilibili,
+        last_view: Mutex::new(None),
+        last_sent: Mutex::new(None),
+        meta: Mutex::new(RoomMeta::default()),
+    })
+}
+
+/// 回归：刷新（重连）时旧会话必须**留在会话池里当占位**，不能一上来就移除。
+///
+/// 曾经的 start() 先 remove_session(&key)，而新会话要等首帧才 insert_session（1~4 秒），
+/// 这段窗口内 crop_frame 回 NoSession → capture_live_frame 回 0 字节 → 前端按「0 字节
+/// = 已下播」处理 → closeLive() 把当前直播间从列表删掉并切换焦点。刷新于是变成退出。
+#[test]
+fn reconnect_keeps_old_session_as_placeholder() {
+    let key = session_key(Platform::Bilibili, "999999998");
+    let s = dummy_session(&key, false);
+    insert_session(key.clone(), s.clone());
+    let old = stop_old_for_reconnect(&key);
+    assert!(old.is_some(), "同房间重连必须认领旧会话");
+    assert!(s.stop.load(Ordering::SeqCst), "旧解码线程必须被停掉");
+    assert!(
+        get_session(&key).is_some(),
+        "旧会话必须留在池里：移除会让刷新窗口内的取帧变成 0 字节，前端据此关掉当前直播间"
+    );
+    remove_session(&key);
+}
+
+/// 占位会话（已停、队列空）的取帧语义必须是 Empty（24 字节 → 前端沿用上一帧），
+/// 不能是 NoSession（0 字节 → 前端关掉当前直播间）。
+#[test]
+fn stopped_placeholder_reports_empty_not_no_session() {
+    let key = session_key(Platform::Bilibili, "999999997");
+    insert_session(key.clone(), dummy_session(&key, true));
+    let out = crop_frame(&key, 0, 0, 0, 0, 320);
+    remove_session(&key);
+    assert!(
+        matches!(out, FrameOut::Empty),
+        "无帧的占位会话必须回 Empty，否则前端会把刷新当成下播"
+    );
 }

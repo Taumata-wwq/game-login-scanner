@@ -217,6 +217,12 @@ pub(super) fn decode_loop(
 
 /// 仅当会话池中仍是本线程对应的会话时移除（防止误删同房间重建的新会话）。
 /// 用 frames 指针匹配：解码线程只持有自己那帧总线的引用。
+///
+/// **停止位为 true 的会话一律不碰**：stop 表示「该会话正被 start()（重连占位）或停止
+/// 命令收尾」，收尾由那两处显式 remove_session 负责。解码线程在失败清理里抢先移除会
+/// 把重连占位抽掉 → 新会话首帧到达前取帧回 NoSession（0 字节）→ 前端按「已下播」关掉
+/// 当前直播间（「刷新就失去当前直播间」的第二条路径，与 start() 原来那次 remove 同源）。
+/// 本函数所有调用点都在 `if stop.load() { return }` 之后，正常流程不会命中该分支。
 pub(super) fn remove_session_if(frames: &Arc<Mutex<Frames>>) {
     let matched_key = {
         let mut sessions = lock_sessions();
@@ -225,7 +231,7 @@ pub(super) fn remove_session_if(frames: &Arc<Mutex<Frames>>) {
         };
         let k = map
             .iter()
-            .find(|(_, s)| Arc::ptr_eq(&s.frames, frames))
+            .find(|(_, s)| Arc::ptr_eq(&s.frames, frames) && !s.stop.load(Ordering::SeqCst))
             .map(|(k, _)| k.clone());
         if let Some(k) = &k {
             map.remove(k);
