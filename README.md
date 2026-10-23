@@ -84,11 +84,22 @@ pwsh -File scripts/android/build-android.ps1 -CopyToDist
 ```powershell
 cd src-tauri
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test                 # 114 passed
+cargo clippy --all-targets -- -D warnings
+cargo test                      # 见 CI 输出统计
+cd ..
+node --test tests-js/           # 前端纯逻辑：白名单/渠道表直接与 Rust 源码对照
 ```
 
-CI 另含：Android 构建脚本语法检查、Kotlin↔Rust JNI 契约检查。
+Android 侧另有两条**本地**门禁（CI 无法执行，原因见下）：
+
+```powershell
+pwsh -File scripts/android/check-kotlin.ps1   # 1~3 分钟：patch-gen + 只编译 Kotlin
+pwsh -File scripts/android/smoke.ps1          # 真机：装包 → 启动 → 崩溃断言 → 截图
+```
+
+> 为什么 Android 编译不进 CI：`vendor/`（UC/OPPO/vivo/腾讯/小米 SDK 约 29 MB）按设计
+> 不入库，而 Kotlin 侧 import 这些 SDK，没有它们的 runner 必然编译失败。所以改为
+> 「本地必跑」的两条脚本，并保留 CI 里不依赖 SDK 的两项：构建脚本语法检查、JNI 契约检查。
 
 ## 目录结构
 
@@ -115,7 +126,11 @@ vendor/                   渠道 SDK 二进制（不入库）
 ## 常见问题
 
 - **直播画面帧率**：显示固定 30fps（帧率设置项已移除）；扫码捕获不受影响，仍按源帧率/最高频率取帧。
-- **OPPO 渠道**：需先在设备上安装「移动服务框架」，否则 SDK 只弹安装提示。
+- **OPPO 渠道**：走 SDK 授权（`doLogin → doGetTokenAndSsoid`），需先在设备上安装
+  「移动服务框架」（`com.heytap.htms`），否则 SDK 只弹安装提示。**未做网页登录**：参考实现
+  的 `OppoWebLoginActivity` 是硬编码 URL 且整包加固，OPPO SDK 内也没有等价的「传 URL 进
+  WebView 再取 ssoid」接口（3 个 dex 中 `/oauth`、`redirect_uri`、`ssoid=` 模板均 0 命中），
+  故无法在不猜测参数的前提下复刻。
 - **B 服 / 原神等**：B 服仅崩坏3 实测通过，其余米哈游游戏同源但未实测。
 - **Windows N/K 版**：需安装「媒体功能包」，否则 H.264 解码不可用（应用会给出明确提示）。
 

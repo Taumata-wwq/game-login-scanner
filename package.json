@@ -3,7 +3,9 @@
   "version": "0.3.3",
   "private": true,
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:js": "node --test tests-js/",
+    "test:js:direct": "node tests-js/core.test.js"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

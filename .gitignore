@@ -43,6 +43,8 @@ node_modules/
 /.workbuddy/
 
 # 临时文件
+# 真机冒烟（scripts/android/smoke.ps1）的截图与失败日志输出目录
+/smoke/
 *.log
 *.tmp
 *.json.tmp

@@ -4,6 +4,9 @@
   const invoke = T && T.core ? T.core.invoke : null;
   const listen = T && T.event ? T.event.listen : null;
   const appWindow = T && T.window ? T.window.getCurrentWindow() : null;
+  // 纯逻辑（配置补丁白名单 / 渠道标签 / 时长与错误文本）在 core.js：不碰 DOM，
+  // 由 tests-js/core.test.js 直接单测，并与 Rust 侧定义对照防漂移。
+  const { buildOptionsPatch, CHANNELS_UI, channelUiLabel, channelLabel, acctKey, fmtDuration, isRoomMissingError } = window.GSCore;
 
   let config = null;
   // 并行扫码：每路目标（"screen" / "live:{id}"）独立启停；最多 5 路直播 + 1 路桌面。
@@ -254,8 +257,7 @@
     if (ch === 'hypergryph') return (config.active_hypergryph || {})[g];
     return (config.active_official || {})[g];
   }
-  // 鹰角账号以 phone 作标识；其余以 uid。
-  function acctKey(ch, t) { return ch === 'hypergryph' ? t.phone : t.uid; }
+  // 鹰角账号以 phone 作标识；其余以 uid（acctKey 见 core.js）。
   // 第三方渠道账号（ch 形如 'channel:xiaomi'）。
   function isChannelAcct(ch) { return ch.startsWith('channel:'); }
   // 是否「当前账号」：该游戏该渠道的激活标识匹配。
@@ -290,28 +292,7 @@
     // 有备注名时显示「备注名（原名）」。
     return t.alias ? (t.alias + '（' + base + '）') : base;
   }
-  function channelLabel(ch) {
-    if (ch === 'hypergryph') return '鹰角';
-    if (ch === 'official') return '官服';
-    if (ch.startsWith('channel:')) return channelUiLabel(ch.slice(8));
-    return 'B 服';
-  }
-
-  // ---------- 第三方渠道（渠道登录，Android）----------
-  // 与后端 sdk::channel::CHANNELS 对应——仅列已实现的渠道。
-  const CHANNELS_UI = [
-    { key: 'xiaomi', label: '小米' },
-    { key: 'vivo', label: 'vivo' },
-    { key: 'yyb', label: '应用宝' },
-    { key: 'wegame', label: 'Wegame' },
-    { key: 'huawei', label: '华为' },
-    { key: 'oppo', label: 'OPPO' },
-    { key: 'uc', label: 'UC（九游）' },
-  ];
-  function channelUiLabel(key) {
-    const c = CHANNELS_UI.find((x) => x.key === key);
-    return c ? c.label : key;
-  }
+  // channelLabel / channelUiLabel / CHANNELS_UI 在 core.js（与后端渠道表一一对应）。
 
   // ---------- 游戏（多游戏支持） ----------
   // 各游戏共享同一批账号（同一米游社/B站账号可登录米哈游全系游戏）；
@@ -581,24 +562,12 @@
   }
 
   // 设置项更新：走字段级命令（不整份回写配置），避免与账号类命令并发互相覆盖。
-  // patch 的键名与 set_options 的补丁结构体字段一致（蛇形）。
-  // 白名单必须与后端 OptionsPatch 的字段集合完全一致：漏一个键 = 该开关静默不落盘
-  // （历史上 screen_scan_auto_bg / screen_scan_stop_on_resume / notify_persistent /
-  // notify_live_status 四项就是这样失效的）。失败时回滚镜像并提示，避免 UI 说谎。
+  // patch 的键名与 set_options 的补丁结构体字段一致（蛇形）；白名单在 core.js 的
+  // OPTION_KEYS（由单测与 Rust OptionsPatch 对照）。失败时回滚镜像并提示，避免 UI 说谎。
   async function saveCfg(patch) {
     const prev = config;
     config = Object.assign({}, config, patch);
-    const args = {};
-    if ('auto_login_last' in patch) args.auto_login_last = patch.auto_login_last;
-    if ('always_on_top' in patch) args.always_on_top = patch.always_on_top;
-    if ('auto_close' in patch) args.auto_close = patch.auto_close;
-    if ('stop_others_on_scan_success' in patch) args.stop_others_on_scan_success = patch.stop_others_on_scan_success;
-    if ('auto_check_update' in patch) args.auto_check_update = patch.auto_check_update;
-    if ('display_name' in patch) args.display_name = patch.display_name;
-    if ('screen_scan_auto_bg' in patch) args.screen_scan_auto_bg = patch.screen_scan_auto_bg;
-    if ('screen_scan_stop_on_resume' in patch) args.screen_scan_stop_on_resume = patch.screen_scan_stop_on_resume;
-    if ('notify_persistent' in patch) args.notify_persistent = patch.notify_persistent;
-    if ('notify_live_status' in patch) args.notify_live_status = patch.notify_live_status;
+    const args = buildOptionsPatch(patch);
     try {
       await invoke('set_options', { patch: args });
     } catch (e) {
@@ -1696,15 +1665,6 @@
     sub.textContent = parts.join(' · ');
   }
 
-  // 开播时长文本（H:MM:SS）。
-  function fmtDuration(start) {
-    if (!start || start <= 0) return '';
-    const secs = Math.max(0, Math.floor(Date.now() / 1000) - start);
-    const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
-    const p = (n) => String(n).padStart(2, '0');
-    return h + ':' + p(m) + ':' + p(s);
-  }
-
   // 已保存直播间列表（来自 config.live_history，含元数据缓存；含未开播）。
   let liveRooms = [];
 
@@ -1713,14 +1673,6 @@
   //   missing：服务端明确回「房间不存在」——显示「房间不存在，请检查」。
   // 只为**确实在拉取**或**确认不存在**的房间留痕；取到数据即删除条目（恢复正常渲染）。
   const roomFetchState = new Map();
-  // 判定「房间不存在」的错误特征：后端 get_info 返回 code=1 时消息为「未找到该房间」，
-  // 抖音侧为「房间不存在」。仅这些**终态**错误才落到 missing；网络/风控等瞬时失败
-  // 不应误报成「房间不存在」，故保持正常渲染（沿用缓存/占位）。
-  function isRoomMissingError(msg) {
-    const s = String(msg || '');
-    return /未找到该房间|房间不存在|code=1（|code=1\(/.test(s);
-  }
-
   // 拉取已保存直播间列表（含元数据缓存），保持本地顺序（避免点击后跳序）。
   async function reloadLiveRooms() {
     try {
