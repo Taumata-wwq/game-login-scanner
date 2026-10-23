@@ -291,6 +291,14 @@
   }
   .about-foot .spacer { flex: 1 1 auto; }
   .about-foot .btn { height: 26px; padding: 0 12px; }
+  /* 检查更新按钮的双份布局（同一动作，按视口二选一）：
+     桌面端放在标题行右侧（#btnCheckUpdateHead，紧跟在版本号之后靠右）；
+     移动端仍在底行（#btnCheckUpdate，标题行在手机上放不下这颗按钮）。
+     默认（桌面）隐藏底行那颗、显示标题行那颗，移动端在下方 html.mobile 块里反过来。 */
+  #btnCheckUpdateHead { height: 24px; padding: 0 10px; font-size: 11px; flex: 0 0 auto; }
+  .about-foot.mb-only { display: none; }
+  html.mobile #btnCheckUpdateHead { display: none; }
+  html.mobile .about-foot.mb-only { display: flex; }
   /* 「关于」按钮右对齐：底栏的 spacer 负责撑开。.spacer 只有 header/.dhead/vp-info
      等处的专属规则，没有全局通用规则——此前 .tools-about-bar 里的 spacer 拿不到
      flex:1，「关于」就紧跟在版本号后面，看起来是左对齐。 */
@@ -638,8 +646,14 @@
      取 min(66.67vw, 52vh)：竖屏仍由宽度决定（比例不变），横屏改由高度决定，
      预览缩小居中、账号区与底部栏都留在屏内。 */
   html.mobile .vp-stage { width: 100% !important; height: min(66.6667vw, 52vh) !important; }
-  /* 移动端空闲（无预览）时隐藏 fps / 重置浮标。 */
-  html.mobile .vp-stage .fps, html.mobile .vp-stage .region-reset { display: none; }
+  /* 移动端同样保留左上 fps 与右上「重置视图」：与桌面端一致，便于在手机上拖拽/缩放
+     后一键回中，也能直接看到当前画面帧率。两者是浮层（position:absolute），不占布局。 */
+  html.mobile .vp-stage .fps,
+  html.mobile .vp-stage .region-reset { display: grid; }
+  /* 手指点按的命中面积比鼠标大：移动端把这两个浮标放大到 28px（视觉图标不变）。 */
+  html.mobile .vp-stage .fps { height: 24px; padding: 0 8px; font-size: 11px; left: 8px; top: 8px; }
+  html.mobile .vp-stage .region-reset { width: 28px; height: 28px; right: 8px; top: 8px; }
+  html.mobile .vp-stage .vp-refresh { width: 30px; height: 30px; right: 8px; bottom: 8px; }
   /* 移动端隐藏"窗口置顶"设置项（无意义）。 */
   html.mobile #alwaysOnTop { display: none; }
   html.mobile .opt-row:has(#alwaysOnTop) { display: none; }

@@ -149,6 +149,9 @@ pub(super) fn take_all_sessions() -> Vec<Arc<LiveSession>> {
 /// 多路监控：同一房间（同平台）重复调用则替换旧会话；超过 MAX_SESSIONS 报错。
 pub async fn start(platform: Platform, room: String) -> Result<SessionInfo, String> {
     let key = session_key(platform, &room);
+    // 该会话此前是否就是「当前前台会话」：重连要沿用这个身份，而不是无条件抢占前台
+    // （否则刷新一个非前台直播间会把它切成前台，正在看的那一路被暂停）。
+    let was_active = active_id().as_deref() == Some(key.as_str());
     // 同房间已存在：先停旧会话（重连语义）。
     if let Some(old) = remove_session(&key) {
         old.stop.store(true, Ordering::SeqCst);
@@ -217,8 +220,15 @@ pub async fn start(platform: Platform, room: String) -> Result<SessionInfo, Stri
                             meta: Mutex::new(meta.clone()),
                         }),
                     );
-                    // 新会话默认置为前台（恢复拉流），暂停其余（同时只前台 1 路）。
-                    set_active(&id);
+                    // 前台归属：重连**原本就在前台**的那一路 → 保持（不动 ACTIVE_ID）；
+                    // 全新会话 → 置为前台（同时只前台 1 路，扫码保活者不受影响）。
+                    // 若重连的是非前台会话，绝不能 set_active——那会把用户正在看的画面
+                    // 暂停掉，「刷新当前直播间」于是变成「跳到另一个直播间」。
+                    if was_active {
+                        refresh_paused();
+                    } else {
+                        set_active(&id);
+                    }
                     return Ok(SessionInfo {
                         id,
                         room: room.clone(),

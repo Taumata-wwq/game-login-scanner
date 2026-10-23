@@ -462,6 +462,10 @@
         <div class="about-head">
           <div class="about-title">游戏扫码器</div>
           <div class="about-ver" id="piVer">v…</div>
+          <!-- 桌面端：检查更新紧跟在软件名/版本号右侧、靠右对齐（移动端仍用底行那颗，
+               见下方 .about-foot 与 CSS 的 html.mobile 覆盖）。 -->
+          <span class="spacer"></span>
+          <button class="btn ghost dt-only" id="btnCheckUpdateHead">检查更新</button>
         </div>
         <div class="about-line">
           作者 <a class="pi-link" data-url="https://github.com/Taumata-wwq">Taumata-wwq</a> ·
@@ -481,8 +485,8 @@
         <div class="about-line pi-warn">
           仅用于登录本人游戏账号，请勿用于非授权用途；「操作过于频繁」等提示为服务端正常限流，稍后重试。
         </div>
-        <!-- 底部操作行：检查更新右对齐、置于最下面一行（与设置里的按钮同规格）。 -->
-        <div class="about-foot">
+        <!-- 底部操作行：仅移动端显示（手机屏幕窄，标题行放不下这颗按钮）。 -->
+        <div class="about-foot mb-only">
           <span class="spacer"></span>
           <button class="btn ghost" id="btnCheckUpdate">检查更新</button>
         </div>

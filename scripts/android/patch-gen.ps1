@@ -392,6 +392,11 @@ class MainActivity : TauriActivity() {
     override fun onDestroy() {
         // 清掉静态回调，避免 Activity 重建后旧实例被 NotifyBridge 持有而泄漏。
         NotifyBridge.clearStopScanCallback()
+        // 用户从「最近任务」划掉应用（或系统回收）时任务被移除、界面不复存在，
+        // 常驻通知若继续留着就再无意义——既没有扫码在跑，也没法点回去。
+        // 注意 Activity 没有 onTaskRemoved（那是 Service 的回调）；划掉任务时
+        // 走的正是 onDestroy，因此兜底放这里。按 Home 键只是 onStop，不受影响。
+        NotifyBridge.hidePersistent()
         super.onDestroy()
     }
 }

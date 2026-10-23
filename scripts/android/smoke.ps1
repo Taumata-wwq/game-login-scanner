@@ -21,6 +21,7 @@ param(
     [int]$LaunchTimeoutSec = 25,
     [int]$ObserveSec = 6,
     [switch]$SkipInstall,
+    [switch]$SkipNotifCheck,
     [switch]$KeepScreenOn
 )
 
@@ -161,6 +162,25 @@ if ($RequireText.Count -gt 0) {
     foreach ($t in $RequireText) { if ($ui -notmatch [regex]::Escape($t)) { $missing += $t } }
     if ($missing.Count -gt 0) { Fail ("界面上找不到：{0}" -f ($missing -join ", ")) }
     Info ("文案齐全：{0}" -f ($RequireText -join " / "))
+}
+
+# ---- 通知断言：无扫码任务时必须没有常驻通知 ----
+# 背景：常驻通知是 ongoing 的（用户划不掉），若在「没有扫码」时还留着，就变成纯噪音。
+# 这里覆盖最典型的一步：应用在后台且没有扫码任务 → 通知数为 0。
+# 注意要先把已有通知清掉，否则上一次运行留下的会干扰计数。
+if (-not $SkipNotifCheck) {
+    Step "通知断言（无扫码 → 无常驻通知）"
+    [void](Adb shell cmd notification cancel_all 2>$null)
+    Start-Sleep -Milliseconds 500
+    [void](Adb shell input keyevent 3)      # KEYCODE_HOME：切后台但不销毁
+    Start-Sleep -Seconds 3
+    $notifDump = Adb shell dumpsys notification --noredact
+    $cnt = ([regex]::Matches($notifDump, "pkg=$pkg")).Count
+    # 回到前台，避免影响后续步骤与用户
+    [void](Adb shell am start -n $activity)
+    Start-Sleep -Milliseconds 800
+    if ($cnt -ne 0) { Fail ("没有扫码任务时仍有 {0} 条通知驻留（应撤下）" -f $cnt) }
+    Info "无扫码时通知数 = 0"
 }
 
 # ---- 截图 ----

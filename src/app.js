@@ -1467,20 +1467,22 @@
     return parts;
   }
 
-  /// 同步常驻通知：后台且有扫码任务时显示/更新，否则撤下。
+  /// 同步常驻通知：后台**且确实有扫码任务**时显示/更新，否则撤下。
+  ///
+  /// 只在「有扫码」时驻留：没有扫码任务时通知栏不该占位（用户在后台也没在扫码，
+  /// 这条通知只是噪音，且无法划掉——它是 ongoing 的）。因此无任务时一律 hide。
   function syncPersistentNotification() {
     if (!window.__ANDROID__) return;
-    if (!notifyPersistent || !document.hidden) {
+    const parts = scanStatusText();
+    if (!notifyPersistent || !document.hidden || parts.length === 0) {
       if (persistentNotifyShown) {
         invoke('notify_persistent_hide').catch(() => {});
         persistentNotifyShown = false;
       }
       return;
     }
-    const parts = scanStatusText();
-    const scanning = parts.length > 0;
-    const title = scanning ? '正在扫码' : '扫码器在后台';
-    const text = scanning ? parts.join(' · ') : '当前没有进行中的扫码任务';
+    const title = '正在扫码';
+    const text = parts.join(' · ');
     // 点通知回到应用时尽量定位到"当前在看/在扫的那个直播间"：
     // 优先正在扫的直播目标，其次当前观看的，都没有则只回主界面。
     let openTarget = '';
@@ -3006,14 +3008,18 @@
     ensureViewAnim();
   });
 
-  // ---------- 画面刷新（右下角按钮）：重置当前画面源的全部状态 ----------
+  // ---------- 画面刷新（右下角按钮）：只重连**当前这一路**画面源 ----------
   //
-  // 一次点击 = 三层重置：
-  //   视图层：缩放/平移回中、锚定帧作废、延迟队列清空、错误提示复位；
-  //   呈现层：srcCanvas 丢弃 + viewDirty，下一帧必然是整幅重绘（不会拿旧垫底帧混画）；
-  //   数据源层：直播 → 重发 live_start（后端 start() 对同一 id 是「先停旧会话、
-  //     再建新会话」，即解析/连接/解码全部重来），并就地更新会话信息 + 房间元数据；
+  // 作用范围严格限定在当前画面源本身：
+  //   数据源层：直播 → 重发 live_start（后端 start() 对同一 id 先停旧会话再建新会话，
+  //     即解析/连接/解码全部重来），并就地更新会话信息 + 房间元数据；后端会保留该
+  //     会话原本的前台身份，不会把别的直播间挤成前台。
   //     桌面 → set_preview_active 关再开，清掉预览关注区，帧总线下一帧必然重拷。
+  //   呈现层：srcCanvas 丢弃 + viewDirty，下一帧必然是整幅重绘（不会拿旧垫底帧混画）。
+  //
+  // **不重置视图**：缩放与平移由用户自己调，刷新画面不该把视口拉回居中（那等于
+  // 把用户刚调好的取景范围丢掉）。想回中请用右上角的「重置视图」按钮。
+  // **不切换当前直播间**：刷新的是「我现在看的这一路」，刷完仍停在这一路。
   // 直播重连失败时本地丢弃该会话并回退，避免永久停在封面占位上。
   // 摄像头模式没有「画面源」可刷新，直接忽略。
   let stageRefreshing = false;
@@ -3024,9 +3030,8 @@
     if (btn) btn.classList.add('spin');
     try {
       clearPendingRealtime();
-      view = { scale: 1, fx: 0.5, fy: 0.5 };
-      viewT = { scale: 1, fx: 0.5, fy: 0.5 };
-      ensureViewAnim();
+      // 保留当前视口（view / viewT）与锚定关系：刷新只解决「画面卡住/花屏/掉线」，
+      // 不打断用户的取景。需要回中时由右上角「重置视图」负责。
       liveAnchor = null;
       liveAnchorPrev = null;
       srcCanvas = null;
@@ -3035,7 +3040,8 @@
       if (liveOn()) {
         const s = activeSession();
         if (!s) { exitLiveMode(); return; }
-        showCover(s.id);   // 重取期间回到封面（文案反映真实状态）
+        // 不盖封面：刷新时画面上还留着上一帧，盖封面会闪一下（用户只是想清掉花屏/
+        // 卡顿，不想看自己的画面消失再出现）。真连不上时由下面的失败分支处理。
         const info = await invoke('live_start', { platform: s.platform, room: s.room });
         // 新会话的连接信息（分辨率/时长/标题都可能已变）：就地合并回会话条目，
         // note 等本地字段保留（Object.assign 只覆盖列出的键）。
@@ -3227,12 +3233,15 @@
         b.addEventListener('click', () => { aboutOverlay.hidden = true; });
       }
     });
-    const btnAboutUpdate = aboutOverlay && aboutOverlay.querySelector('#btnCheckUpdate');
-    if (btnAboutUpdate) {
-      btnAboutUpdate.addEventListener('click', () => {
-        log('正在检查更新…', 'info');
-        invoke('check_update', { manual: true }).catch((e) => log(String(e), 'error'));
-      });
+    // 两颗「检查更新」按钮：桌面端在标题行（#btnCheckUpdateHead），移动端在底行
+    // （#btnCheckUpdate）。同一个动作，按视口只显示其中一颗（见 CSS 的 dt-only / mb-only）。
+    const doCheckUpdate = () => {
+      log('正在检查更新…', 'info');
+      invoke('check_update', { manual: true }).catch((e) => log(String(e), 'error'));
+    };
+    for (const id of ['btnCheckUpdateHead', 'btnCheckUpdate']) {
+      const b = aboutOverlay && aboutOverlay.querySelector('#' + id);
+      if (b) b.addEventListener('click', doCheckUpdate);
     }
     const dn = $('displayName');
     dn.addEventListener('change', () => saveCfg({ display_name: dn.value.trim() }));
@@ -3672,6 +3681,8 @@
       updateVpInfo();
       renderScan();
       startCamera();
+      // 取景本身也是一路「在扫码」：常驻通知要跟着出现（用户随后会切到游戏里）。
+      syncPersistentNotification();
     }
     window.exitCameraMode = function exitCameraMode() {
       if (!cameraMode) return;
@@ -3681,6 +3692,8 @@
       if (camBtn) camBtn.classList.remove("on");
       renderScan();
       updateVpInfo();
+      // 退出取景：若已无其它扫码任务，通知必须立刻撤下（不能再占着通知栏）。
+      syncPersistentNotification();
       const finish = () => {
         if (acctArea) acctArea.style.height = "";
         mobileRoot.classList.remove("m-camera");
