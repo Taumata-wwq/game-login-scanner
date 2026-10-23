@@ -92,14 +92,15 @@ jobs:
       - name: Android 目标 cargo check
         shell: pwsh
         run: |
-          $ndk = "$env:ANDROID_NDK_HOME"
+          # 用正斜杠拼路径：PowerShell 完全接受，也避免 YAML/转义层面的坑。
+          $sdk = $env:ANDROID_SDK_ROOT
+          $ndk = $env:ANDROID_NDK_HOME
           if (-not $ndk) {
-            $ndk = (Get-ChildItem "$env:ANDROID_SDK_ROOT
-dk" -Directory -ErrorAction SilentlyContinue |
+            $ndk = (Get-ChildItem (Join-Path $sdk "ndk") -Directory -ErrorAction SilentlyContinue |
               Sort-Object Name -Descending | Select-Object -First 1).FullName
           }
-          if (-not $ndk) { Write-Host "::error::找不到 NDK（ANDROID_NDK_HOME / ANDROID_SDK_ROOT\ndk 均不可用）"; exit 1 }
-          $tc = Join-Path $ndk "toolchainsllvmprebuiltwindows-x86_64in"
+          if (-not $ndk) { Write-Host "::error::找不到 NDK"; exit 1 }
+          $tc = Join-Path $ndk "toolchains/llvm/prebuilt/windows-x86_64/bin"
           $cc = Join-Path $tc "aarch64-linux-android24-clang.cmd"
           if (-not (Test-Path $cc)) { Write-Host "::error::缺少 NDK clang：$cc"; exit 1 }
           $env:PATH = "$tc;$env:PATH"
