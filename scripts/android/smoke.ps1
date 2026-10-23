@@ -22,6 +22,7 @@ param(
     [int]$ObserveSec = 6,
     [switch]$SkipInstall,
     [switch]$SkipNotifCheck,
+    [switch]$SkipScreenShareCheck,
     [switch]$KeepScreenOn
 )
 
@@ -181,6 +182,45 @@ if (-not $SkipNotifCheck) {
     Start-Sleep -Milliseconds 800
     if ($cnt -ne 0) { Fail ("没有扫码任务时仍有 {0} 条通知驻留（应撤下）" -f $cnt) }
     Info "无扫码时通知数 = 0"
+}
+
+# ---- 屏幕共享：任务移除后必须停止捕获并撤下通知 ----
+# 背景：屏幕扫码用的是**前台服务**（MediaProjection 强制要求）。前台服务不会随
+# 「最近任务划掉」自动结束，于是「正在共享屏幕以识别登录二维码」的通知会一直挂着，
+# 系统投屏指示也不消失。修法是在服务里实现 onTaskRemoved() 主动收尾（见
+# ScreenCaptureService.kt）。这里用 AMS 的 removeTask 复刻系统划掉任务的同一路径，
+# 断言任务/服务/通知三者都清空。
+if (-not $SkipScreenShareCheck) {
+    Step "屏幕共享断言（移除任务 → 捕获停止 + 通知清空）"
+    [void](Adb shell am start -n $activity)
+    Start-Sleep -Seconds 3
+    # 点「扫描屏幕」（左下角方框按钮）→ 系统授权框「立即开始」
+    [void](Adb shell input tap 110 2280)
+    Start-Sleep -Seconds 3
+    [void](Adb shell input tap 860 1546)
+    Start-Sleep -Seconds 5
+
+    $svcOn = ([regex]::Matches((Adb shell dumpsys activity services $pkg), "ScreenCaptureService")).Count
+    $notiOn = ([regex]::Matches((Adb shell dumpsys notification --noredact), "pkg=$pkg.*screen-capture")).Count
+    if ($svcOn -lt 1) { Fail "屏幕共享未启动（服务数 $svcOn）——授权框可能没点到，或按钮位置变了" }
+    Info ("共享已开启：服务 {0} / screen-capture 通知 {1}" -f $svcOn, $notiOn)
+
+    # 复刻「最近任务划掉」：AMS removeTask 是系统划掉任务时调用的同一入口。
+    $tid = ([regex]::Match((Adb shell dumpsys activity activities), "Task\{\S+ #(\d+) type=standard A=\d+:($pkg)")).Groups[1].Value
+    if (-not $tid) { Fail "找不到本应用 taskId" }
+    [void](Adb shell service call activity_task 21 i32 $tid)
+    Start-Sleep -Seconds 4
+
+    $svcAfter = ([regex]::Matches((Adb shell dumpsys activity services $pkg), "ScreenCaptureService")).Count
+    $notiAfter = ([regex]::Matches((Adb shell dumpsys notification --noredact), "pkg=$pkg.*screen-capture")).Count
+    $statusAfter = ([regex]::Matches((Adb shell dumpsys notification --noredact), "pkg=$pkg.*scanner_status")).Count
+    if ($svcAfter -ne 0) { Fail "任务已移除但屏幕捕获服务仍在（$svcAfter）" }
+    if ($notiAfter -ne 0) { Fail "任务已移除但「正在共享屏幕」通知仍在（$notiAfter）" }
+    if ($statusAfter -ne 0) { Fail "任务已移除但常驻扫码通知仍在（$statusAfter）" }
+    Info "移除任务后：服务 0 / 共享通知 0 / 常驻通知 0"
+
+    [void](Adb shell am start -n $activity)
+    Start-Sleep -Seconds 3
 }
 
 # ---- 截图 ----

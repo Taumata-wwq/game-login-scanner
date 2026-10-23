@@ -120,6 +120,19 @@ class ScreenCaptureService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // 用户从「最近任务」划掉本应用：任务没了，屏幕共享就没有意义了
+        // ——没有界面可以显示预览，也没有人来停止它。前台服务本身**不会**因
+        // 任务移除而结束（这正是「划掉后通知还挂着」的原因），必须显式收尾。
+        //
+        // 一并停掉预览桥（MainActivity 侧持有的帧回调）与本服务：
+        // stopSelf 会走 onDestroy → cleanup() → 释放 MediaProjection（系统随即
+        // 撤下「正在共享屏幕」的投屏指示）→ 前台通知随之移除。
+        ScreenCaptureBridge.onCaptureStopped()
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         cleanup()
         super.onDestroy()
@@ -327,6 +340,17 @@ class ScreenCaptureService : Service() {
         projection = null
         frameThread?.quitSafely()
         frameThread = null
+        // 显式撤下前台通知并退出前台态。stopSelf() 之后系统通常也会移除，但
+        // 「任务被划掉」这条路径上进程仍可能短暂存活，显式 stopForeground 能保证
+        // 通知立刻消失，而不是等系统回收时才消失（真机实测的残留就是它）。
+        // REMOVE 让通知与服务解绑（不保留为可划掉的普通通知）。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIFICATION_ID)
     }
 
     // ---------- 前台通知 ----------
